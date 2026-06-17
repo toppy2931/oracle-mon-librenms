@@ -59,8 +59,18 @@ body{margin:0;background:#0b1020;color:#dfe6f5;font-family:"Segoe UI","Microsoft
 .pill.yellow{background:#3a2c10;color:#ffc24b}.pill.grey{background:#1c2438;color:#8a99b8}
 .notconf{color:#7b8aa6;font-style:italic;padding:8px 0}
 .err{color:#ff6b78;font-size:12px}
-.updated{padding:6px 22px;color:#5f6f8c;font-size:12px}
+.updated-bar{display:flex;align-items:center;gap:14px;padding:6px 22px;font-size:12px}
+.updated-bar #updated{color:#5f6f8c}
+.updated-bar label{color:#7b8aa6}
+.updated-bar select{background:#16213e;color:#cfe0ff;border:1px solid #2a3d6a;border-radius:4px;padding:2px 6px;font-size:12px;cursor:pointer}
 .empty{padding:40px;text-align:center;color:#7b8aa6}
+.warn-section{margin:0 20px 20px;border:2px solid #e94560;border-radius:8px;padding:16px;display:none}
+.warn-title{color:#ff4d5e;font-weight:700;font-size:14px;margin-bottom:12px;letter-spacing:.5px}
+.warn-item{display:flex;gap:10px;align-items:flex-start;padding:6px 0;border-top:1px solid #2a1a20}
+.warn-item:first-child{border-top:none}
+.warn-host{min-width:120px;font-weight:700;color:#ffc24b;flex-shrink:0}
+.warn-msg{color:#f0c0c8;line-height:1.5}
+.warn-sev-red .warn-host{color:#ff6b78}
 </style>
 </head>
 <body>
@@ -78,8 +88,23 @@ body{margin:0;background:#0b1020;color:#dfe6f5;font-family:"Segoe UI","Microsoft
     </div>
 </div>
 
-<div class="updated" id="updated">載入中…</div>
+<div class="updated-bar">
+    <label for="refresh-sel">刷新間隔：</label>
+    <select id="refresh-sel">
+        <option value="30">30 秒</option>
+        <option value="60" selected>1 分鐘</option>
+        <option value="180">3 分鐘</option>
+        <option value="300">5 分鐘</option>
+        <option value="600">10 分鐘</option>
+        <option value="900">15 分鐘</option>
+    </select>
+    <span id="updated">載入中…</span>
+</div>
 <div class="grid" id="grid"></div>
+<div class="warn-section" id="warn-section">
+    <div class="warn-title">⚠ 警示說明 ／ 異常主機</div>
+    <div id="warn-list"></div>
+</div>
 
 <script>
 const CSRF = document.querySelector('meta[name=csrf-token]').content;
@@ -201,6 +226,78 @@ function card(db){
     </div>`;
 }
 
+// --- 警示生成 ---
+function isoDateFromHoursAgo(hrs){
+    const d = new Date(Date.now() - hrs * 3600000);
+    const p = n => String(n).padStart(2,'0');
+    return `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())}`;
+}
+
+function generateWarnings(dbs){
+    const warns = [];
+    dbs.forEach(db=>{
+        if(!db.enabled || !db.connected) return;
+        const m = db.metrics || {};
+        const label = db.label || db.alias;
+        const sev = statusOf(db);
+
+        const stale = num(m.mview_stale), broken = num(m.mview_jobs_broken), failed = num(m.mview_jobs_failed);
+        const hrs = num(m.mview_oldest_hours);
+        if(stale>0 || broken>0 || failed>0){
+            const dateStr = hrs>0 ? isoDateFromHoursAgo(hrs) : '—';
+            warns.push({label, sev:'red',
+                msg:`Materialized View 刷新已停擺：${fmtInt(stale)} 個全 stale、${fmtInt(broken)} 個 refresh job 中斷／失敗、最舊刷新停在 ${dateStr}`});
+        }
+
+        const dgConf = num(m.dg_configured)===1;
+        if(dgConf && num(m.dg_gap)>0)
+            warns.push({label, sev:'red', msg:`Data Guard Archive Gap = ${num(m.dg_gap)}（Standby 端歸檔日誌缺口未同步）`});
+        if(dgConf && num(m.dg_apply_lag_min)>15)
+            warns.push({label, sev:'yellow', msg:`Data Guard Apply Lag = ${num(m.dg_apply_lag_min)} 分（超過 15 分鐘閾值）`});
+
+        if(num(m.archivelog_mode)===0)
+            warns.push({label, sev:'yellow', msg:'Archivelog 模式關閉（無法做時間點還原）'});
+
+        const io = num(m.invalid_objects);
+        if(io>0) warns.push({label, sev:'yellow', msg:`無效物件 ${fmtInt(io)} 個`});
+
+        if(Array.isArray(m.tablespaces))
+            m.tablespaces.filter(t=>num(t.pct_used)>=90).forEach(t=>
+                warns.push({label, sev:'red', msg:`表空間 ${t.name} 使用率 ${Number(t.pct_used).toFixed(1)}%（≥ 90%）`}));
+    });
+    return warns;
+}
+
+function renderWarnings(warns){
+    const sec = document.getElementById('warn-section');
+    const list = document.getElementById('warn-list');
+    if(!warns.length){ sec.style.display='none'; return; }
+    sec.style.display='block';
+    list.innerHTML = warns.map(w=>
+        `<div class="warn-item warn-sev-${w.sev}">
+            <span class="warn-host">${w.label}</span>
+            <span class="warn-msg">${w.msg}</span>
+        </div>`
+    ).join('');
+}
+
+// --- 刷新間隔控制 ---
+let refreshTimer = null;
+
+function intervalLabel(secs){
+    return secs < 60 ? `${secs} 秒` : `${secs/60} 分鐘`;
+}
+
+function setRefreshInterval(secs){
+    if(refreshTimer) clearInterval(refreshTimer);
+    refreshTimer = setInterval(refresh, secs * 1000);
+}
+
+document.getElementById('refresh-sel').addEventListener('change', function(){
+    setRefreshInterval(parseInt(this.value));
+    refresh();
+});
+
 async function refresh(){
     try{
         const r = await fetch('/oracle-dashboard-data.php', {headers:{'X-CSRF-Token':CSRF}});
@@ -215,13 +312,17 @@ async function refresh(){
         document.getElementById('cnt-grey').textContent = cnt.grey;
         const grid = document.getElementById('grid');
         grid.innerHTML = dbs.length ? dbs.map(card).join('') : '<div class="empty">尚無受監控的資料庫（請至「⚙ 監控管理」新增）</div>';
-        document.getElementById('updated').textContent = '資料更新時間：' + (j.ts||'') + '（每 60 秒自動刷新）';
+        const sel = document.getElementById('refresh-sel');
+        document.getElementById('updated').textContent =
+            '資料更新時間：' + (j.ts||'') + `（每 ${intervalLabel(parseInt(sel.value))} 自動刷新）`;
+        renderWarnings(generateWarnings(dbs));
     }catch(e){
         document.getElementById('updated').innerHTML = '<span class="err">資料讀取錯誤：'+e.message+'</span>';
     }
 }
+
 refresh();
-setInterval(refresh, 60000);
+setRefreshInterval(60);
 </script>
 </body>
 </html>
