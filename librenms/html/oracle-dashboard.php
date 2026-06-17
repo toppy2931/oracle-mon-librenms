@@ -1,0 +1,227 @@
+<?php
+/**
+ * oracle-dashboard.php — Oracle 戰情室即時監控畫面
+ * URL: http://<monitor-vm>/oracle-dashboard.php
+ * 集中呈現所有受監控 Oracle DB 的 Data Guard / Materialized View / 健康 / 效能狀態，
+ * 每 60 秒自動刷新（資料來自 oracle-dashboard-data.php）。
+ */
+
+$init_modules = ['web', 'auth'];
+require realpath(__DIR__ . '/..') . '/includes/init.php';
+
+if (!Auth::check() || !Auth::user()->hasRole('admin')) {
+    header('Location: /');
+    exit;
+}
+
+$csrf_token = csrf_token();
+?>
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="csrf-token" content="<?= htmlspecialchars($csrf_token) ?>">
+<title>Oracle 戰情室 — LibreNMS</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#0b1020;color:#dfe6f5;font-family:"Segoe UI","Microsoft JhengHei",sans-serif;font-size:14px}
+.topbar{display:flex;align-items:center;gap:18px;padding:12px 22px;background:linear-gradient(90deg,#0f3460,#102a4c);border-bottom:3px solid #e94560;position:sticky;top:0;z-index:10}
+.topbar h1{margin:0;font-size:20px;color:#fff;font-weight:700;letter-spacing:1px}
+.topbar a{color:#9fc0ec;text-decoration:none;font-size:13px}
+.topbar a:hover{color:#fff}
+.clock{font-size:18px;color:#cfe0ff;font-variant-numeric:tabular-nums}
+.lights{display:flex;gap:14px;align-items:center;margin-left:auto}
+.light{display:flex;align-items:center;gap:6px;font-size:18px;font-weight:700}
+.dot{width:14px;height:14px;border-radius:50%;display:inline-block;box-shadow:0 0 8px currentColor}
+.red{color:#ff4d5e}.yellow{color:#ffc24b}.green{color:#3ddc84}.grey{color:#7b8aa6}
+.dot.red{background:#ff4d5e}.dot.yellow{background:#ffc24b}.dot.green{background:#3ddc84}.dot.grey{background:#7b8aa6}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(440px,1fr));gap:18px;padding:20px}
+.dbcard{background:#121a30;border:1px solid #1e2c4e;border-radius:8px;overflow:hidden;box-shadow:0 4px 14px rgba(0,0,0,.4)}
+.dbcard.s-red{border-color:#e94560}.dbcard.s-yellow{border-color:#d99a30}.dbcard.s-green{border-color:#1f6b45}
+.dbhead{display:flex;align-items:center;gap:10px;padding:12px 16px;background:#16213e;border-bottom:1px solid #1e2c4e}
+.dbhead .title{font-size:16px;font-weight:700;color:#fff}
+.dbhead .sub{font-size:12px;color:#7b8aa6}
+.dbhead .state{margin-left:auto;font-size:14px;font-weight:700}
+.panels{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:#1e2c4e}
+.panel{background:#101830;padding:12px 14px}
+.panel h4{margin:0 0 8px;font-size:12px;color:#7fa8e0;letter-spacing:.5px;text-transform:uppercase;border-bottom:1px solid #1e2c4e;padding-bottom:5px}
+.panel.full{grid-column:1 / -1}
+.kv{display:flex;justify-content:space-between;padding:2px 0;font-size:13px}
+.kv .k{color:#9aa8c4}.kv .v{font-weight:600;font-variant-numeric:tabular-nums}
+.muted{color:#5f6f8c}
+.bar{height:8px;background:#1c2949;border-radius:4px;overflow:hidden;margin-top:2px}
+.bar>span{display:block;height:100%}
+.tsline{margin-bottom:6px}
+.tsline .lab{display:flex;justify-content:space-between;font-size:12px;color:#9aa8c4}
+.pill{padding:1px 8px;border-radius:10px;font-size:11px;font-weight:700}
+.pill.green{background:#14361f;color:#3ddc84}.pill.red{background:#3a1117;color:#ff6b78}
+.pill.yellow{background:#3a2c10;color:#ffc24b}.pill.grey{background:#1c2438;color:#8a99b8}
+.notconf{color:#7b8aa6;font-style:italic;padding:8px 0}
+.err{color:#ff6b78;font-size:12px}
+.updated{padding:6px 22px;color:#5f6f8c;font-size:12px}
+.empty{padding:40px;text-align:center;color:#7b8aa6}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+    <a href="/">← LibreNMS</a>
+    <h1>🛢 Oracle 資料庫戰情室</h1>
+    <a href="/oracle-admin.php">⚙ 監控管理</a>
+    <span class="clock" id="clock">--:--:--</span>
+    <div class="lights">
+        <span class="light red"><span class="dot red"></span><span id="cnt-red">0</span></span>
+        <span class="light yellow"><span class="dot yellow"></span><span id="cnt-yellow">0</span></span>
+        <span class="light green"><span class="dot green"></span><span id="cnt-green">0</span></span>
+        <span class="light grey"><span class="dot grey"></span><span id="cnt-grey">0</span></span>
+    </div>
+</div>
+
+<div class="updated" id="updated">載入中…</div>
+<div class="grid" id="grid"></div>
+
+<script>
+const CSRF = document.querySelector('meta[name=csrf-token]').content;
+const ROLE = {0:'未知/單機', 1:'PRIMARY', 2:'PHYSICAL STANDBY', 3:'LOGICAL STANDBY'};
+
+function num(v){ return (v===undefined||v===null||v==='') ? 0 : Number(v); }
+function fmtInt(v){ return num(v).toLocaleString(); }
+
+function clock(){
+    const d = new Date();
+    const p = n => String(n).padStart(2,'0');
+    document.getElementById('clock').textContent =
+        `${d.getFullYear()}-${p(d.getMonth()+1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+setInterval(clock, 1000); clock();
+
+// 判斷單台 DB 的號誌狀態
+function statusOf(db){
+    if(!db.enabled) return 'grey';
+    if(!db.connected) return 'red';
+    const m = db.metrics || {};
+    const dgConf = num(m.dg_configured)===1;
+    if(dgConf && num(m.dg_gap)>0) return 'red';
+    const warn =
+        num(m.mview_stale)>0 || num(m.mview_jobs_broken)>0 || num(m.mview_jobs_failed)>0 ||
+        num(m.mview_oldest_hours)>168 ||
+        num(m.archivelog_mode)===0 || num(m.invalid_objects)>0 ||
+        num(m.temp_pct_used)>=90 ||
+        (dgConf && num(m.dg_apply_lag_min)>15) ||
+        (Array.isArray(m.tablespaces) && m.tablespaces.some(t=>num(t.pct_used)>=90));
+    return warn ? 'yellow' : 'green';
+}
+
+function kv(k,v,cls){ return `<div class="kv"><span class="k">${k}</span><span class="v ${cls||''}">${v}</span></div>`; }
+
+function dgPanel(m){
+    if(num(m.dg_configured)!==1){
+        return `<div class="panel"><h4>Data Guard</h4>
+            <div class="kv"><span class="k">角色</span><span class="v">${ROLE[num(m.dg_role)]||'—'}</span></div>
+            <div class="notconf">未設定 Data Guard（無 standby）</div></div>`;
+    }
+    const gap = num(m.dg_gap), lag = num(m.dg_apply_lag_min);
+    return `<div class="panel"><h4>Data Guard</h4>
+        ${kv('角色', ROLE[num(m.dg_role)]||'—')}
+        ${kv('Switchover', num(m.dg_switchover)===1?'<span class="pill green">就緒</span>':'<span class="pill yellow">未就緒</span>')}
+        ${kv('Standby 程序', fmtInt(m.dg_standby_cnt))}
+        ${kv('Archive Gap', gap>0?`<span class="pill red">${gap}</span>`:'<span class="pill green">0</span>')}
+        ${kv('Apply Lag', lag>15?`<span class="pill yellow">${lag} 分</span>`:`${lag} 分`)}
+        ${kv('Log 序號', fmtInt(m.dg_seq_current))}
+    </div>`;
+}
+
+function mvPanel(m){
+    const stale = num(m.mview_stale), broken = num(m.mview_jobs_broken), failed = num(m.mview_jobs_failed);
+    const hrs = num(m.mview_oldest_hours);
+    const days = hrs>0 ? (hrs/24).toFixed(0) : 0;
+    return `<div class="panel"><h4>Materialized View（Snapshot）</h4>
+        ${kv('總數', fmtInt(m.mview_total))}
+        ${kv('過期 (Stale)', stale>0?`<span class="pill red">${fmtInt(stale)}</span>`:'<span class="pill green">0</span>')}
+        ${kv('中斷的 Job', broken>0?`<span class="pill red">${fmtInt(broken)}</span>`:'<span class="pill green">0</span>')}
+        ${kv('失敗的 Job', failed>0?`<span class="pill red">${fmtInt(failed)}</span>`:'<span class="pill green">0</span>')}
+        ${kv('最舊刷新', hrs>0?`<span class="${hrs>168?'red':''}">${days} 天前</span>`:'—')}
+    </div>`;
+}
+
+function healthPanel(m){
+    const arch = num(m.archivelog_mode)===1;
+    const io = num(m.invalid_objects), ii = num(m.invalid_indexes);
+    return `<div class="panel"><h4>資料庫健康</h4>
+        ${kv('Archivelog', arch?'<span class="pill green">ON</span>':'<span class="pill yellow">OFF</span>')}
+        ${kv('DB 開啟', num(m.db_open)===1?'<span class="pill green">READ WRITE</span>':'<span class="pill yellow">其他</span>')}
+        ${kv('無效物件', io>0?`<span class="pill yellow">${fmtInt(io)}</span>`:'0')}
+        ${kv('無效索引', ii>0?`<span class="pill yellow">${fmtInt(ii)}</span>`:'0')}
+        ${kv('連線數 (active)', `${fmtInt(m.sessions_total)} (${fmtInt(m.sessions_active)})`)}
+    </div>`;
+}
+
+function tsColor(p){ return p>=95?'#ff4d5e':p>=85?'#ffc24b':'#3ddc84'; }
+function tsPanel(m){
+    let list = Array.isArray(m.tablespaces) ? m.tablespaces.slice() : [];
+    list.sort((a,b)=>num(b.pct_used)-num(a.pct_used));
+    const top = list.slice(0,6);
+    let rows = top.map(t=>{
+        const p = num(t.pct_used);
+        return `<div class="tsline"><div class="lab"><span>${t.name}</span><span>${p}%</span></div>
+            <div class="bar"><span style="width:${Math.min(p,100)}%;background:${tsColor(p)}"></span></div></div>`;
+    }).join('');
+    if(!rows) rows = '<div class="muted">無資料</div>';
+    const perf = kv('Buffer Hit', num(m.buffer_hit_pct)+'%') + kv('Library Hit', num(m.lib_cache_hit_pct)+'%') + kv('Temp 使用', num(m.temp_pct_used)+'%');
+    return `<div class="panel full"><h4>表空間使用率（Top 6）／效能</h4>
+        <div style="display:grid;grid-template-columns:2fr 1fr;gap:16px">
+        <div>${rows}</div><div>${perf}</div></div></div>`;
+}
+
+function card(db){
+    const s = statusOf(db);
+    const stateText = !db.enabled ? '<span class="grey">停用</span>'
+        : db.connected ? '<span class="green">● OPEN</span>'
+        : '<span class="red">● DOWN</span>';
+    let body;
+    if(!db.enabled){
+        body = `<div class="panel full"><div class="notconf">此資料庫已停用監控</div></div>`;
+    } else if(!db.connected){
+        body = `<div class="panel full"><h4>連線狀態</h4><div class="err">✖ 無法連線：${db.error||'未知錯誤'}</div></div>`;
+    } else {
+        const m = db.metrics || {};
+        body = dgPanel(m) + mvPanel(m) + healthPanel(m) + tsPanel(m);
+    }
+    return `<div class="dbcard s-${s}">
+        <div class="dbhead">
+            <span class="dot ${s}"></span>
+            <div>
+                <div class="title">${db.label||db.alias}</div>
+                <div class="sub">${db.host||''}${db.port?':'+db.port:''}${db.sid?' / '+db.sid:''}</div>
+            </div>
+            <span class="state">${stateText}</span>
+        </div>
+        <div class="panels">${body}</div>
+    </div>`;
+}
+
+async function refresh(){
+    try{
+        const r = await fetch('/oracle-dashboard-data.php', {headers:{'X-CSRF-Token':CSRF}});
+        if(!r.ok){ document.getElementById('updated').innerHTML = '<span class="err">資料讀取失敗 HTTP '+r.status+'</span>'; return; }
+        const j = await r.json();
+        const dbs = j.dbs||[];
+        const cnt = {red:0,yellow:0,green:0,grey:0};
+        dbs.forEach(d=>cnt[statusOf(d)]++);
+        document.getElementById('cnt-red').textContent = cnt.red;
+        document.getElementById('cnt-yellow').textContent = cnt.yellow;
+        document.getElementById('cnt-green').textContent = cnt.green;
+        document.getElementById('cnt-grey').textContent = cnt.grey;
+        const grid = document.getElementById('grid');
+        grid.innerHTML = dbs.length ? dbs.map(card).join('') : '<div class="empty">尚無受監控的資料庫（請至「⚙ 監控管理」新增）</div>';
+        document.getElementById('updated').textContent = '資料更新時間：' + (j.ts||'') + '（每 60 秒自動刷新）';
+    }catch(e){
+        document.getElementById('updated').innerHTML = '<span class="err">資料讀取錯誤：'+e.message+'</span>';
+    }
+}
+refresh();
+setInterval(refresh, 60000);
+</script>
+</body>
+</html>

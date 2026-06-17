@@ -1,0 +1,13 @@
+# 真實 DB 連線設定（含密碼）— 絕不入庫，只保留 *.example
+collector/dbs/*.conf
+!collector/dbs/*.conf.example
+
+# 編譯產物
+collector/*.class
+*.class
+
+# 打包暫存
+_pkg.tgz
+*.tgz
+*.bak
+*.bak.*
