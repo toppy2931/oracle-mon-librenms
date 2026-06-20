@@ -78,6 +78,26 @@ install -m 644 -o "$LIBRENMS_USER" -g "$LIBRENMS_USER" "$HERE/librenms/polling/o
 install -m 644 -o "$LIBRENMS_USER" -g "$LIBRENMS_USER" "$HERE/librenms/pages/device_apps/oracle-l1hweb.inc.php" "$PAGE_DEV/oracle-l1hweb.inc.php"
 install -m 644 -o "$LIBRENMS_USER" -g "$LIBRENMS_USER" "$HERE/librenms/pages/apps/oracle-l1hweb.inc.php" "$PAGE_APP/oracle-l1hweb.inc.php"
 
+# ── 2.5) Bootstrap 5 CSS（oracle-admin.php 用，本地化避免外部 CDN 依賴）─
+BS_CSS="$LIBRENMS_DIR/html/css/oracle-admin/bootstrap-5.3.2.min.css"
+if [ -f "$BS_CSS" ]; then
+    say "Bootstrap 5 CSS 已存在，略過"
+else
+    say "下載 Bootstrap 5.3.2 CSS 到 $BS_CSS"
+    mkdir -p "$(dirname "$BS_CSS")"
+    if curl -fsSL --max-time 30 \
+        "https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" \
+        -o "$BS_CSS"; then
+        chown "$LIBRENMS_USER":"$LIBRENMS_USER" "$BS_CSS"
+        chmod 644 "$BS_CSS"
+        say "Bootstrap CSS 下載完成"
+    else
+        warn "Bootstrap CSS 下載失敗（網路問題？）— oracle-admin.php 樣式會異常"
+        warn "  手動下載：curl -o $BS_CSS \\"
+        warn "    https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css"
+    fi
+fi
+
 # ── 3) sudoers（讓 LibreNMS PHP 可呼叫 admin 腳本）──────────────
 say "安裝 sudoers"
 install -m 440 -o root -g root "$HERE/system/sudoers.oracle-admin" /etc/sudoers.d/oracle-admin

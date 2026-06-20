@@ -41,7 +41,7 @@ if (empty($current_ip)) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="csrf-token" content="<?= htmlspecialchars($csrf_token) ?>">
 <title>系統設定管理 — LibreNMS</title>
-<link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+<link href="/css/oracle-admin/bootstrap-5.3.2.min.css" rel="stylesheet">
 <style>
 body{background:#1a1a2e;color:#d0d0e0;font-size:14px}
 .navbar-top{background:#0f3460;padding:8px 16px;display:flex;align-items:center;gap:16px;border-bottom:2px solid #e94560;margin-bottom:24px}
@@ -329,8 +329,40 @@ async function addDb() {
 }
 
 function editDb(alias) {
+    if (!DBS[alias]) {
+        showToast(`⚠ 找不到 "${alias}" 設定（DBS keys: ${Object.keys(DBS).join(', ')}）`);
+        return;
+    }
     loadConf(alias);
     window.scrollTo({top: 0, behavior: 'smooth'});
+    // Flash 區塊 A 邊框讓使用者知道載入到哪裡
+    const blockA = document.querySelector('.card');  // 第一個 card 就是區塊 A
+    if (blockA) {
+        blockA.style.transition = 'box-shadow 0.4s, border-color 0.4s';
+        const origBorder = blockA.style.borderColor;
+        const origShadow = blockA.style.boxShadow;
+        blockA.style.borderColor = '#e94560';
+        blockA.style.boxShadow = '0 0 24px rgba(233, 69, 96, 0.7)';
+        setTimeout(() => {
+            blockA.style.borderColor = origBorder;
+            blockA.style.boxShadow = origShadow;
+        }, 1600);
+    }
+    showToast(`已載入「${alias}」設定至區塊 A，請在上方表單修改`);
+}
+
+function showToast(msg) {
+    let toast = document.getElementById('__toast');
+    if (!toast) {
+        toast = document.createElement('div');
+        toast.id = '__toast';
+        toast.style.cssText = 'position:fixed;bottom:30px;right:30px;background:#0f3460;color:#aac4e8;padding:12px 20px;border-radius:6px;border:1px solid #e94560;font-size:13px;z-index:9999;opacity:0;transition:opacity 0.3s;max-width:400px;box-shadow:0 4px 16px rgba(0,0,0,0.4)';
+        document.body.appendChild(toast);
+    }
+    toast.textContent = msg;
+    toast.style.opacity = '1';
+    clearTimeout(toast.__t);
+    toast.__t = setTimeout(() => { toast.style.opacity = '0'; }, 2800);
 }
 
 async function testOne(alias) {
@@ -392,10 +424,11 @@ async function doIpUpdate() {
     });
     if (j.ok) {
         const steps = (j.steps||[]).join('\n');
-        setResult('bResult', `<span class="ok">✓ 更新完成\n${steps}\n\n3 秒後跳轉至 http://${newIp}/oracle-admin.php</span>`);
+        const targetUrl = `${location.protocol}//${newIp}/oracle-admin.php`;
+        setResult('bResult', `<span class="ok">✓ 更新完成\n${steps}\n\n3 秒後跳轉至 ${targetUrl}</span>`);
         // Render auto-scan results (oracle-ip-update.php already invoked scan-old-ip.sh on the OLD IP)
         renderScanResult(j.scan_results, document.getElementById('bCurrent').value.trim());
-        setTimeout(() => { window.location.href = `http://${newIp}/oracle-admin.php`; }, 3000);
+        setTimeout(() => { window.location.href = targetUrl; }, 3000);
     } else {
         setResult('bResult', `<span class="err">✗ ${j.error||'更新失敗'}</span>`);
     }

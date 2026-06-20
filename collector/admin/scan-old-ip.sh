@@ -14,13 +14,27 @@ echo "$OLD_IP" | grep -qE '^([0-9]{1,3}\.){3}[0-9]{1,3}$' \
     || { printf '{"status":"error","error":"invalid_ip"}\n'; exit 1; }
 
 # Targets to scan. Globs are expanded by the shell before the for-loop.
+# 加新目標時：唯讀掃描，不限大小（小心 binary file），路徑要實際存在。
 shopt -s nullglob
 TARGETS=(
+    # nginx
     /etc/nginx/conf.d/*.conf
     /etc/nginx/sites-enabled/*
+    # LibreNMS
     /opt/librenms/resources/views/layouts/menu.blade.php
     /opt/librenms/.env
+    # jt-gelflow / jt-ipam
     /opt/jt-gelflow/config.json
+    /opt/jt-ipam/.env
+    /opt/jt-ipam/config.json
+    # Graylog
+    /etc/graylog/server/server.conf
+    /etc/graylog/datanode/datanode.conf
+    # SNMP（trap target、agent address 可能寫 IP）
+    /etc/snmp/snmpd.conf
+    /etc/snmp/snmp.conf
+    # Oracle 監控套件（DB 設定檔可能含 monitor URL callback）
+    /opt/oracle-mon/dbs/*.conf
 )
 
 hits=()
