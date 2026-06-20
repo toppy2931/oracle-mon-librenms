@@ -4,3 +4,4 @@ librenms ALL=(root) NOPASSWD: /opt/oracle-mon/admin/remove-db-conf.sh
 librenms ALL=(root) NOPASSWD: /opt/oracle-mon/admin/update-snmpd-extends.sh
 librenms ALL=(root) NOPASSWD: /opt/oracle-mon/admin/update-librenms-url.sh
 librenms ALL=(root) NOPASSWD: /opt/oracle-mon/admin/test-db.sh
+librenms ALL=(root) NOPASSWD: /opt/oracle-mon/admin/scan-old-ip.sh

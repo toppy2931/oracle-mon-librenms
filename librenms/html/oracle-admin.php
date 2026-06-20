@@ -219,11 +219,14 @@ code{color:#60b4f8;background:transparent}
           </div>
         </div>
         <button class="btn btn-warning btn-sm" onclick="doIpUpdate()">套用 IP 變更</button>
-        <div class="text-muted mt-2" style="font-size:11px">⚠ 套用後頁面將自動跳轉至新 IP</div>
+        <button class="btn btn-info btn-sm ms-2" onclick="doScanOldIp()">🔍 掃描舊 IP</button>
+        <div class="text-muted mt-2" style="font-size:11px">⚠ 套用後頁面將自動跳轉至新 IP；掃描為唯讀檢查，不修改任何檔案</div>
       </div>
       <div class="col-md-7">
         <label class="form-label">執行結果</label>
         <div class="result-box" id="bResult">—</div>
+        <label class="form-label mt-2">舊 IP 掃描結果</label>
+        <div class="result-box" id="bScan">—（點「🔍 掃描舊 IP」或在 IP 變更後自動執行）</div>
       </div>
     </div>
   </div>
@@ -379,8 +382,10 @@ async function doIpUpdate() {
     if (!newIp) { alert('請輸入新 IP'); return; }
     if (!confirm(`確定將 monitor-vm IP 更新為 ${newIp}？\n套用後頁面將跳轉至新 IP。`)) return;
     setResult('bResult', '<span class="info">更新中...</span>');
+    setResult('bScan', '<span class="info">等待 IP 變更完成後自動掃描...</span>');
     const j = await api('/oracle-ip-update.php', {
         new_ip: newIp,
+        old_ip: document.getElementById('bCurrent').value.trim(),
         update_base_url: document.getElementById('chkBase').checked,
         update_app_url:  document.getElementById('chkEnv').checked,
         clear_cache:     document.getElementById('chkCache').checked,
@@ -388,10 +393,40 @@ async function doIpUpdate() {
     if (j.ok) {
         const steps = (j.steps||[]).join('\n');
         setResult('bResult', `<span class="ok">✓ 更新完成\n${steps}\n\n3 秒後跳轉至 http://${newIp}/oracle-admin.php</span>`);
+        // Render auto-scan results (oracle-ip-update.php already invoked scan-old-ip.sh on the OLD IP)
+        renderScanResult(j.scan_results, document.getElementById('bCurrent').value.trim());
         setTimeout(() => { window.location.href = `http://${newIp}/oracle-admin.php`; }, 3000);
     } else {
         setResult('bResult', `<span class="err">✗ ${j.error||'更新失敗'}</span>`);
     }
+}
+
+async function doScanOldIp() {
+    const oldIp = document.getElementById('bCurrent').value.trim();
+    if (!oldIp) { setResult('bScan', '<span class="err">⚠ 找不到目前 IP（bCurrent 為空）</span>'); return; }
+    setResult('bScan', '<span class="info">掃描中...</span>');
+    const r = await api('/oracle-scan-old-ip.php', { old_ip: oldIp });
+    renderScanResult(r, oldIp);
+}
+
+function renderScanResult(r, oldIp) {
+    const box = document.getElementById('bScan');
+    if (!r || !r.ok || r.status !== 'ok') {
+        box.innerHTML = `<span class="err">✗ ${(r && r.error) || '掃描失敗或無回應'}</span>`;
+        return;
+    }
+    if ((r.count || 0) === 0) {
+        box.innerHTML = `<span class="ok">✓ 無命中（${oldIp} 未出現在任何已掃描設定檔）</span>`;
+        return;
+    }
+    const rows = r.matches.map(m =>
+        `<div><code>${escapeHtml(m.file)}:${m.line}</code> — <span style="color:#ffaa66">${escapeHtml(m.text)}</span></div>`
+    ).join('');
+    box.innerHTML = `<span class="err">⚠ 發現 ${r.count} 筆殘留命中（請手動評估是否需更新；本工具不自動修改）：</span><br>${rows}`;
+}
+
+function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
 }
 
 function setResult(id, html) {
