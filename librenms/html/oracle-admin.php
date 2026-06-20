@@ -108,9 +108,10 @@ code{color:#60b4f8;background:transparent}
             <button class="btn btn-outline-secondary btn-sm" type="button" onclick="togglePwd('aPass',this)">顯示</button>
           </div>
         </div>
-        <div class="d-flex gap-2 mt-3">
+        <div class="d-flex gap-2 mt-3 align-items-center">
           <button class="btn btn-primary btn-sm" onclick="saveConf()">儲存設定</button>
           <button class="btn btn-outline-info btn-sm" onclick="testConn()">測試連線</button>
+          <span class="text-muted" style="font-size:11px">測試使用上方表單當前值（未存檔也可測）；密碼留空時用既存密碼</span>
         </div>
       </div>
       <div class="col-md-7">
@@ -288,14 +289,26 @@ async function saveConf() {
 }
 
 async function testConn() {
+    // 區塊 A 測試：用「目前表單輸入值」即時測試（不需存檔）
+    // 密碼空白 + 有 alias → 後端會從對應 .conf 撈現存密碼
     const alias = document.getElementById('dbSelect').value;
-    if (!alias) return;
-    setResult('aResult', '<span class="info">連線測試中（約 15 秒）...</span>');
-    const j = await api('/oracle-test.php', {alias});
+    const host  = document.getElementById('aHost').value.trim();
+    const port  = document.getElementById('aPort').value.trim();
+    const sid   = document.getElementById('aSid').value.trim();
+    const user  = document.getElementById('aUser').value.trim();
+    const pass  = document.getElementById('aPass').value;  // 不 trim，避免吃掉前後空白密碼
+
+    if (!host || !sid || !user) {
+        setResult('aResult', '<span class="err">✗ 主機 IP、SID、帳號 不可為空</span>');
+        return;
+    }
+
+    setResult('aResult', '<span class="info">連線測試中（用當前表單值，約 15 秒）...</span>');
+    const j = await api('/oracle-test.php', { alias, host, port, sid, user, pass });
     if (j.connected) {
-        setResult('aResult', `<span class="ok">● 連線成功\ninstance_up=${j.instance_up}\nDB 狀態：${j.db_status||'OK'}\nsessions：${j.sessions_total||'—'}</span>`);
+        setResult('aResult', `<span class="ok">● 連線成功（模式：${j.mode||'?'}）\ninstance_up=${j.instance_up}\nDB 狀態：${j.db_status||'OK'}\nsessions：${j.sessions_total||'—'}</span>`);
     } else {
-        setResult('aResult', `<span class="err">✗ 連線失敗\n${j.error||''}</span>`);
+        setResult('aResult', `<span class="err">✗ 連線失敗（模式：${j.mode||'?'}）\n${j.error||''}</span>`);
     }
 }
 
