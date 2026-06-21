@@ -40,13 +40,13 @@ Browser  ─[POST + CSRF + X-CSRF-Token]──►  /opt/librenms/html/oracle-*.p
 `install.sh` 與 `update.sh` 設計成**任何時候重跑都不破壞既有狀態**：
 
 - `install -m ... -o ... -g ...` 會覆寫但保留權限
-- `menu-patch.py` 用 `{{-- BEGIN oracle-mon menu --}}` / `{{-- END --}}` 標記檢測，已存在就 `ALREADY PRESENT - no change`
+- `menu-patch.py` 用 `{{-- BEGIN oracle-mon menu --}}` / `{{-- END --}}` 標記。**已改為 upsert**：區塊存在就整段替換為最新內容（可重跑更新選單項目），不存在才插入到 Settings「Validate Config」`@endcanany` 之後。改選單項目只要改 `menu-patch.py` 的 `BLOCK` 再重跑即可
 - `install_alert_rules.php` 依名稱比對，已存在就 `SKIP (exists)`
 - snmpd extend block 用 `BEGIN oracle-mon managed` 字串守護
 - Bootstrap CSS 用 `[ -f "$BS_CSS" ]` 守護避免重複下載
 - `dbs/*.conf` **從不被 install.sh 動到**，使用者資料絕對保留
 
-⚠️ **改 `menu.blade.php` 結構時務必保留 BEGIN/END 標記**，否則 `menu-patch.py` 重跑會 ANCHOR NOT FOUND 失敗，或誤判沒裝過而重複插入造成選單重複（曾發生過）。
+⚠️ **menu-patch `BLOCK` 是選單的單一真實來源**：jt-gelflow 等項目都在這個受管理區塊內，**不要只在 `menu.blade.php` 手動加項目**——重跑 upsert 會整段覆蓋而洗掉（曾發生：手動加的 jt-gelflow 被洗掉）。新增選單項目一律加進 `menu-patch.py` 的 `BLOCK`。外部服務連結（jt-glogarch/jt-gelflow）用相對路徑或 `location.hostname` 組 URL，避免硬編 IP（IP 異動自動跟隨）。
 
 ⚠️ **改 `install.sh` 加新部署步驟時**，務必 `[ -f ... ] && say "已存在，略過"` 包起來，否則破壞冪等性。
 
@@ -90,9 +90,42 @@ monitor-vm 上同時跑 LibreNMS + Graylog + jt-ipam + jt-gelflow。本 repo 的
   - SNMP: `snmpd.conf`, `snmp.conf`
   - Oracle: `/opt/oracle-mon/dbs/*.conf`
   
-  **新增其他被監控元件時**（例如未來加 jt-glogarch），如果它的設定檔含 monitor-vm IP，**請把該檔加進 `TARGETS=(...)` 陣列**。
+  **新增其他被監控元件時**，如果它的設定檔含 monitor-vm IP，**請把該檔加進 `TARGETS=(...)` 陣列**。
 
-更廣的部署文件在 [docs/single-vm-deployment.md](docs/single-vm-deployment.md)（含 nginx 反向代理 jt-gelflow、Graylog Pipeline、GeoIP 等實測 runbook）。
+更廣的部署文件在 [docs/single-vm-deployment.md](docs/single-vm-deployment.md)（含 nginx 反向代理 jt-gelflow、Graylog Pipeline、GeoIP、§3.2 防火牆、§6.10 Graylog 清空 等實測 runbook）。
+
+### jt-glogarch（Graylog 日誌歸檔，**獨立上游專案**，非本 repo 套件）
+
+jt-glogarch（`jasoncheng7115/jt-glogarch`）裝在同台 monitor-vm，本 repo 透過區塊 E 管理「歸檔同步到 NAS」、選單放入口連結。重點：
+
+- **必須走 HTTPS**：其 `web/app.py` SessionMiddleware 寫死 `https_only=True`（secure cookie），HTTP 下瀏覽器拒存 cookie → 登入「閃一下」跳回 login。config `web.ssl_certfile/ssl_keyfile` 指回 `server.crt/server.key` 即 HTTPS。Web UI `https://<host>:8990`，用 **Graylog 帳號**登入（驗證走 Graylog `/api/system` Basic Auth）。
+- 安裝鐵則（與作者另一專案 jt-ipam 同源，曾 `chown -R /` 毀機）：原始碼放 `/opt/jt-glogarch` 本身（install.sh 跑 `pip install /opt/jt-glogarch`）；Ubuntu 24.04 需先 `pip install --break-system-packages --ignore-installed setuptools wheel`；systemd 服務那步是互動詢問，非互動跑會跳過需手動 `cp deploy/jt-glogarch.service`。
+- 歸檔落地在獨立碟 `/data/graylog-archives`（VG `vg-archive`/`/dev/sdc`），API 模式（非 OpenSearch Direct，因 9200 有認證）。
+
+---
+
+## 防火牆可攜性（區塊 D）+ NAS 備份（區塊 E）
+
+兩者都是為「**佈署到客戶端、各站點 IP/網段不同**」設計，避免硬編碼。
+
+**防火牆（區塊 D / `setup-mgmt-firewall.sh` / `manage-mgmt-cidrs.sh`）**
+- 管理 UI 埠（22/80/443/9000/8990/8099）**只開放給「本機所在網段」**（`ip route` 自動偵測），各站點免手調。
+- 其他內網/遠端網段寫進持久化檔 `/etc/oracle-mon/mgmt-cidrs.conf`（一行一 CIDR），`setup-mgmt-firewall.sh` 每次自動讀取（更新重跑不漏）。GUI 區塊 D 增刪即寫此檔。
+- 評估過 nginx 反代收斂到 443（方案 C）但**否決**：jt-glogarch 無 `root_path` 不能掛子路徑，且無 DNS 不能用 subdomain。故採「限制來源網段 + 各服務自身認證」。
+- 區塊 D「🔍 查詢」(`rules` action) 列出 ufw **實際**允許規則（含舊手動規則與 Anywhere），是排查曝險的真實視圖。
+
+**NAS 備份（區塊 E / `manage-nas-backup.sh`，策略 B）**
+- jt-glogarch 歸檔仍寫本地獨立碟 `/data/graylog-archives`，再用 systemd timer `oracle-nas-sync`（hourly/6h/daily）rsync 同步到 NAS。**NAS 掉線只影響同步，不影響歸檔**。
+- 支援 NFS / CIFS，自動裝 `nfs-common`/`cifs-utils`、寫 fstab（**`nofail` 不卡開機**）；設定 `/etc/oracle-mon/nas-backup.conf`、CIFS 帳密 `/etc/oracle-mon/nas-credentials`(600)。
+- rsync 用 `--no-perms --no-owner --no-group`（相容 CIFS）。
+
+---
+
+## UI 慣例（oracle-admin.php / oracle-dashboard.php）
+
+- 純 **standalone PHP**（非 Blade）；改完**不需** `artisan view:clear`，但瀏覽器會快取 CSS/JS，測試時 `Ctrl+F5`。
+- 深色主題；`.result-box` 必須有明確文字色（曾因繼承色在深底上對比過低看不到）。狀態用 `.ok`/`.err`/`.info` class 上色，列表類輸出依語意上色（如 ufw Anywhere→橘警示、mgmt-auto→綠）。
+- 新增區塊照 A–E 既有模式：HTML 卡片 + `api(url,{action,...})`（POST JSON + `X-CSRF-TOKEN`）+ 後端回結構化 JSON。
 
 ---
 
@@ -103,10 +136,16 @@ monitor-vm 上同時跑 LibreNMS + Graylog + jt-ipam + jt-gelflow。本 repo 的
 sudo /opt/oracle-mon-librenms/install.sh        # 完整安裝
 sudo /opt/oracle-mon-librenms/update.sh         # 只更新 code（保留 dbs/、RRD）
 
-# 手動測試 admin 腳本（驗證 sudoers + 腳本邏輯）
+# 手動測試 admin 腳本（驗證 sudoers + 腳本邏輯；以 librenms 身分模擬 PHP-FPM 呼叫）
 sudo -u librenms sudo -n /opt/oracle-mon/admin/test-db.sh l1hweb
 sudo -u librenms sudo -n /opt/oracle-mon/admin/test-db-adhoc.sh 172.16.1.101 1521 L1HWEB librenms PASSWORD
 sudo -u librenms sudo -n /opt/oracle-mon/admin/scan-old-ip.sh 172.16.1.94
+sudo -u librenms sudo -n /opt/oracle-mon/admin/manage-mgmt-cidrs.sh list   # rules / add <cidr> / remove <cidr>
+sudo -u librenms sudo -n /opt/oracle-mon/admin/manage-nas-backup.sh status # save/test/sync/unmount
+
+# 防火牆：自動偵測本機網段開放管理埠（可攜，每站直接跑）
+sudo /opt/oracle-mon-librenms/system/setup-mgmt-firewall.sh
+sudo EXTRA_CIDRS="10.20.0.0/16" /opt/oracle-mon-librenms/system/setup-mgmt-firewall.sh
 
 # 重新編譯 Java collector
 ( cd /opt/oracle-mon && sudo javac -cp lib/ojdbc14.jar OracleStats.java )
@@ -128,12 +167,16 @@ sudo /opt/oracle-mon/run.sh l1hweb | python3 -m json.tool
 
 ## Web 端點清單（`/opt/librenms/html/`）
 
+主 GUI `oracle-admin.php` 由五個區塊組成：**A** Oracle 連線設定、**B** monitor-vm IP 異動、**C** 多 DB 管理、**D** 防火牆管理網段、**E** NAS 備份。每個區塊對應一支 AJAX endpoint 與一支 admin shell：
+
 | 端點 | 用途 | sudo shell |
 |------|------|-----------|
-| `oracle-admin.php` | 主 GUI（區塊 A/B/C） | — |
+| `oracle-admin.php` | 主 GUI（區塊 A–E） | — |
 | `oracle-dashboard.php` + `oracle-dashboard-data.php` | 戰情室即時面板 | — |
 | `oracle-save.php` | 儲存 DB 設定 | `save-db-conf.sh` |
 | `oracle-db-add.php` / `oracle-db-remove.php` | 新增 / 刪除 / 啟停 DB | `save-db-conf.sh` / `remove-db-conf.sh` + `update-snmpd-extends.sh` |
 | `oracle-test.php` | 連線測試（alias 或 adhoc 雙模式） | `test-db.sh` 或 `test-db-adhoc.sh` |
 | `oracle-ip-update.php` | monitor-vm IP 異動 + auto-scan 殘留 | `update-librenms-url.sh` + `scan-old-ip.sh` |
 | `oracle-scan-old-ip.php` | 獨立掃描 endpoint（IP 殘留唯讀檢查） | `scan-old-ip.sh` |
+| `oracle-firewall.php` | 區塊 D：管理網段 list/add/remove + 列出 ufw 實際允許來源(rules) | `manage-mgmt-cidrs.sh` |
+| `oracle-nasbackup.php` | 區塊 E：NAS 掛載/同步 status/save/test/sync/unmount | `manage-nas-backup.sh` |
