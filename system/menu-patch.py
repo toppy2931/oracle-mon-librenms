@@ -30,7 +30,7 @@ BLOCK = (
     "                        " + BEGIN + "\n"
     "                        @can('admin')\n"
     "                        <li role=\"presentation\" class=\"divider\"></li>\n"
-    "                        <li><a href=\"/oracle-admin.php\"><i class=\"fa fa-database fa-fw fa-lg\" aria-hidden=\"true\"></i> Oracle 監控管理</a></li>\n"
+    "                        <li><a href=\"/oracle-admin.php\"><i class=\"fa fa-database fa-fw fa-lg\" aria-hidden=\"true\"></i> 監控管理客製化設定</a></li>\n"
     "                        <li><a href=\"/oracle-dashboard.php\"><i class=\"fa fa-desktop fa-fw fa-lg\" aria-hidden=\"true\"></i> Oracle 戰情室</a></li>\n"
     "                        <li><a href=\"/jt-gelflow/\" target=\"_blank\"><i class=\"fa fa-globe fa-fw fa-lg\" aria-hidden=\"true\"></i> jt-gelflow 流量視覺化</a></li>\n"
     "                        <li><a href=\"#\" onclick=\"window.open('https://'+location.hostname+':8990','_blank');return false;\"><i class=\"fa fa-archive fa-fw fa-lg\" aria-hidden=\"true\"></i> jt-glogarch 日誌歸檔</a></li>\n"

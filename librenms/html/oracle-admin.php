@@ -70,7 +70,7 @@ code{color:#60b4f8;background:transparent}
 
 <div class="navbar-top">
     <a href="/">← LibreNMS</a>
-    <h4>⚙ 系統設定統一管理</h4>
+    <h4>⚙ 監控管理客製化設定</h4>
     <span class="ms-auto" style="font-size:12px;color:#556677">登入者：<?= htmlspecialchars(Auth::user()->username) ?></span>
 </div>
 
@@ -117,6 +117,48 @@ code{color:#60b4f8;background:transparent}
       <div class="col-md-7">
         <label class="form-label">測試 / 操作結果</label>
         <div class="result-box" id="aResult">—</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ 區塊 B：monitor-vm IP 異動 ════════════════════════════════ -->
+<div class="card">
+  <div class="card-header">
+    <h5>▌ 區塊 B — 監控主機 IP 異動設定</h5>
+  </div>
+  <div class="card-body">
+    <div class="row g-3">
+      <div class="col-md-5">
+        <div class="mb-2"><label class="form-label">目前 IP（偵測自 base_url）</label>
+          <input type="text" class="form-control" id="bCurrent" value="<?= htmlspecialchars($current_ip) ?>" readonly style="background:#0a1525;color:#8899bb">
+        </div>
+        <div class="mb-3"><label class="form-label">新 IP <span class="text-danger">*</span></label>
+          <input type="text" class="form-control" id="bNew" placeholder="172.16.1.xxx">
+        </div>
+        <div class="mb-3">
+          <div class="form-check mb-1">
+            <input class="form-check-input" type="checkbox" id="chkBase" checked>
+            <label class="form-check-label" for="chkBase">LibreNMS <code>base_url</code> → <code>lnms config:set</code></label>
+          </div>
+          <div class="form-check mb-1">
+            <input class="form-check-input" type="checkbox" id="chkEnv" checked>
+            <label class="form-check-label" for="chkEnv">.env <code>APP_URL=http://&lt;新IP&gt;</code></label>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="chkCache" checked>
+            <label class="form-check-label" for="chkCache">清除 Laravel config cache → <code>artisan config:clear</code></label>
+          </div>
+        </div>
+        <button class="btn btn-warning btn-sm" onclick="doIpUpdate()">套用 IP 變更</button>
+        <button class="btn btn-info btn-sm ms-2" onclick="doScanOldIp()">🔍 掃描舊 IP</button>
+        <div class="text-muted mt-2" style="font-size:11px">⚠ 套用後頁面將自動跳轉至新 IP；掃描為唯讀檢查，不修改任何檔案</div>
+      </div>
+      <div class="col-md-7">
+        <label class="form-label">執行結果</label>
+        <div class="result-box" id="bResult">—</div>
+        <label class="form-label mt-2">舊 IP 掃描結果</label>
+        <div class="result-box" id="bScan">—（點「🔍 掃描舊 IP」或在 IP 變更後自動執行）</div>
       </div>
     </div>
   </div>
@@ -187,82 +229,6 @@ code{color:#60b4f8;background:transparent}
 <?php endif; ?>
         </tbody>
       </table>
-    </div>
-  </div>
-</div>
-
-<!-- ═══ 區塊 B：monitor-vm IP 異動 ════════════════════════════════ -->
-<div class="card">
-  <div class="card-header">
-    <h5>▌ 區塊 B — 監控主機 IP 異動設定</h5>
-  </div>
-  <div class="card-body">
-    <div class="row g-3">
-      <div class="col-md-5">
-        <div class="mb-2"><label class="form-label">目前 IP（偵測自 base_url）</label>
-          <input type="text" class="form-control" id="bCurrent" value="<?= htmlspecialchars($current_ip) ?>" readonly style="background:#0a1525;color:#8899bb">
-        </div>
-        <div class="mb-3"><label class="form-label">新 IP <span class="text-danger">*</span></label>
-          <input type="text" class="form-control" id="bNew" placeholder="172.16.1.xxx">
-        </div>
-        <div class="mb-3">
-          <div class="form-check mb-1">
-            <input class="form-check-input" type="checkbox" id="chkBase" checked>
-            <label class="form-check-label" for="chkBase">LibreNMS <code>base_url</code> → <code>lnms config:set</code></label>
-          </div>
-          <div class="form-check mb-1">
-            <input class="form-check-input" type="checkbox" id="chkEnv" checked>
-            <label class="form-check-label" for="chkEnv">.env <code>APP_URL=http://&lt;新IP&gt;</code></label>
-          </div>
-          <div class="form-check">
-            <input class="form-check-input" type="checkbox" id="chkCache" checked>
-            <label class="form-check-label" for="chkCache">清除 Laravel config cache → <code>artisan config:clear</code></label>
-          </div>
-        </div>
-        <button class="btn btn-warning btn-sm" onclick="doIpUpdate()">套用 IP 變更</button>
-        <button class="btn btn-info btn-sm ms-2" onclick="doScanOldIp()">🔍 掃描舊 IP</button>
-        <div class="text-muted mt-2" style="font-size:11px">⚠ 套用後頁面將自動跳轉至新 IP；掃描為唯讀檢查，不修改任何檔案</div>
-      </div>
-      <div class="col-md-7">
-        <label class="form-label">執行結果</label>
-        <div class="result-box" id="bResult">—</div>
-        <label class="form-label mt-2">舊 IP 掃描結果</label>
-        <div class="result-box" id="bScan">—（點「🔍 掃描舊 IP」或在 IP 變更後自動執行）</div>
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- ═══ 區塊 F：自訂地圖刷新秒數 ══════════════════════════════════ -->
-<div class="card">
-  <div class="card-header">
-    <h5>▌ 區塊 F — Custom Map 自動刷新秒數</h5>
-  </div>
-  <div class="card-body">
-    <div class="row g-3">
-      <div class="col-md-5">
-        <div class="mb-2">
-          <label class="form-label">目前設定值</label>
-          <input type="text" class="form-control" id="fCurrent" value="—" readonly
-                 style="background:#0a1525;color:#8899bb">
-        </div>
-        <div class="mb-3">
-          <label class="form-label">新刷新秒數 <span class="text-danger">*</span>
-            <span class="text-muted" style="font-size:11px">（5 ~ 86400 秒；建議 30 ~ 300）</span>
-          </label>
-          <input type="number" class="form-control" id="fValue" min="5" max="86400"
-                 placeholder="例如 60">
-        </div>
-        <div class="d-flex gap-2 align-items-center">
-          <button class="btn btn-warning btn-sm" onclick="doSetCustomMapRefresh()">套用秒數</button>
-          <button class="btn btn-outline-secondary btn-sm" onclick="doClearCustomMapRefresh()">回復預設</button>
-          <span class="text-muted" style="font-size:11px">套用後 F5 重新整理地圖頁生效；只影響 Custom Map，不影響其他頁面</span>
-        </div>
-      </div>
-      <div class="col-md-7">
-        <label class="form-label">執行結果</label>
-        <div class="result-box" id="fResult">—</div>
-      </div>
     </div>
   </div>
 </div>
@@ -367,6 +333,40 @@ code{color:#60b4f8;background:transparent}
           策略：jt-glogarch 歸檔仍寫本地 <code>/data/graylog-archives</code>（獨立 500G 碟），
           再依頻率 rsync 同步到 NAS；NAS 掉線不影響歸檔。fstab 以 <code>nofail</code> 掛載，不卡開機。
         </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ═══ 區塊 F：自訂地圖刷新秒數 ══════════════════════════════════ -->
+<div class="card">
+  <div class="card-header">
+    <h5>▌ 區塊 F — Custom Map 自動刷新秒數</h5>
+  </div>
+  <div class="card-body">
+    <div class="row g-3">
+      <div class="col-md-5">
+        <div class="mb-2">
+          <label class="form-label">目前設定值</label>
+          <input type="text" class="form-control" id="fCurrent" value="—" readonly
+                 style="background:#0a1525;color:#8899bb">
+        </div>
+        <div class="mb-3">
+          <label class="form-label">新刷新秒數 <span class="text-danger">*</span>
+            <span class="text-muted" style="font-size:11px">（5 ~ 86400 秒；建議 30 ~ 300）</span>
+          </label>
+          <input type="number" class="form-control" id="fValue" min="5" max="86400"
+                 placeholder="例如 60">
+        </div>
+        <div class="d-flex gap-2 align-items-center">
+          <button class="btn btn-warning btn-sm" onclick="doSetCustomMapRefresh()">套用秒數</button>
+          <button class="btn btn-outline-secondary btn-sm" onclick="doClearCustomMapRefresh()">回復預設</button>
+          <span class="text-muted" style="font-size:11px">套用後 F5 重新整理地圖頁生效；只影響 Custom Map，不影響其他頁面</span>
+        </div>
+      </div>
+      <div class="col-md-7">
+        <label class="form-label">執行結果</label>
+        <div class="result-box" id="fResult">—</div>
       </div>
     </div>
   </div>
@@ -753,11 +753,18 @@ async function nasTest() {
 }
 
 async function nasSync() {
-    setResult('nasResult', '<span class="info">同步中（檔案多時可能較久）…</span>');
+    setResult('nasResult', '<span class="info">差異性同步中（只傳大小/日期不同或不存在的檔案）…</span>');
     const j = await api('/oracle-nasbackup.php', {action: 'sync'});
-    setResult('nasResult', j.ok
-        ? `<span class="ok">✓ 同步完成 ${escapeHtml(j.synced_at||'')}</span>`
-        : `<span class="err">✗ ${escapeHtml(j.error||'同步失敗')}</span>`);
+    if (j.ok) {
+        const mb = ((j.bytes_transferred || 0) / 1024 / 1024).toFixed(2);
+        setResult('nasResult',
+            `<span class="ok">✓ 同步完成 ${escapeHtml(j.synced_at||'')}\n` +
+            `模式：${escapeHtml(j.mode||'differential')}\n` +
+            `檔案總數：${j.files_total||0} ｜ 實際傳送：${j.files_transferred||0} ｜ 跳過（未變動）：${j.files_skipped||0}\n` +
+            `傳送大小：${mb} MB</span>`);
+    } else {
+        setResult('nasResult', `<span class="err">✗ ${escapeHtml(j.error||'同步失敗')}</span>`);
+    }
     loadNas();
 }
 

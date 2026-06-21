@@ -137,11 +137,33 @@ TIMEREOF
     load
     [ -n "${MOUNTPOINT:-}" ] || json_err "尚未設定 NAS"
     mountpoint -q "$MOUNTPOINT" || json_err "NAS 未掛載，略過同步"
-    # 歸檔檔案不可變；--no-perms/owner/group 兼容 CIFS
-    rsync -rt --no-perms --no-owner --no-group --omit-dir-times "$SRC/" "$MOUNTPOINT/" 2>/tmp/nassync.err || \
-        json_err "rsync 失敗：$(tr -d '\n' < /tmp/nassync.err | sed 's/\"/ /g' | cut -c1-200)"
+    # 差異性備份（rsync 預設行為）：
+    #   - 預設用 mtime + size 比對，只同步「不存在」或「大小/日期不同」的檔案
+    #   - --update：若目標較新就跳過（安全網，避免從舊源覆蓋新目標）
+    #   - --stats：尾端輸出統計（傳了 N 檔 / 跳過 M 檔 / 大小 / 速度）
+    #   - -i (itemize)：每個被處理檔案的變更類型摘要
+    #   - --no-perms/owner/group/omit-dir-times：相容 CIFS 不支援的屬性
+    OUT=$(mktemp)
+    ERR=/tmp/nassync.err
+    rsync -rt --update --stats -i \
+          --no-perms --no-owner --no-group --omit-dir-times \
+          "$SRC/" "$MOUNTPOINT/" >"$OUT" 2>"$ERR" || {
+        rm -f "$OUT"
+        json_err "rsync 失敗：$(tr -d '\n' < "$ERR" | sed 's/\"/ /g' | cut -c1-200)"
+    }
+    # 從 --stats 解析關鍵數字
+    files_xferred=$(grep -E "^Number of (regular )?files transferred:" "$OUT" | awk -F: '{print $2}' | tr -d ' ,')
+    files_total=$(grep -E "^Number of files:" "$OUT" | awk -F: '{print $2}' | sed 's/[^0-9].*//' | tr -d ' ,')
+    bytes_total=$(grep -E "^Total transferred file size:" "$OUT" | awk -F: '{print $2}' | tr -d ' ' | grep -oE '^[0-9,]+' | tr -d ',')
+    rm -f "$OUT"
+    : "${files_xferred:=0}"
+    : "${files_total:=0}"
+    : "${bytes_total:=0}"
+    files_skipped=$(( files_total - files_xferred ))
+    [ "$files_skipped" -lt 0 ] && files_skipped=0
     date '+%Y-%m-%d %H:%M:%S' > "$LAST"
-    printf '{"ok":true,"synced_at":"%s"}\n' "$(cat "$LAST")"
+    printf '{"ok":true,"synced_at":"%s","files_total":%d,"files_transferred":%d,"files_skipped":%d,"bytes_transferred":%d,"mode":"differential (rsync mtime+size)"}\n' \
+        "$(cat "$LAST")" "$files_total" "$files_xferred" "$files_skipped" "$bytes_total"
     ;;
 
   unmount)
