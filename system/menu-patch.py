@@ -7,7 +7,7 @@ Managed block (inside @can('admin')):
   - Oracle 監控管理      → /oracle-admin.php
   - Oracle 戰情室        → /oracle-dashboard.php
   - jt-gelflow 流量視覺化 → /jt-gelflow/（相對路徑，走 nginx 反代，IP 異動自動跟隨）
-  - jt-glogarch 日誌歸檔 → https://<目前瀏覽器主機>:8990
+  - jt-glogarch 日誌歸檔 → http://<目前瀏覽器主機>:8990（已關閉 TLS，見 config web.ssl_*）
        用 JS location.hostname 動態組 URL，故 monitor-vm IP 異動時，
        按鈕連線會自動跟著使用者當前存取的 IP/主機名，無需改設定。
 
@@ -32,7 +32,7 @@ BLOCK = (
     "                        <li><a href=\"/oracle-admin.php\"><i class=\"fa fa-database fa-fw fa-lg\" aria-hidden=\"true\"></i> Oracle 監控管理</a></li>\n"
     "                        <li><a href=\"/oracle-dashboard.php\"><i class=\"fa fa-desktop fa-fw fa-lg\" aria-hidden=\"true\"></i> Oracle 戰情室</a></li>\n"
     "                        <li><a href=\"/jt-gelflow/\" target=\"_blank\"><i class=\"fa fa-globe fa-fw fa-lg\" aria-hidden=\"true\"></i> jt-gelflow 流量視覺化</a></li>\n"
-    "                        <li><a href=\"#\" onclick=\"window.open('https://'+location.hostname+':8990','_blank');return false;\"><i class=\"fa fa-archive fa-fw fa-lg\" aria-hidden=\"true\"></i> jt-glogarch 日誌歸檔</a></li>\n"
+    "                        <li><a href=\"#\" onclick=\"window.open('http://'+location.hostname+':8990','_blank');return false;\"><i class=\"fa fa-archive fa-fw fa-lg\" aria-hidden=\"true\"></i> jt-glogarch 日誌歸檔</a></li>\n"
     "                        @endcan\n"
     "                        " + END + "\n"
 )
