@@ -116,6 +116,21 @@ system/
   menu-patch.py              冪等注入齒輪選單
   install_alert_rules.php    add-only 告警規則安裝器（--fix-legacy 可修舊規則）
 install.sh / update.sh / uninstall.sh
+docs/
+  single-vm-deployment.md    LibreNMS + Graylog + jt-ipam 單機部署 Runbook（主文件）
+  deployment-guide.md        Linux VM 單機部署（舊版參考）
+  integrated-deployment.md   雙 VM 中型生產部署參考
+  oracle9i-monitoring.md     Oracle 9i JDBC thin 監控架構說明
+  oracle9i-aix-snmp-handoff.md  AIX SNMP 交接文件
+  oracle-dataguard/          DG/MView 早期參考實作
+  librenms/
+    CLAUDE.md                LibreNMS 專案 Claude Code 指示（WSL2 環境、Oracle GUI、SMTP）
+    rules/
+      deployment.md          WSL2 雙位置部署、帳密、服務管理
+      architecture.md        雙層架構（Laravel/Legacy）、監控資料流
+      commands.md            完整指令：測試、設備管理、前端、Laravel
+      gotchas.md             防錯機制 / Edge Cases
+      os-support.md          新增設備 OS 支援流程
 ```
 
 ---
