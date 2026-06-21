@@ -119,6 +119,9 @@ fi
 if command -v python3 >/dev/null; then
     say "修補 LibreNMS 齒輪選單"
     python3 "$HERE/system/menu-patch.py" "$LIBRENMS_DIR/resources/views/layouts/menu.blade.php" || warn "選單未自動修補，請見 README 手動加入"
+
+    say "修補 Custom Map blade（讓 custom_map_refresh 可獨立設定）"
+    python3 "$HERE/system/custom-map-patch.py" "$LIBRENMS_DIR/resources/views/map/custom-view.blade.php" || warn "Custom Map blade 未修補，區塊 F GUI 將無效果"
 fi
 
 # ── 6) 告警規則（add-only，需要 DB 已有指標後較有意義）─────────

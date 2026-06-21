@@ -233,6 +233,40 @@ code{color:#60b4f8;background:transparent}
   </div>
 </div>
 
+<!-- ═══ 區塊 F：自訂地圖刷新秒數 ══════════════════════════════════ -->
+<div class="card">
+  <div class="card-header">
+    <h5>▌ 區塊 F — Custom Map 自動刷新秒數</h5>
+  </div>
+  <div class="card-body">
+    <div class="row g-3">
+      <div class="col-md-5">
+        <div class="mb-2">
+          <label class="form-label">目前設定值</label>
+          <input type="text" class="form-control" id="fCurrent" value="—" readonly
+                 style="background:#0a1525;color:#8899bb">
+        </div>
+        <div class="mb-3">
+          <label class="form-label">新刷新秒數 <span class="text-danger">*</span>
+            <span class="text-muted" style="font-size:11px">（5 ~ 86400 秒；建議 30 ~ 300）</span>
+          </label>
+          <input type="number" class="form-control" id="fValue" min="5" max="86400"
+                 placeholder="例如 60">
+        </div>
+        <div class="d-flex gap-2 align-items-center">
+          <button class="btn btn-warning btn-sm" onclick="doSetCustomMapRefresh()">套用秒數</button>
+          <button class="btn btn-outline-secondary btn-sm" onclick="doClearCustomMapRefresh()">回復預設</button>
+          <span class="text-muted" style="font-size:11px">套用後 F5 重新整理地圖頁生效；只影響 Custom Map，不影響其他頁面</span>
+        </div>
+      </div>
+      <div class="col-md-7">
+        <label class="form-label">執行結果</label>
+        <div class="result-box" id="fResult">—</div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- ═══ 區塊 D：防火牆管理網段 ════════════════════════════════════ -->
 <div class="card">
   <div class="card-header">
@@ -737,12 +771,57 @@ async function nasUnmount() {
     loadNas();
 }
 
+// ── Block F: Custom Map Refresh ───────────────────────
+async function loadCustomMapRefresh() {
+    const r = await api('/oracle-custom-map.php', { action: 'get' });
+    const cur = document.getElementById('fCurrent');
+    if (r.ok && r.status === 'ok') {
+        cur.value = r.value !== null && r.value !== undefined
+            ? `${r.value} 秒（${r.source || ''}）`
+            : `未設定，目前使用全域 page_refresh（${r.source || ''}）`;
+    } else {
+        cur.value = '讀取失敗：' + (r.error || '');
+    }
+}
+
+async function doSetCustomMapRefresh() {
+    const val = parseInt(document.getElementById('fValue').value, 10);
+    if (!val || val < 5 || val > 86400) {
+        setResult('fResult', '<span class="err">⚠ 請輸入 5 ~ 86400 之間的整數</span>');
+        return;
+    }
+    setResult('fResult', '<span class="info">套用中...</span>');
+    const r = await api('/oracle-custom-map.php', { action: 'set', value: val });
+    if (r.ok && r.status === 'ok') {
+        setResult('fResult',
+            `<span class="ok">✓ 已套用 ${r.value} 秒\n下次開啟（或 F5 重整）Custom Map 自動生效</span>`);
+        loadCustomMapRefresh();
+    } else {
+        setResult('fResult', `<span class="err">✗ ${escapeHtml(r.error || '套用失敗')}</span>`);
+    }
+}
+
+async function doClearCustomMapRefresh() {
+    if (!confirm('確定移除 custom_map_refresh 設定？\n刷新時間將回到全域 page_refresh 值。')) return;
+    setResult('fResult', '<span class="info">移除中...</span>');
+    const r = await api('/oracle-custom-map.php', { action: 'clear' });
+    if (r.ok && r.status === 'ok') {
+        setResult('fResult',
+            `<span class="ok">✓ 已移除自訂設定\n下次 Custom Map 重整將套用全域 page_refresh</span>`);
+        document.getElementById('fValue').value = '';
+        loadCustomMapRefresh();
+    } else {
+        setResult('fResult', `<span class="err">✗ ${escapeHtml(r.error || '移除失敗')}</span>`);
+    }
+}
+
 // Init: load first DB into Block A form
 document.addEventListener('DOMContentLoaded', () => {
     const sel = document.getElementById('dbSelect');
     if (sel && sel.value) loadConf(sel.value);
     loadFirewall();
     loadNas();
+    loadCustomMapRefresh();
 });
 </script>
 </body>
