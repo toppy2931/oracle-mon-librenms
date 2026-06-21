@@ -1373,6 +1373,71 @@ sudo -u librenms bash -c "cd /opt/librenms && \
 
 ## 12. 疑難排解
 
+### FortiGate SNMP 故障排除順序（device 圖表無資料）
+
+**徵兆**：LibreNMS device 詳情頁顯示「Last Discovered 剛剛 + Downtime 數天」+ ICMP availability 圖在跳但 CPU/RAM/Traffic 圖表全空。RRD 檔（如 `fortigate_cpu.rrd`）的 mtime 停在某個過去時間點。
+
+**從 monitor-vm 端**：
+
+```bash
+# 必須先 cd 到 /opt/librenms，否則 librenms user 無法在 /home/<sudo-user> 下 spawn process
+cd /opt/librenms
+
+# 1. 確認 ICMP 通（區分 SNMP 問題 vs 設備掛掉）
+ping -c 3 <FORTIGATE_IP>
+
+# 2. SNMP 直接測試（用 numeric OID 避開 client MIB 缺失問題）
+sudo -u librenms snmpget -v3 -l authPriv \
+    -u librenms -a SHA-256 -A librenms \
+    -x AES-256 -X librenms \
+    -t 5 -r 1 \
+    <FORTIGATE_IP> .1.3.6.1.2.1.1.3.0
+
+# 3. UDP 161 是否可達（區分網路 vs FortiGate 內部）
+sudo nmap -sU -p 161 -Pn <FORTIGATE_IP>
+# open|filtered = FortiGate 收到但不回（典型 SNMPv3 認證/ACL 問題）
+```
+
+**從 FortiGate CLI 端**：
+
+```
+# 1. 確認 SNMP daemon 開著
+get system snmp sysinfo
+# 預期：status : enable
+
+# 2. 確認 user 名稱與設定（注意大小寫敏感！）
+show system snmp user
+
+# 3. 抓封包確認 FortiGate 是否收到 / 回應
+diagnose sniffer packet any 'host <MONITOR_VM_IP> and port 161' 4 0 30
+# 預期成功時：in <monitor>.xxx -> 161 + out 161 -> <monitor>.xxx
+# 若只有 in 沒有 out → FortiGate silently drop（往下查）
+```
+
+**故障排除順序（從外到內，命中率由高到低）**：
+
+| 層級 | 檢查項 | 失效徵兆 | 修法 |
+|------|--------|---------|------|
+| **L1. Interface Admin Access**（最常見） | Web UI → Network → Interfaces → 該 vlan → **Administrative Access 勾 SNMP** | 封包進來但 FortiGate 不回（sniffer 只看到 in） | 勾 SNMP → OK → Apply |
+| **L2. SNMP Agent enable** | System → SNMP → SNMP Agent toggle | 同上 | 開 toggle |
+| **L3. SNMPv3 user 存在 + 大小寫一致** | `show system snmp user` 對照 LibreNMS device 設定 | 同上（SNMPv3 unknown user 靜默丟） | 改成完全一致（user name case-sensitive） |
+| **L4. Auth/Priv 密碼明文一致** | Edit user → 重設兩個密碼 | 同上（auth failed 靜默丟） | 設成跟 LibreNMS `-A xxx -X xxx` 完全一致 |
+| **L5. Hosts / notify-hosts ACL** | Edit user → Hosts 欄位 | 同上 | 加入 monitor-vm IP（如 172.16.1.94） |
+
+⚠️ **L1 是最容易忽略也最關鍵**——SNMP daemon 設定全對、user/密碼/ACL 都對，但 interface 的 Administrative Access 沒勾 SNMP，FortiGate 就在入口層級 silently drop。沒勾 SNMP 上面 L2-L5 全做也沒用。
+
+**修完後在 monitor-vm 強制 poll 一次寫入 RRD**：
+
+```bash
+sudo -u librenms /opt/librenms/lnms device:poll <FORTIGATE_IP>
+ls -la /opt/librenms/rrd/<FORTIGATE_IP>/fortigate_cpu.rrd
+# mtime 應變成「剛剛」，不再停留在故障當日
+```
+
+幾分鐘後 LibreNMS device 詳情頁 CPU/RAM/Traffic 開始有資料。
+
+---
+
 ### git clone 失敗：destination path 'librenms' already exists
 
 當重新安裝或 `/opt/librenms` 目錄已存在時：
