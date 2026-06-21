@@ -32,7 +32,9 @@ if MARKER in text:
 # 兩處 $page_refresh 都要改：
 #   line ~186: sec: {{$page_refresh}},
 #   line ~194: cur.sec = {{$page_refresh}};
-patched, n = re.subn(r"\{\{\s*\$page_refresh\s*\}\}", NEW_EXPR, text)
+# 注意：NEW_EXPR 含反斜線（\LibrenmsConfig），不能當 re.sub 的 repl 字串直接傳
+#       （會把 \L 當 backreference 解析失敗）。用 lambda 繞過 backreference 解析。
+patched, n = re.subn(r"\{\{\s*\$page_refresh\s*\}\}", lambda m: NEW_EXPR, text)
 
 if n == 0:
     print("ANCHOR NOT FOUND - {{$page_refresh}} not present; nothing patched")
