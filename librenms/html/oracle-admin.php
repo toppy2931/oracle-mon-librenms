@@ -56,7 +56,7 @@ h4{color:#e94560;font-size:16px;margin:0}
 .form-label{font-size:12px;color:#8899bb;margin-bottom:4px}
 .btn-primary{background:#e94560;border-color:#e94560}
 .btn-primary:hover{background:#c73652;border-color:#c73652}
-.result-box{background:#0d1b2a;border:1px solid #1e4080;border-radius:4px;padding:10px 12px;min-height:48px;font-family:monospace;font-size:12px;white-space:pre-wrap;word-break:break-all}
+.result-box{background:#0d1b2a;border:1px solid #1e4080;border-radius:4px;padding:10px 12px;min-height:48px;font-family:monospace;font-size:12px;line-height:1.6;color:#cfe0ff;white-space:pre-wrap;word-break:break-all}
 .ok{color:#4ade80}.err{color:#f87171}.info{color:#60b4f8}
 .table{color:#d0d0e0;font-size:13px}
 .table-dark{--bs-table-bg:#0d1b2a;--bs-table-border-color:#1e4080}
@@ -628,10 +628,16 @@ async function listFwRules() {
     const j = await api('/oracle-firewall.php', {action: 'rules'});
     if (!j.ok) { box.innerHTML = `<span class="err">✗ ${escapeHtml(j.error||'查詢失敗')}</span>`; return; }
     if (!j.rules || !j.rules.length) {
-        box.innerHTML = '<span class="text-muted">（ufw 無管理埠允許規則，或 ufw 未啟用）</span>';
+        box.innerHTML = '<span class="info">（ufw 無管理埠允許規則，或 ufw 未啟用）</span>';
         return;
     }
-    box.innerHTML = j.rules.map(r => escapeHtml(r)).join('\n');
+    box.innerHTML = j.rules.map(r => {
+        const safe = escapeHtml(r);
+        let color = '#cfe0ff';                          // 一般：亮藍灰
+        if (/Anywhere/i.test(r))      color = '#ffb454'; // 全開放 → 橘色警示
+        else if (/mgmt-auto/.test(r)) color = '#4ade80'; // 自動管理 → 綠色
+        return `<span style="color:${color}">${safe}</span>`;
+    }).join('\n');
 }
 
 async function removeCidr(cidr) {
