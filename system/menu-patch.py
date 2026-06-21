@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
 """
-Idempotently inject the Oracle gear-menu entries into LibreNMS
+Idempotently upsert the Oracle/監控工具 gear-menu entries into LibreNMS
 resources/views/layouts/menu.blade.php.
 
-Adds a managed block (Oracle 監控管理 + Oracle 戰情室) inside an @can('admin')
-guard, right after the Settings "Validate Config" @endcanany. Safe to re-run:
-detects the BEGIN marker and does nothing if already present.
+Managed block (inside @can('admin')):
+  - Oracle 監控管理      → /oracle-admin.php
+  - Oracle 戰情室        → /oracle-dashboard.php
+  - jt-glogarch 日誌歸檔 → https://<目前瀏覽器主機>:8990
+       用 JS location.hostname 動態組 URL，故 monitor-vm IP 異動時，
+       按鈕連線會自動跟著使用者當前存取的 IP/主機名，無需改設定。
+
+Upsert 行為：若已存在 BEGIN..END 區塊則「整段替換」為最新內容（可重跑更新）；
+若不存在則插入於 Settings「Validate Config」@endcanany 之後。
 
 Usage: python3 menu-patch.py [/path/to/menu.blade.php]
 """
 import io
+import re
 import sys
 
 PATH = sys.argv[1] if len(sys.argv) > 1 else \
@@ -23,6 +30,7 @@ BLOCK = (
     "                        <li role=\"presentation\" class=\"divider\"></li>\n"
     "                        <li><a href=\"/oracle-admin.php\"><i class=\"fa fa-database fa-fw fa-lg\" aria-hidden=\"true\"></i> Oracle 監控管理</a></li>\n"
     "                        <li><a href=\"/oracle-dashboard.php\"><i class=\"fa fa-desktop fa-fw fa-lg\" aria-hidden=\"true\"></i> Oracle 戰情室</a></li>\n"
+    "                        <li><a href=\"#\" onclick=\"window.open('https://'+location.hostname+':8990','_blank');return false;\"><i class=\"fa fa-archive fa-fw fa-lg\" aria-hidden=\"true\"></i> jt-glogarch 日誌歸檔</a></li>\n"
     "                        @endcan\n"
     "                        " + END + "\n"
 )
@@ -30,8 +38,20 @@ BLOCK = (
 with io.open(PATH, "r", encoding="utf-8") as f:
     text = f.read()
 
-if BEGIN in text:
-    print("ALREADY PRESENT - no change")
+# 已存在 → 整段替換（更新到最新內容）
+if BEGIN in text and END in text:
+    new_text = re.sub(
+        re.escape(BEGIN) + r".*?" + re.escape(END) + r"\n?",
+        BLOCK,
+        text,
+        flags=re.DOTALL,
+    )
+    if new_text != text:
+        with io.open(PATH, "w", encoding="utf-8") as f:
+            f.write(new_text)
+        print("UPDATED oracle-mon menu block")
+    else:
+        print("ALREADY UP TO DATE - no change")
     sys.exit(0)
 
 # Preferred anchor: the @endcanany that closes the Settings (Validate Config) block.

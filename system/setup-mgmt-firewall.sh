@@ -30,6 +30,10 @@ set -euo pipefail
 MGMT_PORTS="${MGMT_PORTS:-22,80,443,9000,8990,8099}"
 EXTRA_CIDRS="${EXTRA_CIDRS:-}"
 
+# 持久化設定檔：一行一個 CIDR（# 開頭為註解）。GUI（區塊 D）寫入此檔，
+# 本腳本每次自動讀取，故「更新重跑」不會漏掉先前加過的網段。
+CIDR_CONF="${CIDR_CONF:-/etc/oracle-mon/mgmt-cidrs.conf}"
+
 say(){ echo -e "\033[1;36m[fw]\033[0m $*"; }
 [ "$(id -u)" -eq 0 ] || { echo "請以 sudo 執行"; exit 1; }
 command -v ufw >/dev/null 2>&1 || { echo "錯誤：未安裝 ufw"; exit 1; }
@@ -39,11 +43,22 @@ command -v ip  >/dev/null 2>&1 || { echo "錯誤：找不到 ip 指令"; exit 1;
 mapfile -t SUBNETS < <(ip -o -f inet route show scope link 2>/dev/null \
     | awk '{print $1}' | grep -vE '^169\.254\.' | sort -u)
 
-# 併入使用者額外指定的網段
+# 併入使用者額外指定的網段（環境變數）
 if [ -n "$EXTRA_CIDRS" ]; then
     IFS=',' read -ra _EX <<< "$EXTRA_CIDRS"
     SUBNETS+=("${_EX[@]}")
 fi
+
+# 併入持久化設定檔的網段（GUI 寫入；每次自動讀取）
+if [ -f "$CIDR_CONF" ]; then
+    while IFS= read -r line; do
+        line="$(echo "$line" | sed 's/#.*//; s/[[:space:]]//g')"
+        [ -n "$line" ] && SUBNETS+=("$line")
+    done < "$CIDR_CONF"
+fi
+
+# 去重
+mapfile -t SUBNETS < <(printf '%s\n' "${SUBNETS[@]}" | awk 'NF' | sort -u)
 
 if [ "${#SUBNETS[@]}" -eq 0 ]; then
     echo "錯誤：偵測不到任何本機網段，請用 EXTRA_CIDRS 明確指定，例如："

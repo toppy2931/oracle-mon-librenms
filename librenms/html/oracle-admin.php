@@ -233,6 +233,39 @@ code{color:#60b4f8;background:transparent}
   </div>
 </div>
 
+<!-- ═══ 區塊 D：防火牆管理網段 ════════════════════════════════════ -->
+<div class="card">
+  <div class="card-header">
+    <h5>▌ 區塊 D — 防火牆管理網段（可允許連入管理介面的來源）</h5>
+  </div>
+  <div class="card-body">
+    <div class="row g-3">
+      <div class="col-md-6">
+        <label class="form-label">自動偵測的本機網段（直連，永遠開放）</label>
+        <div class="result-box" id="fwAuto">載入中…</div>
+        <div class="text-muted mt-1" style="font-size:11px">由 <code>ip route</code> 自動偵測，IP/網段變動時自動跟隨，無需手動維護。</div>
+
+        <label class="form-label mt-3">額外允許的網段（其他內網網段 / 遠端管理）</label>
+        <div id="fwExtra"><div class="text-muted" style="font-size:12px">載入中…</div></div>
+
+        <div class="input-group input-group-sm mt-2">
+          <input type="text" class="form-control" id="fwNewCidr" placeholder="172.16.5.0/24">
+          <button class="btn btn-success" onclick="addCidr()">＋ 新增網段</button>
+        </div>
+        <div class="text-muted mt-1" style="font-size:11px">格式 <code>CIDR</code>，例 <code>172.16.5.0/24</code>。寫入持久化設定檔，套件更新重跑也不會漏。</div>
+      </div>
+      <div class="col-md-6">
+        <label class="form-label">操作結果</label>
+        <div class="result-box" id="fwResult">—</div>
+        <div class="text-muted mt-2" style="font-size:11px">
+          開放的管理埠：<code id="fwPorts">—</code><br>
+          ⚠ 日誌「接收」埠（514/12201/5044）需對 log 來源另行開放，不在此管理。
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 </div><!-- /container -->
 
 <script>
@@ -479,10 +512,61 @@ function setResult(id, html) {
     document.getElementById(id).innerHTML = html;
 }
 
+// ── Block D：防火牆管理網段 ──────────────────────────────
+async function loadFirewall() {
+    try {
+        const j = await api('/oracle-firewall.php', {action: 'list'});
+        if (!j.ok) { setResult('fwAuto', `<span class="err">${j.error||'載入失敗'}</span>`); return; }
+        document.getElementById('fwAuto').innerHTML =
+            (j.auto && j.auto.length) ? j.auto.map(c => `<code>${escapeHtml(c)}</code>`).join('  ')
+                                      : '<span class="text-muted">（偵測不到本機網段）</span>';
+        document.getElementById('fwPorts').textContent = j.ports || '—';
+        const ex = document.getElementById('fwExtra');
+        if (j.extra && j.extra.length) {
+            ex.innerHTML = j.extra.map(c =>
+                `<div class="d-flex align-items-center gap-2 mb-1">
+                    <code>${escapeHtml(c)}</code>
+                    <button class="btn btn-outline-danger btn-sm py-0" onclick="removeCidr('${escapeHtml(c)}')">移除</button>
+                 </div>`).join('');
+        } else {
+            ex.innerHTML = '<div class="text-muted" style="font-size:12px">（尚無額外網段；僅開放本機網段）</div>';
+        }
+    } catch (e) {
+        setResult('fwAuto', `<span class="err">載入錯誤：${e.message}</span>`);
+    }
+}
+
+async function addCidr() {
+    const cidr = document.getElementById('fwNewCidr').value.trim();
+    if (!cidr) { alert('請輸入網段 CIDR'); return; }
+    setResult('fwResult', '<span class="info">新增並套用中…</span>');
+    const j = await api('/oracle-firewall.php', {action: 'add', cidr});
+    if (j.ok) {
+        setResult('fwResult', `<span class="ok">✓ 已新增並套用：${escapeHtml(j.added||cidr)}</span>`);
+        document.getElementById('fwNewCidr').value = '';
+        loadFirewall();
+    } else {
+        setResult('fwResult', `<span class="err">✗ ${escapeHtml(j.error||'新增失敗')}</span>`);
+    }
+}
+
+async function removeCidr(cidr) {
+    if (!confirm(`確定移除網段「${cidr}」？\n將從設定檔刪除並移除對應防火牆規則。`)) return;
+    setResult('fwResult', '<span class="info">移除中…</span>');
+    const j = await api('/oracle-firewall.php', {action: 'remove', cidr});
+    if (j.ok) {
+        setResult('fwResult', `<span class="ok">✓ 已移除：${escapeHtml(j.removed||cidr)}</span>`);
+        loadFirewall();
+    } else {
+        setResult('fwResult', `<span class="err">✗ ${escapeHtml(j.error||'移除失敗')}</span>`);
+    }
+}
+
 // Init: load first DB into Block A form
 document.addEventListener('DOMContentLoaded', () => {
     const sel = document.getElementById('dbSelect');
     if (sel && sel.value) loadConf(sel.value);
+    loadFirewall();
 });
 </script>
 </body>
