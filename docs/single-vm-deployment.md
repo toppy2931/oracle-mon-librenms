@@ -195,34 +195,38 @@ librenms hard nofile 65536
 EOF
 ```
 
-### 3.2 防火牆基礎設定
+### 3.2 防火牆設定
+
+> **可攜性原則（重要）**：管理 UI 埠（Graylog 9000、jt-glogarch 8990、jt-gelflow 8099、
+> LibreNMS Web）**不要硬編碼網段**。佈署到不同客戶站點時 IP/網段都不同，硬編碼的
+> `from 172.16.0.0/16` 之類規則無法重用。改用 `system/setup-mgmt-firewall.sh`
+> **自動偵測本機網段**開放管理埠；日誌「接收」埠才用手動規則（因來源在外部）。
 
 ```bash
-# 允許 SSH
-sudo ufw allow 22/tcp
+# 啟用 ufw
+sudo ufw enable
 
-# LibreNMS Web
-sudo ufw allow 80/tcp
-sudo ufw allow 443/tcp
+# ── 管理 UI 埠：自動偵測本機網段並開放（可攜，免每站手調）──
+sudo /opt/oracle-mon-librenms/system/setup-mgmt-firewall.sh
+#   預設開放 22,80,443,9000,8990,8099 給「本機所在網段」
+#   另含遠端管理網段：sudo EXTRA_CIDRS="10.20.0.0/16" .../setup-mgmt-firewall.sh
+#   自訂埠：sudo MGMT_PORTS="80,443,9000,8990" .../setup-mgmt-firewall.sh
 
-# Graylog Web（僅限內網）
-sudo ufw allow from 10.0.0.0/8 to any port 9000
-
-# Graylog 接收 Log
+# ── 日誌「接收」埠：對「log 來源」開放（來源常不在本機網段，故維持手動）──
 sudo ufw allow 5044/tcp    # Beats
 sudo ufw allow 12201/udp   # GELF UDP
 sudo ufw allow 12201/tcp   # GELF TCP
 sudo ufw allow 514/udp     # Syslog UDP
+sudo ufw allow 161/udp     # SNMP（LibreNMS polling 回應）
 
-# jt-ipam
-sudo ufw allow from 10.0.0.0/8 to any port 8080
-
-# SNMP（LibreNMS polling）
-sudo ufw allow 161/udp
-
-sudo ufw enable
-sudo ufw status
+sudo ufw status verbose
 ```
+
+> **為何不用 nginx 反向代理把全部收斂到 443？**
+> 評估過（方案 C）：`jt-glogarch` 的 web server 無 `root_path` 選項、無法掛在子路徑下；
+> 且本機無 DNS，subdomain vhosts 在無 DNS 控制權的客戶站點不可攜。故採「自動偵測網段
+> + 各服務自身 HTTPS/帳密認證」，是最可攜且零 nginx 改動風險的方案。
+> 各管理介面本身都有登入驗證，限制來源網段即足夠。
 
 ---
 
