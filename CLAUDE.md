@@ -35,6 +35,23 @@ Browser  ─[POST + CSRF + X-CSRF-Token]──►  /opt/librenms/html/oracle-*.p
 
 ---
 
+## 修改 LibreNMS 內建檔的兩種標準模式
+
+除了上述「PHP↔shell」三層信任鏈，本 repo 還會修補 LibreNMS 內建檔（Blade view、PHP class、config.php 等）。**標準做法是 `system/*-patch.py` 冪等 upsert 腳本**，由 `install.sh` 呼叫。**禁止手動 sed 一次性改完不留追蹤**。
+
+| Patch 腳本 | 修改目標 | 標記方式 |
+|-----------|---------|---------|
+| `system/menu-patch.py` | `resources/views/layouts/menu.blade.php` 齒輪選單 | `{{-- BEGIN oracle-mon menu --}}` / `{{-- END --}}` 區塊整段替換 |
+| `system/custom-map-patch.py` | `resources/views/map/custom-view.blade.php` 兩處 `{{$page_refresh}}` 改 fallback 寫法 | `{{-- oracle-mon: custom_map_refresh patched --}}` sentinel comment |
+
+**Patch 腳本必須冪等**：偵測既有 marker，存在則 update / skip，不存在才 insert。
+
+**LibreNMS 升級時這些 patch 會被覆蓋**——`update.sh` 不會處理升級後的 LibreNMS code，使用者升完 LibreNMS 需重跑 `install.sh` 讓 patch 重新生效。
+
+⚠️ **`re.sub` 處理含反斜線的替換字串**（如 `\LibrenmsConfig::get(...)`）必須用 lambda 繞 backreference 解析，否則炸 `re.error: bad escape \L`（已踩過，見 `custom-map-patch.py` 註解）。
+
+---
+
 ## 重複跑安全（idempotency）
 
 `install.sh` 與 `update.sh` 設計成**任何時候重跑都不破壞既有狀態**：
@@ -117,7 +134,26 @@ jt-glogarch（`jasoncheng7115/jt-glogarch`）裝在同台 monitor-vm，本 repo 
 **NAS 備份（區塊 E / `manage-nas-backup.sh`，策略 B）**
 - jt-glogarch 歸檔仍寫本地獨立碟 `/data/graylog-archives`，再用 systemd timer `oracle-nas-sync`（hourly/6h/daily）rsync 同步到 NAS。**NAS 掉線只影響同步，不影響歸檔**。
 - 支援 NFS / CIFS，自動裝 `nfs-common`/`cifs-utils`、寫 fstab（**`nofail` 不卡開機**）；設定 `/etc/oracle-mon/nas-backup.conf`、CIFS 帳密 `/etc/oracle-mon/nas-credentials`(600)。
-- rsync 用 `--no-perms --no-owner --no-group`（相容 CIFS）。
+- rsync flags：`-rt --update --stats -i --no-perms --no-owner --no-group --omit-dir-times`
+  - 差異性備份（rsync 預設 mtime+size 比對只傳變動檔）
+  - `--update` 安全網：目標較新時跳過
+  - `--stats -i` 給 GUI 顯示「檔案總數 N ｜ 實際傳送 M ｜ 跳過 K ｜ 傳送 X MB」
+  - `--no-perms/owner/group` 相容 CIFS
+- 從 stdout 解析 `Number of files` / `transferred` / `Total bytes` 注入回傳 JSON 給 UI。
+
+---
+
+## 區塊 F：Custom Map 自動刷新秒數（寫 config.php 機制）
+
+LibreNMS 全域 `page_refresh` 影響所有自動重整頁面，但使用者常只想單獨調整 Custom Map。本區塊提供 GUI 設定 `custom_map_refresh`，**單獨覆寫 Custom Map 刷新間隔**而不影響其他頁面。
+
+關鍵設計：
+- **不走 `lnms config:set`**：custom config key 會被 `resources/definitions/config_definitions.json` 白名單擋下（拒收未定義 key）。直接維護 `/opt/librenms/config.php` 的 `$config['custom_map_refresh']`。
+- **Blade fallback**：`custom-map-patch.py` 把 `custom-view.blade.php` 兩處 `{{$page_refresh}}` 改成 `{{ \LibrenmsConfig::get('custom_map_refresh', $page_refresh) }}`，未設定時自然 fallback。
+- `set-custom-map-refresh.sh` set 時**先 `grep -vF` 刪光所有舊行再 append**，保證 N 次 set 後 config.php 仍只有 1 行（曾因 sed regex 失敗造成累積 4 行 bug）。
+- 設完跑 `artisan config:clear` 讓 Laravel 立即讀新值。
+
+⚠️ **同 pattern 可推廣到任何「LibreNMS 不在白名單的自訂 config」**：寫 config.php + blade `\LibrenmsConfig::get('<key>', <fallback>)` + `artisan config:clear`。
 
 ---
 
@@ -125,7 +161,11 @@ jt-glogarch（`jasoncheng7115/jt-glogarch`）裝在同台 monitor-vm，本 repo 
 
 - 純 **standalone PHP**（非 Blade）；改完**不需** `artisan view:clear`，但瀏覽器會快取 CSS/JS，測試時 `Ctrl+F5`。
 - 深色主題；`.result-box` 必須有明確文字色（曾因繼承色在深底上對比過低看不到）。狀態用 `.ok`/`.err`/`.info` class 上色，列表類輸出依語意上色（如 ufw Anywhere→橘警示、mgmt-auto→綠）。
-- 新增區塊照 A–E 既有模式：HTML 卡片 + `api(url,{action,...})`（POST JSON + `X-CSRF-TOKEN`）+ 後端回結構化 JSON。
+- 新增區塊照 A–F 既有模式：HTML 卡片 + `api(url,{action,...})`（POST JSON + `X-CSRF-TOKEN`）+ 後端回結構化 JSON。
+- **區塊由上到下嚴格按 A→B→C→D→E→F 順序排**（曾因多次 insert 變亂，重排過）。
+- **跳轉 URL 用 `${location.protocol}//`** 不要硬編 `http://`（將來切 HTTPS 不會壞）。
+- **Bootstrap CSS 本地化**：`html/css/oracle-admin/bootstrap-5.3.2.min.css`，由 `install.sh` 首次安裝時 `curl` 下載。**禁止從外部 CDN 引用**（內網環境會壞）。
+- LibreNMS 齒輪選單 label 是「**監控管理客製化設定**」（由 `menu-patch.py` 維護的單一真實來源；歷史名稱「Oracle 監控管理」已棄用）。
 
 ---
 
@@ -142,6 +182,7 @@ sudo -u librenms sudo -n /opt/oracle-mon/admin/test-db-adhoc.sh 172.16.1.101 152
 sudo -u librenms sudo -n /opt/oracle-mon/admin/scan-old-ip.sh 172.16.1.94
 sudo -u librenms sudo -n /opt/oracle-mon/admin/manage-mgmt-cidrs.sh list   # rules / add <cidr> / remove <cidr>
 sudo -u librenms sudo -n /opt/oracle-mon/admin/manage-nas-backup.sh status # save/test/sync/unmount
+sudo -u librenms sudo -n /opt/oracle-mon/admin/set-custom-map-refresh.sh get   # set <sec> / clear
 
 # 防火牆：自動偵測本機網段開放管理埠（可攜，每站直接跑）
 sudo /opt/oracle-mon-librenms/system/setup-mgmt-firewall.sh
@@ -167,16 +208,17 @@ sudo /opt/oracle-mon/run.sh l1hweb | python3 -m json.tool
 
 ## Web 端點清單（`/opt/librenms/html/`）
 
-主 GUI `oracle-admin.php` 由五個區塊組成：**A** Oracle 連線設定、**B** monitor-vm IP 異動、**C** 多 DB 管理、**D** 防火牆管理網段、**E** NAS 備份。每個區塊對應一支 AJAX endpoint 與一支 admin shell：
+主 GUI `oracle-admin.php` 由六個區塊組成（**順序固定 A→B→C→D→E→F**）：**A** Oracle 連線設定、**B** monitor-vm IP 異動、**C** 多 DB 管理、**D** 防火牆管理網段、**E** NAS 備份、**F** Custom Map 自動刷新秒數。每個區塊對應一支 AJAX endpoint 與一支 admin shell：
 
-| 端點 | 用途 | sudo shell |
-|------|------|-----------|
-| `oracle-admin.php` | 主 GUI（區塊 A–E） | — |
-| `oracle-dashboard.php` + `oracle-dashboard-data.php` | 戰情室即時面板 | — |
-| `oracle-save.php` | 儲存 DB 設定 | `save-db-conf.sh` |
-| `oracle-db-add.php` / `oracle-db-remove.php` | 新增 / 刪除 / 啟停 DB | `save-db-conf.sh` / `remove-db-conf.sh` + `update-snmpd-extends.sh` |
-| `oracle-test.php` | 連線測試（alias 或 adhoc 雙模式） | `test-db.sh` 或 `test-db-adhoc.sh` |
-| `oracle-ip-update.php` | monitor-vm IP 異動 + auto-scan 殘留 | `update-librenms-url.sh` + `scan-old-ip.sh` |
-| `oracle-scan-old-ip.php` | 獨立掃描 endpoint（IP 殘留唯讀檢查） | `scan-old-ip.sh` |
-| `oracle-firewall.php` | 區塊 D：管理網段 list/add/remove + 列出 ufw 實際允許來源(rules) | `manage-mgmt-cidrs.sh` |
-| `oracle-nasbackup.php` | 區塊 E：NAS 掛載/同步 status/save/test/sync/unmount | `manage-nas-backup.sh` |
+| 端點 | 區塊 | 用途 | sudo shell |
+|------|------|------|-----------|
+| `oracle-admin.php` | — | 主 GUI（區塊 A–F） | — |
+| `oracle-dashboard.php` + `oracle-dashboard-data.php` | — | 戰情室即時面板 | — |
+| `oracle-save.php` | A | 儲存 DB 設定 | `save-db-conf.sh` |
+| `oracle-test.php` | A/C | 連線測試（adhoc 表單值 / alias 已存檔雙模式） | `test-db.sh` 或 `test-db-adhoc.sh` |
+| `oracle-db-add.php` / `oracle-db-remove.php` | C | 新增 / 刪除 / 啟停 DB | `save-db-conf.sh` / `remove-db-conf.sh` + `update-snmpd-extends.sh` |
+| `oracle-ip-update.php` | B | monitor-vm IP 異動 + auto-scan 殘留 | `update-librenms-url.sh` + `scan-old-ip.sh` |
+| `oracle-scan-old-ip.php` | B | 獨立掃描 endpoint（IP 殘留唯讀檢查） | `scan-old-ip.sh` |
+| `oracle-firewall.php` | D | 管理網段 list/add/remove + 列出 ufw 實際允許來源(rules) | `manage-mgmt-cidrs.sh` |
+| `oracle-nasbackup.php` | E | NAS 掛載/同步 status/save/test/sync/unmount | `manage-nas-backup.sh` |
+| `oracle-custom-map.php` | F | Custom Map 自動刷新秒數 get/set/clear（寫 `config.php`） | `set-custom-map-refresh.sh` |
