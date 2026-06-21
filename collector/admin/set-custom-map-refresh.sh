@@ -13,13 +13,23 @@ set -e
 ACTION="${1:?usage: $0 get|set <seconds>|clear}"
 CONFIG_FILE="/opt/librenms/config.php"
 KEY='custom_map_refresh'
-PATTERN_RE="^\s*\$config\['${KEY}'\]\s*="
+# 用 fixed-string 偵測，避免 grep -E 對 \s 解讀的跨發行版差異
+FIXED_PAT="\$config['${KEY}']"
 
 current_value() {
+    # 取最後一個 $config['custom_map_refresh'] = NNN; 數字
+    # 用 grep -F 字面比對，再 sed 抽出 = 之後的數字
     [ -f "$CONFIG_FILE" ] || { echo ""; return; }
-    grep -E "$PATTERN_RE" "$CONFIG_FILE" \
-        | sed -E "s/.*=[[:space:]]*([0-9]+).*/\1/" \
+    grep -F "$FIXED_PAT" "$CONFIG_FILE" 2>/dev/null \
+        | sed -nE 's/^[[:space:]]*\$config\['"'"'[^'"'"']+'"'"'\][[:space:]]*=[[:space:]]*([0-9]+).*/\1/p' \
         | tail -1
+}
+
+remove_existing_lines() {
+    # 移除既有所有相關行（含可能的重複）
+    [ -f "$CONFIG_FILE" ] || return
+    grep -vF "$FIXED_PAT" "$CONFIG_FILE" > "${CONFIG_FILE}.tmp" || true
+    mv "${CONFIG_FILE}.tmp" "$CONFIG_FILE"
 }
 
 case "$ACTION" in
@@ -39,17 +49,19 @@ case "$ACTION" in
         [ "$VALUE" -ge 5 ] && [ "$VALUE" -le 86400 ] \
             || { printf '{"status":"error","error":"value out of range (5..86400)"}\n'; exit 1; }
 
-        [ -f "$CONFIG_FILE" ] || touch "$CONFIG_FILE"
-        if grep -qE "$PATTERN_RE" "$CONFIG_FILE"; then
-            # 替換既有行
-            sed -i -E "s|${PATTERN_RE}.*|\$config['${KEY}'] = ${VALUE};  // managed by oracle-admin GUI|" "$CONFIG_FILE"
-        else
-            # 確保 <?php 之後 append（首次寫入）
-            if ! grep -q '^<?php' "$CONFIG_FILE"; then
-                printf '<?php\n' > "$CONFIG_FILE"
-            fi
-            printf "\n\$config['%s'] = %d;  // managed by oracle-admin GUI\n" "$KEY" "$VALUE" >> "$CONFIG_FILE"
+        # 確保 config.php 存在且有 <?php header
+        if [ ! -f "$CONFIG_FILE" ]; then
+            printf '<?php\n' > "$CONFIG_FILE"
+        elif ! head -1 "$CONFIG_FILE" | grep -q '^<?php'; then
+            # 罕見情境：existing file 沒 <?php，補上
+            sed -i '1i <?php' "$CONFIG_FILE"
         fi
+
+        # 先清掉所有舊行（去重 + 改值用同一 path）
+        remove_existing_lines
+
+        # Append 單一行（保證唯一）
+        printf "\$config['%s'] = %d;  // managed by oracle-admin GUI\n" "$KEY" "$VALUE" >> "$CONFIG_FILE"
         chown librenms:librenms "$CONFIG_FILE"
 
         # 清 Laravel config cache 讓新值立即生效
@@ -59,8 +71,8 @@ case "$ACTION" in
         ;;
 
     clear)
-        if [ -f "$CONFIG_FILE" ] && grep -qE "$PATTERN_RE" "$CONFIG_FILE"; then
-            sed -i -E "/${PATTERN_RE}/d" "$CONFIG_FILE"
+        if [ -f "$CONFIG_FILE" ] && grep -qF "$FIXED_PAT" "$CONFIG_FILE"; then
+            remove_existing_lines
             sudo -u librenms php /opt/librenms/artisan config:clear >/dev/null 2>&1 || true
             printf '{"status":"ok","action":"clear"}\n'
         else
