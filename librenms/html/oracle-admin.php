@@ -261,6 +261,11 @@ code{color:#60b4f8;background:transparent}
           開放的管理埠：<code id="fwPorts">—</code><br>
           ⚠ 日誌「接收」埠（514/12201/5044）需對 log 來源另行開放，不在此管理。
         </div>
+        <div class="d-flex justify-content-between align-items-center mt-3">
+          <label class="form-label mb-0">目前允許連入管理介面的來源（ufw 實際規則）</label>
+          <button class="btn btn-outline-info btn-sm py-0" onclick="listFwRules()">🔍 查詢</button>
+        </div>
+        <div class="result-box mt-1" id="fwRules">點「🔍 查詢」列出 ufw 目前的允許規則（含舊手動規則與 Anywhere）</div>
       </div>
     </div>
   </div>
@@ -615,6 +620,18 @@ async function addCidr() {
     } else {
         setResult('fwResult', `<span class="err">✗ ${escapeHtml(j.error||'新增失敗')}</span>`);
     }
+}
+
+async function listFwRules() {
+    const box = document.getElementById('fwRules');
+    box.innerHTML = '<span class="info">查詢中…</span>';
+    const j = await api('/oracle-firewall.php', {action: 'rules'});
+    if (!j.ok) { box.innerHTML = `<span class="err">✗ ${escapeHtml(j.error||'查詢失敗')}</span>`; return; }
+    if (!j.rules || !j.rules.length) {
+        box.innerHTML = '<span class="text-muted">（ufw 無管理埠允許規則，或 ufw 未啟用）</span>';
+        return;
+    }
+    box.innerHTML = j.rules.map(r => escapeHtml(r)).join('\n');
 }
 
 async function removeCidr(cidr) {

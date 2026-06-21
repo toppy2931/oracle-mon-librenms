@@ -99,7 +99,21 @@ case "$ACTION" in
     printf '{"ok":true,"removed":"%s"}\n' "$CIDR"
     ;;
 
+  rules)
+    # 列出 ufw 中「管理埠」目前的允許來源（含舊手動規則、Anywhere），反映真實狀態
+    out="["; first=1
+    while IFS= read -r ln; do
+        ln="$(echo "$ln" | sed 's/  */ /g; s/^ //; s/ $//; s/"/'\''/g')"
+        [ -z "$ln" ] && continue
+        [ $first -eq 1 ] && first=0 || out="$out,"
+        out="$out\"$ln\""
+    done < <(ufw status 2>/dev/null \
+        | grep -E '^(22|80|443|8080|8099|8990|9000)(/tcp)?([[:space:]]|\(v6\))' \
+        | grep -E 'ALLOW')
+    printf '{"ok":true,"rules":%s}\n' "$out]"
+    ;;
+
   *)
-    json_err "未知動作：$ACTION（需 list|add|remove）"
+    json_err "未知動作：$ACTION（需 list|add|remove|rules）"
     ;;
 esac

@@ -23,16 +23,17 @@ $body   = json_decode(file_get_contents('php://input'), true) ?: [];
 $action = $body['action'] ?? '';
 $cidr   = $body['cidr'] ?? '';
 
-if (!in_array($action, ['list', 'add', 'remove'], true)) {
+if (!in_array($action, ['list', 'add', 'remove', 'rules'], true)) {
     exit(json_encode(['ok' => false, 'error' => '未知動作']));
 }
-// 寫入類動作才需 CIDR；先做格式把關（後端腳本會再驗一次）
-if ($action !== 'list' && !preg_match('#^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$#', $cidr)) {
+// 寫入類動作（add/remove）才需 CIDR；先做格式把關（後端腳本會再驗一次）
+$needs_cidr = in_array($action, ['add', 'remove'], true);
+if ($needs_cidr && !preg_match('#^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$#', $cidr)) {
     exit(json_encode(['ok' => false, 'error' => 'CIDR 格式不正確（需如 172.16.5.0/24）']));
 }
 
 $cmd = ['sudo', '/opt/oracle-mon/admin/manage-mgmt-cidrs.sh', $action];
-if ($action !== 'list') {
+if ($needs_cidr) {
     $cmd[] = $cidr;
 }
 
