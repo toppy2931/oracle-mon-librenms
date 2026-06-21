@@ -228,6 +228,21 @@ sudo ufw status verbose
 > + 各服務自身 HTTPS/帳密認證」，是最可攜且零 nginx 改動風險的方案。
 > 各管理介面本身都有登入驗證，限制來源網段即足夠。
 
+#### 額外管理網段（其他內網網段 / 遠端管理）
+
+本機直連網段會自動偵測；**其他經路由轉送的網段**（如管理者在不同 VLAN）需另外加入。
+兩種方式，**寫入同一個持久化設定檔** `/etc/oracle-mon/mgmt-cidrs.conf`，
+`setup-mgmt-firewall.sh` 每次自動讀取（更新重跑不會漏）：
+
+- **GUI（建議）**：登入 LibreNMS →「⚙ → Oracle 監控管理」→ **區塊 D 防火牆管理網段**，
+  直接增/刪網段，即時套用。
+- **CLI**：
+  ```bash
+  sudo /opt/oracle-mon/admin/manage-mgmt-cidrs.sh add 172.16.5.0/24
+  sudo /opt/oracle-mon/admin/manage-mgmt-cidrs.sh remove 172.16.5.0/24
+  sudo /opt/oracle-mon/admin/manage-mgmt-cidrs.sh list
+  ```
+
 ---
 
 ## 4. LVM 磁碟分割
