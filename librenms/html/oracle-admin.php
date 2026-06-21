@@ -266,6 +266,73 @@ code{color:#60b4f8;background:transparent}
   </div>
 </div>
 
+<!-- ═══ 區塊 E：NAS 備份（本地歸檔 → 同步 NAS）════════════════════ -->
+<div class="card">
+  <div class="card-header">
+    <h5>▌ 區塊 E — NAS 備份（jt-glogarch 歸檔本地優先，定期同步至 NAS）</h5>
+  </div>
+  <div class="card-body">
+    <div class="row g-3">
+      <div class="col-md-6">
+        <label class="form-label">目前狀態</label>
+        <div class="result-box" id="nasStatus">載入中…</div>
+
+        <div class="row g-2 mt-2">
+          <div class="col-5">
+            <label class="form-label">協定</label>
+            <select class="form-select" id="nasProto" onchange="nasToggleCifs()">
+              <option value="nfs">NFS</option>
+              <option value="cifs">SMB / CIFS</option>
+            </select>
+          </div>
+          <div class="col-7">
+            <label class="form-label">NAS 位址（IP / 主機名）</label>
+            <input class="form-control" id="nasServer" placeholder="172.16.1.x">
+          </div>
+        </div>
+        <div class="mb-2 mt-2">
+          <label class="form-label" id="nasExportLbl">匯出路徑（NFS export）</label>
+          <input class="form-control" id="nasExport" placeholder="/volume1/glogarch">
+        </div>
+        <div class="row g-2 mb-2">
+          <div class="col-7">
+            <label class="form-label">本機掛載點</label>
+            <input class="form-control" id="nasMount" value="/mnt/nas-glogarch">
+          </div>
+          <div class="col-5">
+            <label class="form-label">同步頻率</label>
+            <select class="form-select" id="nasSched">
+              <option value="hourly">每小時</option>
+              <option value="6h">每 6 小時</option>
+              <option value="daily" selected>每日</option>
+            </select>
+          </div>
+        </div>
+        <div id="nasCifsCreds" style="display:none">
+          <div class="row g-2 mb-2">
+            <div class="col-6"><label class="form-label">CIFS 帳號</label><input class="form-control" id="nasUser"></div>
+            <div class="col-6"><label class="form-label">CIFS 密碼</label><input type="password" class="form-control" id="nasPass"></div>
+          </div>
+        </div>
+        <div class="d-flex gap-2 mt-2 flex-wrap">
+          <button class="btn btn-primary btn-sm" onclick="nasSave()">儲存並掛載</button>
+          <button class="btn btn-outline-info btn-sm" onclick="nasTest()">測試</button>
+          <button class="btn btn-outline-success btn-sm" onclick="nasSync()">立即同步</button>
+          <button class="btn btn-outline-danger btn-sm" onclick="nasUnmount()">卸載 / 停用</button>
+        </div>
+      </div>
+      <div class="col-md-6">
+        <label class="form-label">操作結果</label>
+        <div class="result-box" id="nasResult">—</div>
+        <div class="text-muted mt-2" style="font-size:11px">
+          策略：jt-glogarch 歸檔仍寫本地 <code>/data/graylog-archives</code>（獨立 500G 碟），
+          再依頻率 rsync 同步到 NAS；NAS 掉線不影響歸檔。fstab 以 <code>nofail</code> 掛載，不卡開機。
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 </div><!-- /container -->
 
 <script>
@@ -562,11 +629,97 @@ async function removeCidr(cidr) {
     }
 }
 
+// ── Block E：NAS 備份 ──────────────────────────────────
+function nasToggleCifs() {
+    const isCifs = document.getElementById('nasProto').value === 'cifs';
+    document.getElementById('nasCifsCreds').style.display = isCifs ? '' : 'none';
+    document.getElementById('nasExportLbl').textContent = isCifs ? '共享名稱（CIFS share）' : '匯出路徑（NFS export）';
+    document.getElementById('nasExport').placeholder = isCifs ? 'backup' : '/volume1/glogarch';
+}
+
+async function loadNas() {
+    try {
+        const j = await api('/oracle-nasbackup.php', {action: 'status'});
+        if (!j.ok) { setResult('nasStatus', `<span class="err">${escapeHtml(j.error||'載入失敗')}</span>`); return; }
+        if (!j.configured) {
+            setResult('nasStatus', '<span class="info">尚未設定 NAS 備份</span>');
+        } else {
+            const mounted = j.mounted ? '<span class="ok">● 已掛載</span>' : '<span class="err">● 未掛載</span>';
+            const enabled = j.enabled ? '<span class="ok">啟用</span>' : '<span class="err">停用</span>';
+            setResult('nasStatus',
+                `${mounted}　排程：${enabled}（${escapeHtml(j.schedule||'')}）\n`+
+                `${escapeHtml(j.protocol||'')}  //${escapeHtml(j.server||'')}/${escapeHtml(j.export||'')}\n`+
+                `掛載點：${escapeHtml(j.mountpoint||'')}\n`+
+                `本地歸檔大小：${escapeHtml(j.archive_size||'?')}　NAS 可用：${escapeHtml(j.nas_avail||'?')}\n`+
+                `上次同步：${escapeHtml(j.last_sync||'（尚未同步）')}`);
+            // 回填表單
+            if (j.protocol) document.getElementById('nasProto').value = j.protocol;
+            if (j.server)   document.getElementById('nasServer').value = j.server;
+            if (j.export)   document.getElementById('nasExport').value = j.export;
+            if (j.mountpoint) document.getElementById('nasMount').value = j.mountpoint;
+            if (j.schedule) document.getElementById('nasSched').value = j.schedule;
+            nasToggleCifs();
+        }
+    } catch (e) {
+        setResult('nasStatus', `<span class="err">載入錯誤：${e.message}</span>`);
+    }
+}
+
+async function nasSave() {
+    const proto = document.getElementById('nasProto').value;
+    const payload = {
+        action: 'save',
+        protocol: proto,
+        server: document.getElementById('nasServer').value.trim(),
+        export: document.getElementById('nasExport').value.trim(),
+        mountpoint: document.getElementById('nasMount').value.trim(),
+        schedule: document.getElementById('nasSched').value,
+    };
+    if (proto === 'cifs') {
+        payload.cifs_user = document.getElementById('nasUser').value.trim();
+        payload.cifs_pass = document.getElementById('nasPass').value;
+    }
+    setResult('nasResult', '<span class="info">掛載並設定排程中…</span>');
+    const j = await api('/oracle-nasbackup.php', payload);
+    setResult('nasResult', j.ok
+        ? `<span class="ok">✓ 已掛載並啟用同步排程（${escapeHtml(j.schedule||'')}）</span>`
+        : `<span class="err">✗ ${escapeHtml(j.error||'失敗')}</span>`);
+    loadNas();
+}
+
+async function nasTest() {
+    setResult('nasResult', '<span class="info">測試中…</span>');
+    const j = await api('/oracle-nasbackup.php', {action: 'test'});
+    setResult('nasResult', j.ok
+        ? '<span class="ok">✓ 掛載點可讀寫</span>'
+        : `<span class="err">✗ ${escapeHtml(j.error||'測試失敗')}</span>`);
+}
+
+async function nasSync() {
+    setResult('nasResult', '<span class="info">同步中（檔案多時可能較久）…</span>');
+    const j = await api('/oracle-nasbackup.php', {action: 'sync'});
+    setResult('nasResult', j.ok
+        ? `<span class="ok">✓ 同步完成 ${escapeHtml(j.synced_at||'')}</span>`
+        : `<span class="err">✗ ${escapeHtml(j.error||'同步失敗')}</span>`);
+    loadNas();
+}
+
+async function nasUnmount() {
+    if (!confirm('確定卸載並停用 NAS 同步？\n（本地歸檔與 NAS 上已同步的檔案都會保留）')) return;
+    setResult('nasResult', '<span class="info">卸載中…</span>');
+    const j = await api('/oracle-nasbackup.php', {action: 'unmount'});
+    setResult('nasResult', j.ok
+        ? '<span class="ok">✓ 已卸載並停用排程</span>'
+        : `<span class="err">✗ ${escapeHtml(j.error||'失敗')}</span>`);
+    loadNas();
+}
+
 // Init: load first DB into Block A form
 document.addEventListener('DOMContentLoaded', () => {
     const sel = document.getElementById('dbSelect');
     if (sel && sel.value) loadConf(sel.value);
     loadFirewall();
+    loadNas();
 });
 </script>
 </body>

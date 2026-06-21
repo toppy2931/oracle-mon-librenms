@@ -7,3 +7,4 @@ librenms ALL=(root) NOPASSWD: /opt/oracle-mon/admin/test-db.sh
 librenms ALL=(root) NOPASSWD: /opt/oracle-mon/admin/test-db-adhoc.sh
 librenms ALL=(root) NOPASSWD: /opt/oracle-mon/admin/scan-old-ip.sh
 librenms ALL=(root) NOPASSWD: /opt/oracle-mon/admin/manage-mgmt-cidrs.sh
+librenms ALL=(root) NOPASSWD: /opt/oracle-mon/admin/manage-nas-backup.sh
