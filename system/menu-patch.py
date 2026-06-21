@@ -42,8 +42,9 @@ with io.open(PATH, "r", encoding="utf-8") as f:
 
 # 已存在 → 整段替換（更新到最新內容）
 if BEGIN in text and END in text:
+    # 連同 BEGIN 行前的水平空白一起吃掉，避免每次重跑縮排累積變長
     new_text = re.sub(
-        re.escape(BEGIN) + r".*?" + re.escape(END) + r"\n?",
+        r"[ \t]*" + re.escape(BEGIN) + r".*?" + re.escape(END) + r"\n?",
         BLOCK,
         text,
         flags=re.DOTALL,
