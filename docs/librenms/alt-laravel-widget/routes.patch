@@ -1,0 +1,25 @@
+diff --git a/routes/api.php b/routes/api.php
+index 398ec6ead..f80ca612b 100644
+--- a/routes/api.php
++++ b/routes/api.php
+@@ -59,6 +59,8 @@ Route::prefix('v0')->group(function (): void {
+             Route::get('alertlog/{hostname?}', [App\Api\Controllers\LegacyApiController::class, 'list_logs'])->name('list_alertlog');
+             Route::get('authlog', [App\Api\Controllers\LegacyApiController::class, 'list_logs'])->name('list_authlog');
+         });
++
++        Route::get('oracle-dg-mv-status', [App\Api\Controllers\OracleDgMvController::class, 'status'])->name('oracle_dg_mv_status');
+     });
+ 
+     // admin required
+diff --git a/routes/web.php b/routes/web.php
+index e5cd85cc0..86eac39f5 100644
+--- a/routes/web.php
++++ b/routes/web.php
+@@ -406,6 +406,7 @@ Route::middleware(['auth'])->group(function (): void {
+             Route::post('top-interfaces', Widgets\TopInterfacesController::class);
+             Route::post('top-errors', Widgets\TopErrorsController::class);
+             Route::post('worldmap', Widgets\WorldMapController::class)->name('widget.worldmap');
++            Route::post('oracle-status', Widgets\OracleStatusController::class);
+         });
+     });
+ 
