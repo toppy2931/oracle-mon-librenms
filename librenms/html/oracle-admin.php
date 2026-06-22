@@ -170,6 +170,12 @@ code{color:#60b4f8;background:transparent}
         <div class="result-box" id="bScan">—（點「🔍 掃描舊 IP」或在 IP 變更後自動執行）</div>
       </div>
     </div>
+    <div class="alert mt-3 mb-0" style="background:#3a2c10;border:1px solid #d99a30;color:#ffd98a;font-size:12px;border-radius:6px;padding:10px 12px">
+      <strong>📌 重要提醒（有填遮罩/閘道時）：</strong>
+      系統<strong>只會寫入 netplan 設定檔，不會自動套用</strong>。務必到 VM 的 <strong>console</strong>（Proxmox／vSphere）執行下列指令才會生效：
+      <div style="margin-top:6px"><code style="background:#0a1525;color:#7fe0a0;padding:3px 8px;border-radius:4px;font-size:13px">sudo netplan apply</code></div>
+      <div style="margin-top:6px;color:#e0b870">套用瞬間連線會切到新 IP，請確認 console 可達後再執行；若出錯，把備份目錄的 <code>*.yaml</code> 複製回 <code>/etc/netplan</code> 後再 <code>netplan apply</code> 還原。</div>
+    </div>
   </div>
 </div>
 
