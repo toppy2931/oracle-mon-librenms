@@ -118,7 +118,7 @@ body{margin:0;background:#0b1020;color:#dfe6f5;font-family:"Segoe UI","Microsoft
     <h5>版面設定</h5>
     <div class="hint">每張卡片右上角的 ⚙ 可單獨設定該卡片要顯示哪些區塊；拖拉卡片可調整顯示順序。</div>
     <div class="sp-foot">
-        <button class="reset" id="reset-order">重設卡片順序</button>
+        <button class="reset" id="reset-order">重設版面（全部顯示＋預設順序）</button>
     </div>
 </div>
 
@@ -495,9 +495,13 @@ settingsBtn.addEventListener('click', e=>{
     cardPop.classList.remove('open');
     settingsPop.classList.toggle('open');
 });
-document.getElementById('reset-order').addEventListener('click', ()=>{
-    saveLayout([]);   // 存空順序 = 回預設排序（下次資料刷新/重整生效）
-    showToast('已重設卡片順序');
+document.getElementById('reset-order').addEventListener('click', async ()=>{
+    // 全部還原：清掉每卡片隱藏 + 卡片順序，存檔後立即重繪（不必等下次刷新）
+    cardHidden = {};
+    cardOrder = [];
+    settingsPop.classList.remove('open');
+    await saveLayout([]);   // 送 hidden={}、order=[]
+    await refresh();        // 立即以「全部顯示 + 預設順序」重繪
 });
 
 // --- 每張卡片的 ⚙：開啟浮動選單並載入該卡片狀態（事件委派於穩定的 #grid）---
