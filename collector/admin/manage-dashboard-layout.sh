@@ -4,9 +4,12 @@
 #
 # 由 oracle-dashboard-layout.php 經 sudo 呼叫（sudoers 白名單）。
 #
-# 設定檔：/etc/oracle-mon/dashboard-layout.conf
+# 設定檔：/var/lib/oracle-mon/dashboard-layout.conf
 #   CARD_ORDER="l1hweb db2"                    # 卡片顯示順序（alias）
 #   CARD_HIDDEN="l1hweb=mview,warn;db2=dg"      # 每張卡片隱藏的區塊
+#
+# 注意：放在 /var/lib（非 /etc）— php-fpm.service 設了 ProtectSystem=full，
+#       /etc 對 php-fpm 及其 sudo 子行程是唯讀（EROFS），/var 才可寫。
 #
 # Usage:
 #   manage-dashboard-layout.sh get
@@ -17,7 +20,7 @@
 set -e
 
 ACTION="${1:?usage: $0 get|set <order> <hidden_map>}"
-CONF_DIR="/etc/oracle-mon"
+CONF_DIR="/var/lib/oracle-mon"
 CONF_FILE="$CONF_DIR/dashboard-layout.conf"
 VALID_BLOCKS="dg mview health ts warn"
 
