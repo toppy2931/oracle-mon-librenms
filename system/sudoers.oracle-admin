@@ -9,3 +9,4 @@ librenms ALL=(root) NOPASSWD: /opt/oracle-mon/admin/scan-old-ip.sh
 librenms ALL=(root) NOPASSWD: /opt/oracle-mon/admin/manage-mgmt-cidrs.sh
 librenms ALL=(root) NOPASSWD: /opt/oracle-mon/admin/manage-nas-backup.sh
 librenms ALL=(root) NOPASSWD: /opt/oracle-mon/admin/set-custom-map-refresh.sh
+librenms ALL=(root) NOPASSWD: /opt/oracle-mon/admin/manage-dashboard-layout.sh
