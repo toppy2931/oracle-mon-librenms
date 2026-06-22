@@ -1,0 +1,11 @@
+[Unit]
+Description=Watch oracle-mon privileged-request queue
+Documentation=man:systemd.path(5)
+
+[Path]
+# 佇列出現 *.req 即觸發 applier；applier 處理完刪檔，條件回 false 後可再觸發
+PathExistsGlob=/var/lib/oracle-mon/requests/*.req
+Unit=oracle-mon-apply.service
+
+[Install]
+WantedBy=multi-user.target

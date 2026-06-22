@@ -103,6 +103,19 @@ say "安裝 sudoers"
 install -m 440 -o root -g root "$HERE/system/sudoers.oracle-admin" /etc/sudoers.d/oracle-admin
 visudo -cf /etc/sudoers.d/oracle-admin >/dev/null || die "sudoers 語法錯誤"
 
+# ── 3.5) 特權請求佇列 applier（systemd path + service）──────────
+# php-fpm 設 ProtectSystem=full，無法直接寫 /etc/ufw、/etc/fstab、管 systemd/mount。
+# 改由 web 寫請求檔到 /var/lib/oracle-mon/requests，systemd 觸發 applier（root）套用。
+say "安裝特權請求佇列 applier（systemd）"
+mkdir -p "$ORACLE_MON_DIR" /var/lib/oracle-mon/requests /var/lib/oracle-mon/results
+chown root:root /var/lib/oracle-mon /var/lib/oracle-mon/requests /var/lib/oracle-mon/results
+chmod 755 /var/lib/oracle-mon
+chmod 700 /var/lib/oracle-mon/requests /var/lib/oracle-mon/results
+install -m 644 -o root -g root "$HERE/system/oracle-mon-apply.service" /etc/systemd/system/oracle-mon-apply.service
+install -m 644 -o root -g root "$HERE/system/oracle-mon-apply.path"    /etc/systemd/system/oracle-mon-apply.path
+systemctl daemon-reload
+systemctl enable --now oracle-mon-apply.path >/dev/null 2>&1 || warn "請手動 enable oracle-mon-apply.path"
+
 # ── 4) snmpd managed block（冪等）─────────────────────────────
 if ! grep -q "BEGIN oracle-mon managed" "$SNMPD_CONF" 2>/dev/null; then
     say "注入 snmpd extend managed block"

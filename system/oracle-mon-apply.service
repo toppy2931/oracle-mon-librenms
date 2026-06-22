@@ -1,0 +1,12 @@
+[Unit]
+Description=Apply oracle-mon privileged requests (firewall / NAS)
+Documentation=man:systemd.service(5)
+
+[Service]
+Type=oneshot
+# 以 root 執行且不套用 ProtectSystem：需寫 /etc/ufw、/etc/fstab、管 systemd/mount
+ExecStart=/opt/oracle-mon/admin/oracle-mon-apply.sh
+# 安全收斂：除了套用所需，其餘權限縮到最小
+NoNewPrivileges=no
+ProtectHome=yes
+PrivateTmp=yes

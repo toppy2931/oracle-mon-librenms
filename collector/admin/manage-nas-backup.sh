@@ -74,7 +74,7 @@ case "$ACTION" in
         FSLINE="//${SERVER}/${EXPORT} ${MOUNTPOINT} cifs credentials=${CRED},nofail,_netdev,iocharset=utf8,file_mode=0640,dir_mode=0750 0 0  ${FSTAG}"
     fi
     # 移除舊的本工具 fstab 行後重寫
-    sed -i "\#${FSTAG}#d" /etc/fstab
+    sed -i "\|${FSTAG}|d" /etc/fstab   # 用 | 當分隔；FSTAG 以 # 開頭，不可用 # 當分隔
     echo "$FSLINE" >> /etc/fstab
 
     # 先卸載再掛載（套用新設定）
@@ -172,7 +172,7 @@ TIMEREOF
     load
     systemctl disable --now oracle-nas-sync.timer >/dev/null 2>&1 || true
     [ -n "${MOUNTPOINT:-}" ] && umount "${MOUNTPOINT}" 2>/dev/null || true
-    sed -i "\#${FSTAG}#d" /etc/fstab
+    sed -i "\|${FSTAG}|d" /etc/fstab   # 用 | 當分隔；FSTAG 以 # 開頭，不可用 # 當分隔
     rm -f "$CONF" "$CRED"
     printf '{"ok":true,"removed":true}\n'
     ;;
