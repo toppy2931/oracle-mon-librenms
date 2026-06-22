@@ -136,6 +136,15 @@ code{color:#60b4f8;background:transparent}
         <div class="mb-3"><label class="form-label">新 IP <span class="text-danger">*</span></label>
           <input type="text" class="form-control" id="bNew" placeholder="172.16.1.xxx">
         </div>
+        <div class="row g-2 mb-3">
+          <div class="col-6"><label class="form-label">子網路遮罩 (CIDR)</label>
+            <input type="text" class="form-control" id="bCidr" placeholder="24">
+          </div>
+          <div class="col-6"><label class="form-label">預設閘道</label>
+            <input type="text" class="form-control" id="bGw" placeholder="172.16.1.254">
+          </div>
+        </div>
+        <div class="text-muted mb-3" style="font-size:11px">遮罩＋閘道兩者都填 → 產生主機 netplan 網路設定（只寫檔，不自動套用）；兩者留空 → 只改 LibreNMS base_url</div>
         <div class="mb-3">
           <div class="form-check mb-1">
             <input class="form-check-input" type="checkbox" id="chkBase" checked>
@@ -152,7 +161,7 @@ code{color:#60b4f8;background:transparent}
         </div>
         <button class="btn btn-warning btn-sm" onclick="doIpUpdate()">套用 IP 變更</button>
         <button class="btn btn-info btn-sm ms-2" onclick="doScanOldIp()">🔍 掃描舊 IP</button>
-        <div class="text-muted mt-2" style="font-size:11px">⚠ 套用後頁面將自動跳轉至新 IP；掃描為唯讀檢查，不修改任何檔案</div>
+        <div class="text-muted mt-2" style="font-size:11px">⚠ 未填遮罩/閘道時，套用後頁面跳轉至新 IP；有填則僅寫 netplan，需到 console 執行 <code>sudo netplan apply</code> 才生效。掃描為唯讀檢查。</div>
       </div>
       <div class="col-md-7">
         <label class="form-label">執行結果</label>
@@ -564,25 +573,45 @@ async function delDb(alias) {
 async function doIpUpdate() {
     const newIp = document.getElementById('bNew').value.trim();
     if (!newIp) { alert('請輸入新 IP'); return; }
-    if (!confirm(`確定將 monitor-vm IP 更新為 ${newIp}？\n套用後頁面將跳轉至新 IP。`)) return;
-    setResult('bResult', '<span class="info">更新中...</span>');
+    const cidr = document.getElementById('bCidr').value.trim().replace(/^\//, '');
+    const gw   = document.getElementById('bGw').value.trim();
+    const willNet = cidr !== '' && gw !== '';
+    const msg = willNet
+        ? `確定產生主機網路設定？\nIP ${newIp}/${cidr}　閘道 ${gw}\n\n注意：只會「寫入」netplan，不會自動套用。\n需到 console 執行 sudo netplan apply 才生效（套用瞬間連線會切到新 IP）。`
+        : `確定將 monitor-vm IP 更新為 ${newIp}？\n（未填遮罩/閘道 → 只改 LibreNMS base_url，套用後跳轉新 IP）`;
+    if (!confirm(msg)) return;
+    setResult('bResult', '<span class="info">處理中...</span>');
     setResult('bScan', '<span class="info">等待 IP 變更完成後自動掃描...</span>');
     const j = await api('/oracle-ip-update.php', {
         new_ip: newIp,
         old_ip: document.getElementById('bCurrent').value.trim(),
+        new_cidr: cidr,
+        new_gateway: gw,
         update_base_url: document.getElementById('chkBase').checked,
         update_app_url:  document.getElementById('chkEnv').checked,
         clear_cache:     document.getElementById('chkCache').checked,
     });
-    if (j.ok) {
-        const steps = (j.steps||[]).join('\n');
-        const targetUrl = `${location.protocol}//${newIp}/oracle-admin.php`;
-        setResult('bResult', `<span class="ok">✓ 更新完成\n${steps}\n\n3 秒後跳轉至 ${targetUrl}</span>`);
-        // Render auto-scan results (oracle-ip-update.php already invoked scan-old-ip.sh on the OLD IP)
-        renderScanResult(j.scan_results, document.getElementById('bCurrent').value.trim());
-        setTimeout(() => { window.location.href = targetUrl; }, 3000);
+    if (!j.ok) { setResult('bResult', `<span class="err">✗ ${j.error||'更新失敗'}</span>`); return; }
+
+    const steps = (j.steps||[]).join('\n');
+    let html = `<span class="ok">✓ LibreNMS 設定已更新\n${steps}</span>`;
+    renderScanResult(j.scan_results, document.getElementById('bCurrent').value.trim());
+
+    const np = j.netplan;
+    if (np) {
+        if (np.ok) {
+            html += `\n\n<span class="ok">✓ netplan 已寫入：${np.file}</span>`
+                 +  `\n備份：${np.backup}`
+                 +  `\n<span class="info">⚠ 尚未套用。請到 console 執行：\n  ${np.apply_cmd}\n套用瞬間連線會切到新 IP（${newIp}）。</span>`;
+            if (np.preview) html += `\n\n— netplan 預覽 —\n${np.preview}`;
+        } else {
+            html += `\n\n<span class="err">✗ netplan：${np.error||'失敗'}</span>`;
+        }
+        setResult('bResult', html);   // 有改網路 → 不自動跳轉（主機尚未移到新 IP）
     } else {
-        setResult('bResult', `<span class="err">✗ ${j.error||'更新失敗'}</span>`);
+        const targetUrl = `${location.protocol}//${newIp}/oracle-admin.php`;
+        setResult('bResult', html + `\n\n3 秒後跳轉至 ${targetUrl}`);
+        setTimeout(() => { window.location.href = targetUrl; }, 3000);
     }
 }
 

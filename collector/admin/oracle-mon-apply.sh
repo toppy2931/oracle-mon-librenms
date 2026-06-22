@@ -35,6 +35,8 @@ for req in "$REQ_DIR"/*.req; do
             out="$("$ADMIN/manage-mgmt-cidrs.sh" "$action" "${args[@]}" 2>>"$LOG")" ;;
         nas/save|nas/sync|nas/unmount)
             out="$("$ADMIN/manage-nas-backup.sh" "$action" "${args[@]}" 2>>"$LOG")" ;;
+        net/plan)
+            out="$("$ADMIN/manage-host-net.sh" plan "${args[@]}" 2>>"$LOG")" ;;
         *)
             out='{"ok":false,"error":"applier 拒絕未知請求"}' ;;
     esac
