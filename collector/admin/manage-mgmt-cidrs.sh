@@ -3,7 +3,9 @@
 # manage-mgmt-cidrs.sh — 管理「管理網段持久化設定檔」並套用防火牆（供 GUI 區塊 D 呼叫）
 #
 # 三層信任鏈下層：由 oracle-firewall.php 經 sudo 呼叫（sudoers NOPASSWD 白名單）。
-# 設定檔：/etc/oracle-mon/mgmt-cidrs.conf（一行一個 CIDR，# 註解）。
+# 設定檔：/var/lib/oracle-mon/mgmt-cidrs.conf（一行一個 CIDR，# 註解）。
+#   放 /var/lib（非 /etc）：php-fpm.service 設 ProtectSystem=full，/etc 對其
+#   sudo 子行程唯讀（EROFS）。setup-mgmt-firewall.sh 讀同一路徑（須一致）。
 #
 # 用法：
 #   manage-mgmt-cidrs.sh list                 → JSON {auto[], extra[], ports}
@@ -12,7 +14,7 @@
 #
 set -euo pipefail
 
-CIDR_CONF="/etc/oracle-mon/mgmt-cidrs.conf"
+CIDR_CONF="/var/lib/oracle-mon/mgmt-cidrs.conf"
 MGMT_PORTS="22,80,443,9000,8990,8099"
 ACTION="${1:-}"
 CIDR="${2:-}"
@@ -51,7 +53,7 @@ json_arr(){
 }
 
 apply_fw(){
-    mkdir -p /etc/oracle-mon
+    mkdir -p /var/lib/oracle-mon
     # 自動偵測 + 設定檔，全部開放管理埠（ufw allow 冪等）
     local cidrs
     cidrs="$( { detect_auto; read_conf; } | sort -u )"
@@ -73,7 +75,7 @@ case "$ACTION" in
 
   add)
     valid_cidr "$CIDR" || json_err "CIDR 格式不正確：$CIDR"
-    mkdir -p /etc/oracle-mon
+    mkdir -p /var/lib/oracle-mon
     touch "$CIDR_CONF"
     if grep -qxF "$CIDR" <(read_conf); then
         json_err "網段已存在：$CIDR"

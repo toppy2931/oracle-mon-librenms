@@ -32,7 +32,7 @@ EXTRA_CIDRS="${EXTRA_CIDRS:-}"
 
 # 持久化設定檔：一行一個 CIDR（# 開頭為註解）。GUI（區塊 D）寫入此檔，
 # 本腳本每次自動讀取，故「更新重跑」不會漏掉先前加過的網段。
-CIDR_CONF="${CIDR_CONF:-/etc/oracle-mon/mgmt-cidrs.conf}"
+CIDR_CONF="${CIDR_CONF:-/var/lib/oracle-mon/mgmt-cidrs.conf}"
 
 say(){ echo -e "\033[1;36m[fw]\033[0m $*"; }
 [ "$(id -u)" -eq 0 ] || { echo "請以 sudo 執行"; exit 1; }

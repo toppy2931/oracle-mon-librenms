@@ -16,10 +16,12 @@
 #
 set -euo pipefail
 
-CONF=/etc/oracle-mon/nas-backup.conf
-CRED=/etc/oracle-mon/nas-credentials
+# 設定/憑證/時間戳放 /var/lib（非 /etc）：php-fpm.service 設 ProtectSystem=full，
+# /etc 對其 sudo 子行程唯讀（EROFS）。fstab credentials= 也指向此處（本腳本自寫，一致）。
+CONF=/var/lib/oracle-mon/nas-backup.conf
+CRED=/var/lib/oracle-mon/nas-credentials
 SRC=/data/graylog-archives
-LAST=/etc/oracle-mon/nas-last-sync
+LAST=/var/lib/oracle-mon/nas-last-sync
 TIMER=/etc/systemd/system/oracle-nas-sync.timer
 SVC=/etc/systemd/system/oracle-nas-sync.service
 FSTAG="# oracle-mon-nas"
@@ -28,7 +30,7 @@ ACTION="${1:-}"
 json_err(){ printf '{"ok":false,"error":"%s"}\n' "$1"; exit 0; }
 load(){ [ -f "$CONF" ] && . "$CONF" || true; }
 
-mkdir -p /etc/oracle-mon
+mkdir -p /var/lib/oracle-mon
 
 case "$ACTION" in
   status)
