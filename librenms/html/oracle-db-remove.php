@@ -53,9 +53,9 @@ if ($action === 'toggle') {
     $rc = proc_close($proc);
     if ($rc !== 0) exit(json_encode(['error' => '更新失敗：' . trim($err ?: $out)]));
 
-    // Update snmpd extends
+    // Update snmpd extends (via queue — /etc is EROFS under ProtectSystem=full)
     $proc2 = proc_open(
-        ['sudo', '/opt/oracle-mon/admin/update-snmpd-extends.sh'],
+        ['sudo', '/opt/oracle-mon/admin/queue-request.sh', 'snmpd', 'update'],
         [1 => ['pipe','w'], 2 => ['pipe','w']], $pipes2
     );
     stream_get_contents($pipes2[1]); stream_get_contents($pipes2[2]);
@@ -79,9 +79,9 @@ if ($action === 'toggle') {
     $rc = proc_close($proc);
     if ($rc !== 0) exit(json_encode(['error' => '刪除失敗：' . trim($err ?: $out)]));
 
-    // Update snmpd
+    // Update snmpd (via queue — /etc is EROFS under ProtectSystem=full)
     $proc2 = proc_open(
-        ['sudo', '/opt/oracle-mon/admin/update-snmpd-extends.sh'],
+        ['sudo', '/opt/oracle-mon/admin/queue-request.sh', 'snmpd', 'update'],
         [1 => ['pipe','w'], 2 => ['pipe','w']], $pipes2
     );
     stream_get_contents($pipes2[1]); stream_get_contents($pipes2[2]);

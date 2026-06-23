@@ -51,16 +51,19 @@ fclose($pipes[1]); fclose($pipes[2]);
 $rc = proc_close($proc);
 if ($rc !== 0) exit(json_encode(['error' => '建立 conf 失敗：' . trim($err ?: $out)]));
 
-// Step 2: Update snmpd extends
+// Step 2: Update snmpd extends (via queue — update-snmpd-extends.sh writes /etc which is EROFS under ProtectSystem=full)
 $proc2 = proc_open(
-    ['sudo', '/opt/oracle-mon/admin/update-snmpd-extends.sh'],
+    ['sudo', '/opt/oracle-mon/admin/queue-request.sh', 'snmpd', 'update'],
     [1 => ['pipe','w'], 2 => ['pipe','w']],
     $pipes2
 );
 $out2 = stream_get_contents($pipes2[1]); $err2 = stream_get_contents($pipes2[2]);
 fclose($pipes2[1]); fclose($pipes2[2]);
-$rc2 = proc_close($proc2);
-if ($rc2 !== 0) exit(json_encode(['error' => 'snmpd 更新失敗：' . trim($err2 ?: $out2)]));
+proc_close($proc2);
+$j2 = json_decode(trim($out2), true);
+if (!($j2['ok'] ?? false) && !($j2['queued'] ?? false)) {
+    exit(json_encode(['error' => 'snmpd 更新失敗：' . ($j2['error'] ?? trim($err2 ?: $out2))]));
+}
 
 // Step 3: Add LibreNMS application (device_id=1 = monitor-vm)
 try {

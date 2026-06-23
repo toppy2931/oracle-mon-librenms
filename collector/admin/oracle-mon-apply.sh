@@ -37,6 +37,12 @@ for req in "$REQ_DIR"/*.req; do
             out="$("$ADMIN/manage-nas-backup.sh" "$action" "${args[@]}" 2>>"$LOG")" ;;
         net/plan)
             out="$("$ADMIN/manage-host-net.sh" plan "${args[@]}" 2>>"$LOG")" ;;
+        snmpd/update)
+            if "$ADMIN/update-snmpd-extends.sh" >> "$LOG" 2>&1; then
+                out='{"ok":true,"msg":"snmpd reloaded"}'
+            else
+                out='{"ok":false,"error":"snmpd 更新失敗，詳見 oracle-admin.log"}'
+            fi ;;
         *)
             out='{"ok":false,"error":"applier 拒絕未知請求"}' ;;
     esac
