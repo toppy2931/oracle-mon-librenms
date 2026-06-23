@@ -180,6 +180,7 @@ code{color:#60b4f8;background:transparent}
 </div>
 
 <!-- ═══ 區塊 C：多台 DB 管理 ══════════════════════════════════════ -->
+
 <div class="card">
   <div class="card-header d-flex justify-content-between align-items-center">
     <h5>▌ 區塊 C — 多台資料庫主機管理</h5>
@@ -245,6 +246,42 @@ code{color:#60b4f8;background:transparent}
         </tbody>
       </table>
     </div>
+
+    <!-- 📋 新增 DB 前置作業說明 -->
+    <details class="mt-3" style="border:1px solid #1e4080;border-radius:6px;background:#0d1b2a">
+      <summary style="padding:10px 14px;cursor:pointer;color:#60b4f8;font-size:13px;user-select:none;list-style:none">
+        📋 <strong>新增受監控 DB 前置作業</strong> — 需在目標 Oracle DB 主機上以 DBA 身分執行的 SQL（點此展開）
+      </summary>
+      <div style="padding:12px 16px;border-top:1px solid #1e4080;font-size:13px;line-height:1.8">
+
+        <div style="color:#8899bb;margin-bottom:10px">在目標 Oracle DB 以 <code>SYSDBA</code> 或具 DBA 權限帳號登入後，執行以下 SQL：</div>
+
+        <pre style="background:#070f1a;border:1px solid #1e4080;border-radius:4px;padding:10px 14px;color:#7fe0a0;font-size:12px;margin-bottom:12px;overflow-x:auto">-- 1) 建立監控專用唯讀帳號（密碼自訂）
+CREATE USER librenms IDENTIFIED BY "你的密碼";
+
+-- 2) 允許登入
+GRANT CREATE SESSION TO librenms;
+
+-- 3) 唯讀存取所有資料字典 / 動態效能視圖（涵蓋 v$* + dba_*）
+GRANT SELECT_CATALOG_ROLE TO librenms;</pre>
+
+        <div style="color:#8899bb;margin-bottom:6px">驗證帳號權限（以 librenms 登入後執行，全部有回傳值即代表 OK）：</div>
+
+        <pre style="background:#070f1a;border:1px solid #1e4080;border-radius:4px;padding:10px 14px;color:#aac4e8;font-size:12px;margin-bottom:12px;overflow-x:auto">SELECT status   FROM v$instance;    -- 應回 OPEN
+SELECT count(*) FROM dba_data_files; -- 應回數字
+SELECT log_mode FROM v$database;     -- 應回 ARCHIVELOG 或 NOARCHIVELOG</pre>
+
+        <div style="color:#8899bb;margin-bottom:6px">若公司資安不接受角色授權，可改用等效的系統權限（二擇一即可）：</div>
+
+        <pre style="background:#070f1a;border:1px solid #1e4080;border-radius:4px;padding:10px 14px;color:#f8c070;font-size:12px;margin-bottom:14px;overflow-x:auto">GRANT SELECT ANY DICTIONARY TO librenms;  -- 替代 SELECT_CATALOG_ROLE</pre>
+
+        <div style="background:#0f2a10;border:1px solid #2d6e30;border-radius:4px;padding:8px 12px;color:#7fe0a0;font-size:12px">
+          <strong>⚠ 網路確認：</strong>monitor-vm (172.16.1.94) 至目標 DB 主機的 <strong>TCP 1521</strong> 必須放行，否則連線測試會 timeout。
+          可於 monitor-vm 上執行 <code>nc -zv &lt;DB_IP&gt; 1521</code> 確認。
+        </div>
+
+      </div>
+    </details>
   </div>
 </div>
 
