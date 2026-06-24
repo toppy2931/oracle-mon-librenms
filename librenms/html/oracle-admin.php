@@ -100,6 +100,7 @@ code{color:#60b4f8;background:transparent}
           <div class="col-4"><label class="form-label">Port</label><input type="number" class="form-control" id="aPort" placeholder="1521" min="1" max="65535"></div>
         </div>
         <div class="mb-2"><label class="form-label">SID / Service Name</label><input type="text" class="form-control" id="aSid" placeholder="L1HWEB"></div>
+        <div class="mb-2"><label class="form-label">標籤 <span class="text-muted" style="font-size:11px">（戰情室、列表顯示用）</span></label><input type="text" class="form-control" id="aLabel" placeholder="L1HWEB Oracle 9i" maxlength="80"></div>
         <div class="mb-2"><label class="form-label">監控帳號</label><input type="text" class="form-control" id="aUser" placeholder="librenms"></div>
         <div class="mb-2">
           <label class="form-label">密碼（空白 = 不變更）</label>
@@ -454,6 +455,7 @@ function loadConf(alias) {
     document.getElementById('aHost').value = d.DB_HOST || '';
     document.getElementById('aPort').value = d.DB_PORT || '';
     document.getElementById('aSid').value  = d.DB_SID  || '';
+    document.getElementById('aLabel').value = d.DB_LABEL || alias;
     document.getElementById('aUser').value = d.DB_USER || '';
     document.getElementById('aPass').value = '';
     document.getElementById('aResult').innerHTML = '—';
@@ -471,7 +473,7 @@ async function saveConf() {
         sid:   document.getElementById('aSid').value,
         user:  document.getElementById('aUser').value,
         pass:  document.getElementById('aPass').value,
-        label: d.DB_LABEL || alias,
+        label: document.getElementById('aLabel').value.trim() || alias,
         enabled: d.DB_ENABLED || '1',
     });
     setResult('aResult', j.ok
