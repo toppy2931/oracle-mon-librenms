@@ -178,6 +178,23 @@ public class OracleStats {
           " from v$dataguard_stats where name='apply lag'"))); }
         catch (Exception e) { m.put("dg_apply_lag_min","0"); }
 
+        try { m.put("dg_transport_lag_min", num(q1(st,
+          "select nvl(round((extract(day from to_dsinterval(value))*1440)"+
+          "+(extract(hour from to_dsinterval(value))*60)"+
+          "+extract(minute from to_dsinterval(value))),0)"+
+          " from v$dataguard_stats where name='transport lag'"))); }
+        catch (Exception e) { m.put("dg_transport_lag_min","0"); }
+
+        try {
+          String mrpSt = q1(st,"select nvl(max(status),'NONE') from v$managed_standby where process like 'MRP%'");
+          m.put("dg_mrp_status", mrpSt!=null ? mrpSt.trim() : "NONE");
+        } catch (Exception e) { m.put("dg_mrp_status","NONE"); }
+
+        try {
+          String destErr = q1(st,"select nvl(max(error),'') from v$archive_dest_status where target='STANDBY'");
+          m.put("dg_dest_error", destErr!=null ? destErr.trim() : "");
+        } catch (Exception e) { m.put("dg_dest_error",""); }
+
         {
           int stby = 0, dest = 0;
           try { stby = Integer.parseInt(m.getOrDefault("dg_standby_cnt","0")); } catch (Exception e) {}

@@ -195,7 +195,7 @@ function dgPanel(m){
             <div class="kv"><span class="k">角色</span><span class="v">${ROLE[num(m.dg_role)]||'—'}</span></div>
             <div class="notconf">未設定 Data Guard（無 standby）</div></div>`;
     }
-    const gap = num(m.dg_gap), lag = num(m.dg_apply_lag_min);
+    const gap = num(m.dg_gap), lag = num(m.dg_apply_lag_min), tlag = num(m.dg_transport_lag_min);
     const swReady = num(m.dg_switchover)===1;
     const chkPrimary = num(m.db_open)===1;
     const chkStandby = num(m.dg_standby_cnt)>0;
@@ -204,6 +204,11 @@ function dgPanel(m){
     const pri = num(m.dg_seq_current), stb = num(m.dg_seq_standby);
     const seqDiff = Math.abs(pri - stb);
     const logSyncVal = `主&nbsp;${fmtInt(pri)}&nbsp;↔&nbsp;備&nbsp;${fmtInt(stb)}&ensp;${seqDiff===0?'<span class="green">✓</span>':'<span class="yellow">⚠</span>'}&ensp;（差 ${seqDiff}）`;
+    const mrpSt = (m.dg_mrp_status||'NONE').trim();
+    const mrpMap = {'APPLYING_LOG':['green','套用中'],'WAIT_FOR_LOG':['grey','等待日誌'],'WAIT_FOR_GAP':['red','缺口卡住'],'IDLE':['yellow','IDLE'],'NONE':['red','未執行']};
+    const [mrpCls,mrpTxt] = mrpMap[mrpSt] || ['yellow', mrpSt];
+    const destErr = (m.dg_dest_error||'').trim();
+    const destErrRow = destErr ? `<div class="kv"><span class="k err">目的地錯誤</span><span class="v err" style="font-size:11px;word-break:break-all">${destErr}</span></div>` : '';
     return `<div class="panel" data-block="dg"><h4>Data Guard</h4>
         ${kv('角色', ROLE[num(m.dg_role)]||'—')}
         <div class="kv"><span class="k">Switchover</span><span class="v">${swReady?'<span class="pill green">就緒</span>':'<span class="pill yellow">未就緒</span>'}</span></div>
@@ -213,9 +218,12 @@ function dgPanel(m){
             ${chk(chkGap,'Archive Gap = 0')}
         </div>
         ${kv('Standby 程序', fmtInt(m.dg_standby_cnt))}
+        ${kv('MRP 狀態', `<span class="pill ${mrpCls}">${mrpTxt}</span>`)}
         ${kv('Archive Gap', gap>0?`<span class="pill red">${gap}</span>`:'<span class="pill green">0</span>')}
+        ${kv('Transport Lag', tlag>15?`<span class="pill yellow">${tlag} 分</span>`:`${tlag} 分`)}
         ${kv('Apply Lag', lag>15?`<span class="pill yellow">${lag} 分</span>`:`${lag} 分`)}
         ${kv('Log 同步', logSyncVal)}
+        ${destErrRow}
     </div>`;
 }
 
@@ -320,6 +328,12 @@ function generateWarnings(dbs){
             warns.push({label, sev:'red', msg:`Data Guard Archive Gap = ${num(m.dg_gap)}（Standby 端歸檔日誌缺口未同步）`});
         if(dgConf && num(m.dg_apply_lag_min)>15)
             warns.push({label, sev:'yellow', msg:`Data Guard Apply Lag = ${num(m.dg_apply_lag_min)} 分（超過 15 分鐘閾值）`});
+        if(dgConf && num(m.dg_transport_lag_min)>15)
+            warns.push({label, sev:'yellow', msg:`Data Guard Transport Lag = ${num(m.dg_transport_lag_min)} 分（Primary 尚未傳送至備庫）`});
+        if(dgConf && (m.dg_mrp_status==='WAIT_FOR_GAP'||m.dg_mrp_status==='NONE'))
+            warns.push({label, sev:'red', msg:`MRP 程序異常：${m.dg_mrp_status||'NONE'}（Standby 套用程序停止）`});
+        const de = (m.dg_dest_error||'').trim();
+        if(dgConf && de) warns.push({label, sev:'red', msg:`Standby 目的地錯誤：${de}`});
 
         if(num(m.archivelog_mode)===0)
             warns.push({label, sev:'yellow', msg:'Archivelog 模式關閉（無法做時間點還原）'});
