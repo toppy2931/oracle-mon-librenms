@@ -190,13 +190,14 @@ public class OracleStats {
 
         try {
           String mrpSt = q1(st,"select nvl(max(status),'NONE') from v$managed_standby where process like 'MRP%'");
-          m.put("dg_mrp_status", mrpSt!=null ? mrpSt.trim() : "NONE");
-        } catch (Exception e) { m.put("dg_mrp_status","NONE"); }
+          m.put("dg_mrp_status", "\"" + (mrpSt!=null ? mrpSt.trim() : "NONE") + "\"");
+        } catch (Exception e) { m.put("dg_mrp_status","\"NONE\""); }
 
         try {
           String destErr = q1(st,"select nvl(max(error),'') from v$archive_dest_status where target='STANDBY'");
-          m.put("dg_dest_error", destErr!=null ? destErr.trim() : "");
-        } catch (Exception e) { m.put("dg_dest_error",""); }
+          String de = destErr!=null ? destErr.trim().replace("\"","'") : "";
+          m.put("dg_dest_error", "\"" + de + "\"");
+        } catch (Exception e) { m.put("dg_dest_error","\"\""); }
 
         {
           int stby = 0, dest = 0;
