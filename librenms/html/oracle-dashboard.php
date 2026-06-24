@@ -101,6 +101,10 @@ body{margin:0;background:#0b1020;color:#dfe6f5;font-family:"Segoe UI","Microsoft
 .sw-chk{display:flex;align-items:center;gap:6px}
 .sw-chk.ok{color:#3ddc84}.sw-chk.ng{color:#ff6b78}
 .sw-chk .ic{font-size:13px;font-weight:700;width:14px;text-align:center;flex-shrink:0}
+/* Tooltip（ⓘ 說明） */
+.tip{position:relative;cursor:help;color:#7b8aa6;font-size:11px;vertical-align:middle;margin-left:4px}
+.tip::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 5px);background:#0d1829;border:1px solid #2a3d6a;border-radius:6px;padding:8px 12px;font-size:11px;color:#cfe0ff;white-space:pre;line-height:1.9;z-index:30;pointer-events:none;opacity:0;transition:opacity .15s;min-width:240px;box-shadow:0 4px 14px rgba(0,0,0,.5)}
+.tip:hover::after{opacity:1}
 </style>
 </head>
 <body>
@@ -218,7 +222,7 @@ function dgPanel(m){
             ${chk(chkGap,'Archive Gap = 0')}
         </div>
         ${kv('Standby 程序', fmtInt(m.dg_standby_cnt))}
-        ${kv('MRP 狀態', `<span class="pill ${mrpCls}">${mrpTxt}</span>`)}
+        <div class="kv"><span class="k">MRP 狀態<span class="tip" data-tip="APPLYING_LOG  正在套用 ✓&#10;WAIT_FOR_LOG  等待日誌（正常待機）✓&#10;WAIT_FOR_GAP  缺口卡住 ✗&#10;IDLE          手動停止 ✗&#10;NONE          MRP 未執行 ✗">ⓘ</span></span><span class="v"><span class="pill ${mrpCls}">${mrpTxt}</span></span></div>
         ${kv('Archive Gap', gap>0?`<span class="pill red">${gap}</span>`:'<span class="pill green">0</span>')}
         ${kv('Transport Lag', tlag>15?`<span class="pill yellow">${tlag} 分</span>`:`${tlag} 分`)}
         ${kv('Apply Lag', lag>15?`<span class="pill yellow">${lag} 分</span>`:`${lag} 分`)}
