@@ -375,7 +375,7 @@ function card(db){
         body = `<div class="panel full"><h4>連線狀態</h4><div class="err">✖ 無法連線：${db.error||'未知錯誤'}</div></div>`;
     } else {
         const m = db.metrics || {};
-        body = dgPanel(m) + mvPanel(m) + healthPanel(m) + opsPanel(m) + tsPanel(m);
+        body = healthPanel(m) + opsPanel(m) + dgPanel(m) + mvPanel(m) + tsPanel(m);
     }
     // 把此卡片已隱藏的區塊（warn 除外，warn 影響底部警示區）烘進 class，避免刷新閃爍
     const hideCls = (cardHidden[db.alias]||[]).filter(b=>b!=='warn').map(b=>'hide-'+b).join(' ');
