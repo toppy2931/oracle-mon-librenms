@@ -63,6 +63,8 @@ h4{color:#e94560;font-size:16px;margin:0}
 .badge-enabled{background:#166534;color:#4ade80;padding:2px 8px;border-radius:3px;font-size:11px}
 .badge-disabled{background:#3f1111;color:#f87171;padding:2px 8px;border-radius:3px;font-size:11px}
 .form-check-input:checked{background-color:#e94560;border-color:#e94560}
+.form-check-label{color:#d0d0e0}
+.form-label{color:#cfe0ff}
 code{color:#60b4f8;background:transparent}
 </style>
 </head>
@@ -432,12 +434,25 @@ const CSRF = document.querySelector('meta[name="csrf-token"]').content;
 const DBS  = <?= json_encode($dbs, JSON_UNESCAPED_UNICODE) ?>;
 
 async function api(url, body) {
-    const r = await fetch(url, {
-        method: 'POST',
-        headers: {'Content-Type':'application/json','X-CSRF-TOKEN': CSRF},
-        body: JSON.stringify(body)
-    });
-    return r.json();
+    let r;
+    try {
+        r = await fetch(url, {
+            method: 'POST',
+            headers: {'Content-Type':'application/json','X-CSRF-TOKEN': CSRF},
+            body: JSON.stringify(body)
+        });
+    } catch (e) {
+        return {ok:false, error:`網路錯誤：${e.message}`};
+    }
+    const text = await r.text();
+    if (!text) {
+        return {ok:false, error:`HTTP ${r.status}：伺服器回傳空 body（可能 PHP fatal / 逾時，請查 /var/log/nginx/error.log 或 php-fpm log）`};
+    }
+    try {
+        return JSON.parse(text);
+    } catch (e) {
+        return {ok:false, error:`HTTP ${r.status}：回應非 JSON — ${text.substring(0,200)}`};
+    }
 }
 
 function togglePwd(id, btn) {
@@ -696,7 +711,12 @@ function setResult(id, html) {
 async function loadFirewall() {
     try {
         const j = await api('/oracle-firewall.php', {action: 'list'});
-        if (!j.ok) { setResult('fwAuto', `<span class="err">${j.error||'載入失敗'}</span>`); return; }
+        if (!j.ok) {
+            const errMsg = `<span class="err">${j.error||'載入失敗'}</span>`;
+            setResult('fwAuto', errMsg);
+            document.getElementById('fwExtra').innerHTML = errMsg;
+            return;
+        }
         document.getElementById('fwAuto').innerHTML =
             (j.auto && j.auto.length) ? j.auto.map(c => `<code>${escapeHtml(c)}</code>`).join('  ')
                                       : '<span class="text-muted">（偵測不到本機網段）</span>';
@@ -713,6 +733,7 @@ async function loadFirewall() {
         }
     } catch (e) {
         setResult('fwAuto', `<span class="err">載入錯誤：${e.message}</span>`);
+        document.getElementById('fwExtra').innerHTML = `<span class="err" style="font-size:12px">載入錯誤：${e.message}</span>`;
     }
 }
 
