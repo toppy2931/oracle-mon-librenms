@@ -201,6 +201,9 @@ function dgPanel(m){
     const chkStandby = num(m.dg_standby_cnt)>0;
     const chkGap = gap===0;
     function chk(ok,label){ return `<div class="sw-chk ${ok?'ok':'ng'}"><span class="ic">${ok?'✓':'✗'}</span>${label}</div>`; }
+    const pri = num(m.dg_seq_current), stb = num(m.dg_seq_standby);
+    const seqDiff = Math.abs(pri - stb);
+    const logSyncVal = `主&nbsp;${fmtInt(pri)}&nbsp;↔&nbsp;備&nbsp;${fmtInt(stb)}&ensp;${seqDiff===0?'<span class="green">✓</span>':'<span class="yellow">⚠</span>'}&ensp;（差 ${seqDiff}）`;
     return `<div class="panel" data-block="dg"><h4>Data Guard</h4>
         ${kv('角色', ROLE[num(m.dg_role)]||'—')}
         <div class="kv"><span class="k">Switchover</span><span class="v">${swReady?'<span class="pill green">就緒</span>':'<span class="pill yellow">未就緒</span>'}</span></div>
@@ -212,7 +215,7 @@ function dgPanel(m){
         ${kv('Standby 程序', fmtInt(m.dg_standby_cnt))}
         ${kv('Archive Gap', gap>0?`<span class="pill red">${gap}</span>`:'<span class="pill green">0</span>')}
         ${kv('Apply Lag', lag>15?`<span class="pill yellow">${lag} 分</span>`:`${lag} 分`)}
-        ${kv('Log 序號', fmtInt(m.dg_seq_current))}
+        ${kv('Log 同步', logSyncVal)}
     </div>`;
 }
 

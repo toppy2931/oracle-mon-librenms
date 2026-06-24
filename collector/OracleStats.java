@@ -163,6 +163,11 @@ public class OracleStats {
         try { m.put("dg_seq_archived", num(q1(st,"select nvl(max(sequence#),0) from v$archived_log"))); }
         catch (Exception e) { m.put("dg_seq_archived","0"); }
 
+        try { m.put("dg_seq_standby", num(q1(st,
+          "select nvl(max(applied_seq#),0) from v$archive_dest_status"+
+          " where status='VALID' and target='STANDBY'"))); }
+        catch (Exception e) { m.put("dg_seq_standby","0"); }
+
         try { m.put("dg_gap", num(q1(st,"select count(*) from v$archive_gap"))); }
         catch (Exception e) { m.put("dg_gap","0"); }
 
