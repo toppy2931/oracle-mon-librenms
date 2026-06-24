@@ -30,7 +30,14 @@ $port    = (int)($body['port'] ?? 1521);
 $sid     = preg_replace('/[^A-Za-z0-9_]/', '', $body['sid'] ?? '');
 $user    = preg_replace('/[^A-Za-z0-9_]/', '', $body['user'] ?? '');
 $pass    = $body['pass'] ?? '';
-$label   = substr(preg_replace('/[^\w\s\-（）().]/', '', $body['label'] ?? $alias), 0, 80);
+// label 接受中英數、空白、() （）、_、-、. 等顯示用字元；剝除控制字元/引號/$/反引號/反斜線等對 .conf 寫入或 shell 危險的字元
+$label_raw = (string)($body['label'] ?? $alias);
+if (!mb_check_encoding($label_raw, 'UTF-8')) {
+    $label_raw = $alias;
+}
+$label = preg_replace('/[\x00-\x1F\x7F"\'`$\\\\]/u', '', $label_raw);
+$label = mb_substr($label, 0, 80, 'UTF-8');
+if ($label === '') { $label = $alias; }
 $enabled = ($body['enabled'] ?? '1') === '0' ? '0' : '1';
 
 if (!$alias || !filter_var($host, FILTER_VALIDATE_IP) || $port < 1 || $port > 65535 || !$sid || !$user) {

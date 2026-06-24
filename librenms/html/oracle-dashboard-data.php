@@ -80,7 +80,20 @@ foreach ($dbs as $d) {
     $results[] = $entry;
 }
 
-echo json_encode([
+// 防呆：若任一 .conf 內含無效 UTF-8（例如以前舊 regex 切爛的 label），
+// json_encode 會 silent 回 false → 前端拿到空 body → "Unexpected end of JSON input"
+// 用 INVALID_UTF8_SUBSTITUTE 把無效字元換成 U+FFFD 而非整包失敗
+$payload = json_encode([
     'ts'  => date('Y-m-d H:i:s'),
     'dbs' => $results,
-], JSON_UNESCAPED_UNICODE);
+], JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+
+if ($payload === false) {
+    http_response_code(500);
+    $payload = json_encode([
+        'ts'    => date('Y-m-d H:i:s'),
+        'dbs'   => [],
+        'error' => 'json_encode 失敗：' . json_last_error_msg(),
+    ], JSON_UNESCAPED_UNICODE);
+}
+echo $payload;
