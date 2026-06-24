@@ -122,63 +122,6 @@ code{color:#60b4f8;background:transparent}
   </div>
 </div>
 
-<!-- ═══ 區塊 B：monitor-vm IP 異動 ════════════════════════════════ -->
-<div class="card">
-  <div class="card-header">
-    <h5>▌ 區塊 B — 監控主機 IP 異動設定</h5>
-  </div>
-  <div class="card-body">
-    <div class="row g-3">
-      <div class="col-md-5">
-        <div class="mb-2"><label class="form-label">目前 IP（偵測自 base_url）</label>
-          <input type="text" class="form-control" id="bCurrent" value="<?= htmlspecialchars($current_ip) ?>" readonly style="background:#0a1525;color:#8899bb">
-        </div>
-        <div class="mb-3"><label class="form-label">新 IP <span class="text-danger">*</span></label>
-          <input type="text" class="form-control" id="bNew" placeholder="172.16.1.xxx">
-        </div>
-        <div class="row g-2 mb-3">
-          <div class="col-6"><label class="form-label">子網路遮罩 (CIDR)</label>
-            <input type="text" class="form-control" id="bCidr" placeholder="24">
-          </div>
-          <div class="col-6"><label class="form-label">預設閘道</label>
-            <input type="text" class="form-control" id="bGw" placeholder="172.16.1.254">
-          </div>
-        </div>
-        <div class="text-muted mb-3" style="font-size:11px">遮罩＋閘道兩者都填 → 產生主機 netplan 網路設定（只寫檔，不自動套用）；兩者留空 → 只改 LibreNMS base_url</div>
-        <div class="mb-3">
-          <div class="form-check mb-1">
-            <input class="form-check-input" type="checkbox" id="chkBase" checked>
-            <label class="form-check-label" for="chkBase">LibreNMS <code>base_url</code> → <code>lnms config:set</code></label>
-          </div>
-          <div class="form-check mb-1">
-            <input class="form-check-input" type="checkbox" id="chkEnv" checked>
-            <label class="form-check-label" for="chkEnv">.env <code>APP_URL=http://&lt;新IP&gt;</code></label>
-          </div>
-          <div class="form-check">
-            <input class="form-check-input" type="checkbox" id="chkCache" checked>
-            <label class="form-check-label" for="chkCache">清除 Laravel config cache → <code>artisan config:clear</code></label>
-          </div>
-        </div>
-        <button class="btn btn-warning btn-sm" onclick="doIpUpdate()">套用 IP 變更</button>
-        <button class="btn btn-info btn-sm ms-2" onclick="doScanOldIp()">🔍 掃描舊 IP</button>
-        <div class="text-muted mt-2" style="font-size:11px">⚠ 未填遮罩/閘道時，套用後頁面跳轉至新 IP；有填則僅寫 netplan，需到 console 執行 <code>sudo netplan apply</code> 才生效。掃描為唯讀檢查。</div>
-      </div>
-      <div class="col-md-7">
-        <label class="form-label">執行結果</label>
-        <div class="result-box" id="bResult">—</div>
-        <label class="form-label mt-2">舊 IP 掃描結果</label>
-        <div class="result-box" id="bScan">—（點「🔍 掃描舊 IP」或在 IP 變更後自動執行）</div>
-      </div>
-    </div>
-    <div class="alert mt-3 mb-0" style="background:#3a2c10;border:1px solid #d99a30;color:#ffd98a;font-size:12px;border-radius:6px;padding:10px 12px">
-      <strong>📌 重要提醒（有填遮罩/閘道時）：</strong>
-      系統<strong>只會寫入 netplan 設定檔，不會自動套用</strong>。務必到 VM 的 <strong>console</strong>（Proxmox／vSphere）執行下列指令才會生效：
-      <div style="margin-top:6px"><code style="background:#0a1525;color:#7fe0a0;padding:3px 8px;border-radius:4px;font-size:13px">sudo netplan apply</code></div>
-      <div style="margin-top:6px;color:#e0b870">套用瞬間連線會切到新 IP，請確認 console 可達後再執行；若出錯，把備份目錄的 <code>*.yaml</code> 複製回 <code>/etc/netplan</code> 後再 <code>netplan apply</code> 還原。</div>
-    </div>
-  </div>
-</div>
-
 <!-- ═══ 區塊 C：多台 DB 管理 ══════════════════════════════════════ -->
 
 <div class="card">
@@ -282,6 +225,63 @@ SELECT log_mode FROM v$database;     -- 應回 ARCHIVELOG 或 NOARCHIVELOG</pre>
 
       </div>
     </details>
+  </div>
+</div>
+
+<!-- ═══ 區塊 B：monitor-vm IP 異動 ════════════════════════════════ -->
+<div class="card">
+  <div class="card-header">
+    <h5>▌ 區塊 B — 監控主機 IP 異動設定</h5>
+  </div>
+  <div class="card-body">
+    <div class="row g-3">
+      <div class="col-md-5">
+        <div class="mb-2"><label class="form-label">目前 IP（偵測自 base_url）</label>
+          <input type="text" class="form-control" id="bCurrent" value="<?= htmlspecialchars($current_ip) ?>" readonly style="background:#0a1525;color:#8899bb">
+        </div>
+        <div class="mb-3"><label class="form-label">新 IP <span class="text-danger">*</span></label>
+          <input type="text" class="form-control" id="bNew" placeholder="172.16.1.xxx">
+        </div>
+        <div class="row g-2 mb-3">
+          <div class="col-6"><label class="form-label">子網路遮罩 (CIDR)</label>
+            <input type="text" class="form-control" id="bCidr" placeholder="24">
+          </div>
+          <div class="col-6"><label class="form-label">預設閘道</label>
+            <input type="text" class="form-control" id="bGw" placeholder="172.16.1.254">
+          </div>
+        </div>
+        <div class="text-muted mb-3" style="font-size:11px">遮罩＋閘道兩者都填 → 產生主機 netplan 網路設定（只寫檔，不自動套用）；兩者留空 → 只改 LibreNMS base_url</div>
+        <div class="mb-3">
+          <div class="form-check mb-1">
+            <input class="form-check-input" type="checkbox" id="chkBase" checked>
+            <label class="form-check-label" for="chkBase">LibreNMS <code>base_url</code> → <code>lnms config:set</code></label>
+          </div>
+          <div class="form-check mb-1">
+            <input class="form-check-input" type="checkbox" id="chkEnv" checked>
+            <label class="form-check-label" for="chkEnv">.env <code>APP_URL=http://&lt;新IP&gt;</code></label>
+          </div>
+          <div class="form-check">
+            <input class="form-check-input" type="checkbox" id="chkCache" checked>
+            <label class="form-check-label" for="chkCache">清除 Laravel config cache → <code>artisan config:clear</code></label>
+          </div>
+        </div>
+        <button class="btn btn-warning btn-sm" onclick="doIpUpdate()">套用 IP 變更</button>
+        <button class="btn btn-info btn-sm ms-2" onclick="doScanOldIp()">🔍 掃描舊 IP</button>
+        <div class="text-muted mt-2" style="font-size:11px">⚠ 未填遮罩/閘道時，套用後頁面跳轉至新 IP；有填則僅寫 netplan，需到 console 執行 <code>sudo netplan apply</code> 才生效。掃描為唯讀檢查。</div>
+      </div>
+      <div class="col-md-7">
+        <label class="form-label">執行結果</label>
+        <div class="result-box" id="bResult">—</div>
+        <label class="form-label mt-2">舊 IP 掃描結果</label>
+        <div class="result-box" id="bScan">—（點「🔍 掃描舊 IP」或在 IP 變更後自動執行）</div>
+      </div>
+    </div>
+    <div class="alert mt-3 mb-0" style="background:#3a2c10;border:1px solid #d99a30;color:#ffd98a;font-size:12px;border-radius:6px;padding:10px 12px">
+      <strong>📌 重要提醒（有填遮罩/閘道時）：</strong>
+      系統<strong>只會寫入 netplan 設定檔，不會自動套用</strong>。務必到 VM 的 <strong>console</strong>（Proxmox／vSphere）執行下列指令才會生效：
+      <div style="margin-top:6px"><code style="background:#0a1525;color:#7fe0a0;padding:3px 8px;border-radius:4px;font-size:13px">sudo netplan apply</code></div>
+      <div style="margin-top:6px;color:#e0b870">套用瞬間連線會切到新 IP，請確認 console 可達後再執行；若出錯，把備份目錄的 <code>*.yaml</code> 複製回 <code>/etc/netplan</code> 後再 <code>netplan apply</code> 還原。</div>
+    </div>
   </div>
 </div>
 
