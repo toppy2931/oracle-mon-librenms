@@ -90,7 +90,7 @@ code{color:#60b4f8;background:transparent}
           <label class="form-label">選擇 DB</label>
           <select class="form-select" id="dbSelect" onchange="loadConf()">
             <?php foreach ($dbs as $alias => $d): ?>
-            <option value="<?= htmlspecialchars($alias) ?>"><?= htmlspecialchars($alias) ?> — <?= htmlspecialchars($d['DB_LABEL'] ?? '') ?></option>
+            <option value="<?= htmlspecialchars($alias) ?>"><?= htmlspecialchars($alias) ?> — <?= htmlspecialchars($d['DB_LABEL'] ?? '', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></option>
             <?php endforeach; ?>
             <?php if (empty($dbs)): ?>
             <option value="">（尚無 DB）</option>
@@ -169,7 +169,7 @@ code{color:#60b4f8;background:transparent}
             <td><?= htmlspecialchars($d['DB_HOST'] ?? '') ?></td>
             <td><?= htmlspecialchars($d['DB_PORT'] ?? '') ?></td>
             <td><?= htmlspecialchars($d['DB_SID'] ?? '') ?></td>
-            <td><?= htmlspecialchars($d['DB_LABEL'] ?? '') ?></td>
+            <td><?= htmlspecialchars($d['DB_LABEL'] ?? '', ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8') ?></td>
             <td><?= ($d['DB_ENABLED'] ?? '0') === '1'
                 ? '<span class="badge-enabled">啟用</span>'
                 : '<span class="badge-disabled">停用</span>' ?></td>
@@ -431,7 +431,12 @@ SELECT log_mode FROM v$database;     -- 應回 ARCHIVELOG 或 NOARCHIVELOG</pre>
 
 <script>
 const CSRF = document.querySelector('meta[name="csrf-token"]').content;
-const DBS  = <?= json_encode($dbs, JSON_UNESCAPED_UNICODE) ?>;
+const DBS  = <?php
+    // JSON_INVALID_UTF8_SUBSTITUTE 防呆：若任一 .conf 含無效 UTF-8（被舊版 regex
+    // 切爛的中文 label），json_encode 不會 silent 回 false 讓 JS 整段死。
+    $dbs_json = json_encode($dbs, JSON_UNESCAPED_UNICODE | JSON_INVALID_UTF8_SUBSTITUTE);
+    echo $dbs_json !== false ? $dbs_json : '{}';
+?>;
 
 async function api(url, body) {
     let r;
