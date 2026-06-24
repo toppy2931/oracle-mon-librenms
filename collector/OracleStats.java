@@ -137,6 +137,38 @@ public class OracleStats {
           "select count(*) from dba_indexes where status='INVALID'"+
           " and owner not in ('SYS','SYSTEM','OUTLN','WMSYS','DBSNMP','CTXSYS','XDB')")));
 
+        // ── 即時運作指標 ──
+        // 阻塞會話：v$lock.block > 0 = 此 session 正阻擋其他 session
+        try { m.put("blocking_sessions", num(q1(st,
+          "select count(distinct sid) from v$lock where block > 0"))); }
+        catch (Exception e) { m.put("blocking_sessions","0"); }
+
+        // 等待鎖定的會話數
+        try { m.put("waiting_sessions", num(q1(st,
+          "select count(*) from v$session where lockwait is not null"))); }
+        catch (Exception e) { m.put("waiting_sessions","0"); }
+
+        // 長時間執行 SQL（active > 5 分鐘，排除背景程序）
+        try { m.put("long_running_sessions", num(q1(st,
+          "select count(*) from v$session"+
+          " where status='ACTIVE' and username is not null and type='USER' and last_call_et > 300"))); }
+        catch (Exception e) { m.put("long_running_sessions","0"); }
+
+        // 最久的 active session 已執行秒數
+        try { m.put("longest_active_secs", num(q1(st,
+          "select nvl(max(last_call_et),0) from v$session"+
+          " where status='ACTIVE' and username is not null and type='USER'"))); }
+        catch (Exception e) { m.put("longest_active_secs","0"); }
+
+        // UNDO tablespace 使用率（取所有 UNDO TS 的最大值）
+        try { m.put("undo_pct_used", num(q1(st,
+          "select nvl(round(max((tot.bytes-nvl(fs.bytes,0))/tot.bytes*100),0),0)"+
+          " from (select tablespace_name, sum(bytes) bytes from dba_data_files group by tablespace_name) tot,"+
+          " (select tablespace_name, sum(bytes) bytes from dba_free_space group by tablespace_name) fs"+
+          " where tot.tablespace_name = fs.tablespace_name(+)"+
+          " and tot.tablespace_name in (select tablespace_name from dba_tablespaces where contents='UNDO')"))); }
+        catch (Exception e) { m.put("undo_pct_used","0"); }
+
         // ── Data Guard（通用能力：無 DG 時各項回 0）──
         try {
           String role = q1(st,"select database_role from v$database");

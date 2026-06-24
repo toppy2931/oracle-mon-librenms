@@ -74,6 +74,7 @@ body{margin:0;background:#0b1020;color:#dfe6f5;font-family:"Segoe UI","Microsoft
 /* 版面偏好：每張卡片各自的區塊顯隱（dbcard class 控制，撐得過 grid.innerHTML 重建）*/
 .dbcard.hide-dg .panel[data-block=dg],
 .dbcard.hide-mview .panel[data-block=mview],
+.dbcard.hide-ops .panel[data-block=ops],
 .dbcard.hide-health .panel[data-block=health],
 .dbcard.hide-ts .panel[data-block=ts]{display:none !important}
 /* 卡片拖拉 */
@@ -154,6 +155,7 @@ body{margin:0;background:#0b1020;color:#dfe6f5;font-family:"Segoe UI","Microsoft
     <label><input type="checkbox" class="blk-toggle" value="dg"> Data Guard</label>
     <label><input type="checkbox" class="blk-toggle" value="mview"> Materialized View</label>
     <label><input type="checkbox" class="blk-toggle" value="health"> 資料庫健康</label>
+    <label><input type="checkbox" class="blk-toggle" value="ops"> 即時運作指標</label>
     <label><input type="checkbox" class="blk-toggle" value="ts"> 表空間使用率／效能</label>
     <label><input type="checkbox" class="blk-toggle" value="warn"> 警示說明</label>
 </div>
@@ -198,11 +200,17 @@ function statusOf(db){
     const m = db.metrics || {};
     const dgConf = num(m.dg_configured)===1;
     if(dgConf && num(m.dg_gap)>0) return 'red';
+    if(num(m.blocking_sessions)>2) return 'red';
+    if(num(m.undo_pct_used)>=85) return 'red';
+    const spF=num(m.shared_pool_free), spT=num(m.shared_pool_total);
+    if(spT>0 && (spT-spF)/spT>=0.85) return 'red';
     const warn =
         num(m.mview_stale)>0 || num(m.mview_jobs_broken)>0 || num(m.mview_jobs_failed)>0 ||
         num(m.mview_oldest_hours)>168 ||
         num(m.archivelog_mode)===0 || num(m.invalid_objects)>0 ||
         num(m.temp_pct_used)>=90 ||
+        num(m.blocking_sessions)>0 || num(m.long_running_sessions)>3 ||
+        num(m.undo_pct_used)>=70 ||
         (dgConf && num(m.dg_apply_lag_min)>15) ||
         (Array.isArray(m.tablespaces) && m.tablespaces.some(t=>num(t.pct_used)>=90));
     return warn ? 'yellow' : 'green';
@@ -303,6 +311,41 @@ function healthPanel(m){
     </div>`;
 }
 
+function pctDot(v){ return dot(v<70?'green':v<85?'yellow':'red')+v+'%'; }
+function opsPanel(m){
+    const bl = num(m.blocking_sessions), wt = num(m.waiting_sessions);
+    const lr = num(m.long_running_sessions), longest = num(m.longest_active_secs);
+    const undoP = num(m.undo_pct_used), tempP = num(m.temp_pct_used);
+    // Shared Pool 使用率 = (total - free) / total * 100
+    const spF = num(m.shared_pool_free), spT = num(m.shared_pool_total);
+    const spPct = spT>0 ? Math.round((spT-spF)/spT*100) : 0;
+    // 最久 active session 格式化
+    const longestTxt = longest<60 ? longest+' 秒'
+        : longest<3600 ? Math.floor(longest/60)+' 分'
+        : Math.floor(longest/3600)+' 時 '+Math.floor((longest%3600)/60)+' 分';
+    const blDot = dot(bl===0?'green':bl<=2?'yellow':'red');
+    const lrDot = dot(lr===0?'green':lr<=3?'yellow':'red');
+    return `<div class="panel" data-block="ops"><h4>即時運作指標</h4>
+        ${kv('🔒 阻塞會話', `${blDot}${fmtInt(bl)}${wt>0?` <span class="muted">(${fmtInt(wt)} 等待中)</span>`:''}`)}
+        ${kv('🐢 長時間 SQL', `${lrDot}${fmtInt(lr)} <span class="muted">(&gt;5 分鐘)</span>`)}
+        ${kv('  最久 active', longest>0?longestTxt:'—')}
+        ${kv('💾 UNDO 使用率', pctDot(undoP))}
+        ${kv('💾 TEMP 使用率', pctDot(tempP))}
+        ${kv('💾 Shared Pool', pctDot(spPct))}
+        <details class="helpbox"><summary>各項指標說明</summary>
+        <div class="hb-body"><dl>
+            <dt>🔒 阻塞會話</dt><dd>正在阻擋其他連線的 session 數（v$lock.block&gt;0）；後綴「N 等待中」= 被阻塞的連線數</dd>
+            <dt>🐢 長時間 SQL</dt><dd>active 超過 5 分鐘的使用者連線數（不含 Oracle 背景程序）</dd>
+            <dt>最久 active</dt><dd>目前運行最久的 active session 已執行時間</dd>
+            <dt>💾 UNDO 使用率</dt><dd>UNDO tablespace 已用空間百分比；&gt;85% 可能造成 ORA-01555 Snapshot Too Old</dd>
+            <dt>💾 TEMP 使用率</dt><dd>TEMP tablespace 使用率；高表示大量 sort/hash join 落地，建議檢查 SQL 計畫</dd>
+            <dt>💾 Shared Pool</dt><dd>Library cache + Dictionary cache 等共用區使用率；超過 85% 易觸發 ORA-04031</dd>
+        </dl>
+        <div class="note">閾值：&lt;70% 綠、70–85% 黃、&gt;85% 紅；阻塞/長 SQL：0=綠、1–2/1–3=黃、更多=紅</div>
+        </div></details>
+    </div>`;
+}
+
 function tsColor(p){ return p>=95?'#ff4d5e':p>=85?'#ffc24b':'#3ddc84'; }
 function tsPanel(m){
     let list = Array.isArray(m.tablespaces) ? m.tablespaces.slice() : [];
@@ -332,7 +375,7 @@ function card(db){
         body = `<div class="panel full"><h4>連線狀態</h4><div class="err">✖ 無法連線：${db.error||'未知錯誤'}</div></div>`;
     } else {
         const m = db.metrics || {};
-        body = dgPanel(m) + mvPanel(m) + healthPanel(m) + tsPanel(m);
+        body = dgPanel(m) + mvPanel(m) + healthPanel(m) + opsPanel(m) + tsPanel(m);
     }
     // 把此卡片已隱藏的區塊（warn 除外，warn 影響底部警示區）烘進 class，避免刷新閃爍
     const hideCls = (cardHidden[db.alias]||[]).filter(b=>b!=='warn').map(b=>'hide-'+b).join(' ');
@@ -388,6 +431,23 @@ function generateWarnings(dbs){
 
         if(num(m.archivelog_mode)===0)
             warns.push({label, sev:'yellow', msg:'Archivelog 模式關閉（無法做時間點還原）'});
+
+        const bl = num(m.blocking_sessions);
+        if(bl>2) warns.push({label, sev:'red', msg:`阻塞會話 ${fmtInt(bl)} 個（請查 v$lock）`});
+        else if(bl>0) warns.push({label, sev:'yellow', msg:`阻塞會話 ${fmtInt(bl)} 個`});
+
+        const lr = num(m.long_running_sessions);
+        if(lr>3) warns.push({label, sev:'red', msg:`長時間 SQL ${fmtInt(lr)} 個（active 超過 5 分鐘）`});
+
+        const undoP = num(m.undo_pct_used);
+        if(undoP>=85) warns.push({label, sev:'red', msg:`UNDO 使用率 ${undoP}%（風險 ORA-01555 Snapshot Too Old）`});
+        else if(undoP>=70) warns.push({label, sev:'yellow', msg:`UNDO 使用率 ${undoP}%`});
+
+        const spF = num(m.shared_pool_free), spT = num(m.shared_pool_total);
+        if(spT>0){
+            const spPct = Math.round((spT-spF)/spT*100);
+            if(spPct>=85) warns.push({label, sev:'red', msg:`Shared Pool 使用率 ${spPct}%（風險 ORA-04031）`});
+        }
 
         const io = num(m.invalid_objects);
         if(io>0) warns.push({label, sev:'yellow', msg:`無效物件 ${fmtInt(io)} 個`});
@@ -455,7 +515,7 @@ async function refresh(){
 }
 
 // --- 版面偏好（每張卡片各自的區塊顯隱 + 卡片排序，全機共用伺服器設定）---
-const BLOCKS = ['dg','mview','health','ts','warn'];
+const BLOCKS = ['dg','mview','health','ops','ts','warn'];
 let cardOrder = [];     // alias 顯示順序
 let cardHidden = {};    // {alias: [blocks]} 每張卡片隱藏的區塊
 let menuAlias = null;   // 目前開啟卡片選單的 alias
