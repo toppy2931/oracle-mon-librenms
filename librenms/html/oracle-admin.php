@@ -122,11 +122,11 @@ code{color:#60b4f8;background:transparent}
   </div>
 </div>
 
-<!-- ═══ 區塊 C：多台 DB 管理 ══════════════════════════════════════ -->
+<!-- ═══ 區塊 B：多台 DB 管理 ══════════════════════════════════════ -->
 
 <div class="card">
   <div class="card-header d-flex justify-content-between align-items-center">
-    <h5>▌ 區塊 C — 多台資料庫主機管理</h5>
+    <h5>▌ 區塊 B — 多台資料庫主機管理</h5>
     <div class="d-flex gap-2">
       <button class="btn btn-success btn-sm" onclick="toggleAddForm()">＋ 新增 DB</button>
       <button class="btn btn-outline-info btn-sm" onclick="testAll()">全部測試</button>
@@ -228,10 +228,10 @@ SELECT log_mode FROM v$database;     -- 應回 ARCHIVELOG 或 NOARCHIVELOG</pre>
   </div>
 </div>
 
-<!-- ═══ 區塊 B：monitor-vm IP 異動 ════════════════════════════════ -->
+<!-- ═══ 區塊 C：monitor-vm IP 異動 ════════════════════════════════ -->
 <div class="card">
   <div class="card-header">
-    <h5>▌ 區塊 B — 監控主機 IP 異動設定</h5>
+    <h5>▌ 區塊 C — 監控主機 IP 異動設定</h5>
   </div>
   <div class="card-body">
     <div class="row g-3">
