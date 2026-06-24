@@ -11,6 +11,7 @@
 #   manage-mgmt-cidrs.sh list                 → JSON {auto[], extra[], ports}
 #   manage-mgmt-cidrs.sh add  172.16.5.0/24   → 加入設定檔並套用，JSON {ok}
 #   manage-mgmt-cidrs.sh remove 172.16.5.0/24 → 從設定檔移除、刪 ufw 規則，JSON {ok}
+#   manage-mgmt-cidrs.sh delete-rule "spec"   → 從 ufw 直接刪一條（用 status numbered 查 num）
 #
 set -euo pipefail
 
@@ -113,6 +114,31 @@ case "$ACTION" in
         | grep -E '^(22|80|443|8080|8099|8990|9000)(/tcp)?([[:space:]]|\(v6\))' \
         | grep -E 'ALLOW')
     printf '{"ok":true,"rules":%s}\n' "$out]"
+    ;;
+
+  delete-rule)
+    # 直接從 ufw 刪一條規則（用「規則字串」對應 status numbered 找出 num）
+    # $2 是 GUI 顯示的規則字串，例如 "22/tcp ALLOW Anywhere" 或 "9000 ALLOW 172.16.1.0/24"
+    SPEC="${CIDR}"
+    [ -n "$SPEC" ] || json_err "缺少規則字串"
+    # ufw status numbered 每行格式：「[ N] 22/tcp           ALLOW IN    Anywhere」
+    # 我們把目標字串塌空白後再做包含比對，避免欄位寬度差異
+    target="$(echo "$SPEC" | sed 's/  */ /g; s/^ //; s/ $//')"
+    num="$(ufw status numbered 2>/dev/null \
+        | sed -n 's/^\[ *\([0-9][0-9]*\)\] \(.*\)/\1|\2/p' \
+        | awk -F'|' -v t="$target" '{
+            line=$2; gsub(/  +/, " ", line); gsub(/^ +| +$/, "", line);
+            # ufw status numbered 多一個 "IN" 欄；把 ALLOW IN -> ALLOW 後比對
+            sub(/ALLOW IN/, "ALLOW", line);
+            if (line == t) { print $1; exit }
+            if (index(line, t) > 0) { print $1; exit }
+        }')"
+    [ -n "$num" ] || json_err "找不到符合的規則：$SPEC"
+    if yes | ufw delete "$num" >/dev/null 2>&1; then
+        printf '{"ok":true,"deleted":"%s","num":"%s"}\n' "$SPEC" "$num"
+    else
+        json_err "ufw delete 失敗（num=$num）"
+    fi
     ;;
 
   *)

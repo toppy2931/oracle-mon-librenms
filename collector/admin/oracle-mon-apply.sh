@@ -31,7 +31,7 @@ for req in "$REQ_DIR"/*.req; do
     args=("${P[@]:2}")
 
     case "$type/$action" in
-        fw/add|fw/remove)
+        fw/add|fw/remove|fw/delete-rule)
             out="$("$ADMIN/manage-mgmt-cidrs.sh" "$action" "${args[@]}" 2>>"$LOG")" ;;
         nas/save|nas/sync|nas/unmount)
             out="$("$ADMIN/manage-nas-backup.sh" "$action" "${args[@]}" 2>>"$LOG")" ;;

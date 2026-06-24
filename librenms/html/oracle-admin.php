@@ -770,8 +770,31 @@ async function listFwRules() {
         let color = '#cfe0ff';                          // 一般：亮藍灰
         if (/Anywhere/i.test(r))      color = '#ffb454'; // 全開放 → 橘色警示
         else if (/mgmt-auto/.test(r)) color = '#4ade80'; // 自動管理 → 綠色
-        return `<span style="color:${color}">${safe}</span>`;
-    }).join('\n');
+        // 用 data-attr 攜帶原始 rule 字串，避免內聯 onclick 把引號弄爛
+        return `<div class="d-flex align-items-center justify-content-between" style="gap:8px;padding:2px 0">
+            <span style="color:${color};white-space:pre">${safe}</span>
+            <button class="btn btn-outline-danger btn-sm py-0 fw-del-btn" data-rule="${safe}" title="從 ufw 刪除此規則" style="font-size:11px;padding:1px 6px">🗑 刪除</button>
+        </div>`;
+    }).join('');
+    // 綁定刪除按鈕（事件委派避免內聯 quoting 問題）
+    box.querySelectorAll('.fw-del-btn').forEach(btn=>{
+        btn.addEventListener('click', ()=>deleteFwRule(btn.dataset.rule));
+    });
+}
+
+async function deleteFwRule(rule) {
+    const warning = /mgmt-auto/.test(rule)
+        ? '\n\n⚠ 此規則是「mgmt-auto」自動管理：刪除後新增/移除其他網段時會被重新建立。'
+        : '';
+    if (!confirm(`確定刪除這條 ufw 規則？\n\n${rule}${warning}`)) return;
+    setResult('fwResult', '<span class="info">刪除中…</span>');
+    const j = await api('/oracle-firewall.php', {action:'delete-rule', rule});
+    if (j.ok) {
+        setResult('fwResult', `<span class="ok">✓ 已刪除規則 (ufw num=${escapeHtml(String(j.num||'?'))})：${escapeHtml(rule)}</span>`);
+        listFwRules();   // 重抓清單
+    } else {
+        setResult('fwResult', `<span class="err">✗ ${escapeHtml(j.error||'刪除失敗')}</span>`);
+    }
 }
 
 async function removeCidr(cidr) {

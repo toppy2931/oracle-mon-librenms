@@ -25,13 +25,20 @@ if (!hash_equals(csrf_token(), $token)) {
 $body   = json_decode(file_get_contents('php://input'), true) ?: [];
 $action = $body['action'] ?? '';
 $cidr   = $body['cidr'] ?? '';
+$rule   = $body['rule'] ?? '';
 
-if (!in_array($action, ['list', 'add', 'remove', 'rules'], true)) {
+if (!in_array($action, ['list', 'add', 'remove', 'rules', 'delete-rule'], true)) {
     exit(json_encode(['ok' => false, 'error' => '未知動作']));
 }
 $needs_cidr = in_array($action, ['add', 'remove'], true);
 if ($needs_cidr && !preg_match('#^(\d{1,3}\.){3}\d{1,3}/\d{1,2}$#', $cidr)) {
     exit(json_encode(['ok' => false, 'error' => 'CIDR 格式不正確（需如 172.16.5.0/24）']));
+}
+if ($action === 'delete-rule') {
+    // 規則字串：白名單字元集，避免奇怪輸入
+    if (!preg_match('#^[A-Za-z0-9 /.():\-\#_,]+$#', $rule) || strlen($rule) > 200) {
+        exit(json_encode(['ok' => false, 'error' => '規則字串格式不合法']));
+    }
 }
 
 // 執行命令並取回 JSON 陣列
@@ -52,6 +59,9 @@ function run_json(array $cmd): array {
 if ($needs_cidr) {
     // 異動 → 排入佇列，由 root applier 套 ufw + 寫 /var/lib conf
     $result = run_json(['sudo', '/opt/oracle-mon/admin/queue-request.sh', 'fw', $action, $cidr]);
+} elseif ($action === 'delete-rule') {
+    // 也是異動 → 排佇列（須動 /etc/ufw）
+    $result = run_json(['sudo', '/opt/oracle-mon/admin/queue-request.sh', 'fw', 'delete-rule', $rule]);
 } else {
     // 唯讀 → 直接呼叫（不寫 /etc）
     $result = run_json(['sudo', '/opt/oracle-mon/admin/manage-mgmt-cidrs.sh', $action]);
@@ -60,7 +70,7 @@ if ($needs_cidr) {
 $username  = Auth::user()->username;
 $client_ip = $_SERVER['REMOTE_ADDR'] ?? '';
 @file_put_contents('/var/log/oracle-admin.log',
-    date('Y-m-d H:i:s') . " [FW_$action] user=$username from=$client_ip cidr=$cidr\n",
+    date('Y-m-d H:i:s') . " [FW_$action] user=$username from=$client_ip cidr=$cidr rule=$rule\n",
     FILE_APPEND);
 
 echo json_encode($result);
