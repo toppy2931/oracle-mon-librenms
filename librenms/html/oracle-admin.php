@@ -301,13 +301,14 @@ SELECT log_mode FROM v$database;     -- 應回 ARCHIVELOG 或 NOARCHIVELOG</pre>
         <div class="text-muted mt-1" style="font-size:11px">由 <code>ip route</code> 自動偵測，IP/網段變動時自動跟隨，無需手動維護。</div>
 
         <label class="form-label mt-3">額外允許的網段（其他內網網段 / 遠端管理）</label>
-        <div id="fwExtra"><div class="text-muted" style="font-size:12px">載入中…</div></div>
-
-        <div class="input-group input-group-sm mt-2">
+        <div class="input-group input-group-sm">
           <input type="text" class="form-control" id="fwNewCidr" placeholder="172.16.5.0/24">
           <button class="btn btn-success" onclick="addCidr()">＋ 新增網段</button>
         </div>
         <div class="text-muted mt-1" style="font-size:11px">格式 <code>CIDR</code>，例 <code>172.16.5.0/24</code>。寫入持久化設定檔，套件更新重跑也不會漏。</div>
+
+        <label class="form-label mt-3">已新增的網段（點「移除」可刪除）</label>
+        <div class="result-box" id="fwExtra" style="min-height:80px">載入中…</div>
       </div>
       <div class="col-md-6">
         <label class="form-label">操作結果</label>
@@ -729,12 +730,12 @@ async function loadFirewall() {
         const ex = document.getElementById('fwExtra');
         if (j.extra && j.extra.length) {
             ex.innerHTML = j.extra.map(c =>
-                `<div class="d-flex align-items-center gap-2 mb-1">
-                    <code>${escapeHtml(c)}</code>
-                    <button class="btn btn-outline-danger btn-sm py-0" onclick="removeCidr('${escapeHtml(c)}')">移除</button>
+                `<div class="d-flex align-items-center justify-content-between mb-1" style="word-break:normal;padding:3px 0;border-bottom:1px dashed #1e4080">
+                    <code style="background:#0a1525;color:#7fe0a0;padding:3px 10px;border-radius:3px;font-size:13px">${escapeHtml(c)}</code>
+                    <button class="btn btn-outline-danger btn-sm py-0" onclick="removeCidr('${escapeHtml(c)}')" style="font-size:11px;padding:2px 10px">🗑 移除</button>
                  </div>`).join('');
         } else {
-            ex.innerHTML = '<div class="text-muted" style="font-size:12px">（尚無額外網段；僅開放本機網段）</div>';
+            ex.innerHTML = '<div class="text-muted" style="font-size:12px;font-family:sans-serif;padding:10px 0;text-align:center">（尚無額外網段；僅開放本機網段）</div>';
         }
     } catch (e) {
         setResult('fwAuto', `<span class="err">載入錯誤：${e.message}</span>`);
