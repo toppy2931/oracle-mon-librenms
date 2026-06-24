@@ -152,13 +152,28 @@ public class OracleStats {
           m.put("dg_switchover", String.valueOf(swOk));
         } catch (Exception e) { m.put("dg_switchover","0"); }
 
+        // 注意：v$managed_standby 在 Primary 上看不到 MRP/RFS（那是備庫端 process），
+        // 所以 dg_standby_cnt 在 Primary 永遠是 0。改用 dg_dest_count + dg_dest_status 判斷備庫運作狀態。
         try { m.put("dg_standby_cnt", num(q1(st,
           "select count(*) from v$managed_standby where process like 'MRP%' or process like 'RFS%'"))); }
         catch (Exception e) { m.put("dg_standby_cnt","0"); }
 
+        // STANDBY destination 設定數（9i/10g+ 都用 v$archive_dest.target，9i 也有）
+        try { m.put("dg_dest_count", num(q1(st,
+          "select count(*) from v$archive_dest where target='STANDBY' and destination is not null"))); }
+        catch (Exception e) { m.put("dg_dest_count","0"); }
+
+        // STANDBY destination VALID 數（status='VALID' 的）
         try { m.put("dg_dest_valid", num(q1(st,
-          "select count(*) from v$archive_dest where target='STANDBY' and status='VALID'"))); }
+          "select count(*) from v$archive_dest where target='STANDBY' and destination is not null and status='VALID'"))); }
         catch (Exception e) { m.put("dg_dest_valid","0"); }
+
+        // STANDBY destination 最差狀態（VALID / ERROR / DEFERRED / INACTIVE / BAD PARAM）
+        try {
+          String ds = q1(st,
+            "select max(status) from v$archive_dest where target='STANDBY' and destination is not null");
+          m.put("dg_dest_status", "\"" + (ds!=null ? ds.trim() : "NONE") + "\"");
+        } catch (Exception e) { m.put("dg_dest_status","\"NONE\""); }
 
         try { m.put("dg_seq_current", num(q1(st,"select nvl(max(sequence#),0) from v$log"))); }
         catch (Exception e) { m.put("dg_seq_current","0"); }
@@ -166,14 +181,22 @@ public class OracleStats {
         try { m.put("dg_seq_archived", num(q1(st,"select nvl(max(sequence#),0) from v$archived_log"))); }
         catch (Exception e) { m.put("dg_seq_archived","0"); }
 
+        // 9i-safe：用 dest_id JOIN 取 standby destination 的 applied_seq#
         try { m.put("dg_seq_standby", num(q1(st,
-          "select nvl(max(applied_seq#),0) from v$archive_dest_status"+
-          " where status='VALID' and target='STANDBY'"))); }
+          "select nvl(max(s.applied_seq#),0) from v$archive_dest_status s, v$archive_dest d"+
+          " where s.dest_id=d.dest_id and d.target='STANDBY' and d.destination is not null"))); }
         catch (Exception e) { m.put("dg_seq_standby","0"); }
+
+        // standby destination 已收到的 archived_seq#
+        try { m.put("dg_seq_dest_archived", num(q1(st,
+          "select nvl(max(s.archived_seq#),0) from v$archive_dest_status s, v$archive_dest d"+
+          " where s.dest_id=d.dest_id and d.target='STANDBY' and d.destination is not null"))); }
+        catch (Exception e) { m.put("dg_seq_dest_archived","0"); }
 
         try { m.put("dg_gap", num(q1(st,"select count(*) from v$archive_gap"))); }
         catch (Exception e) { m.put("dg_gap","0"); }
 
+        // v$dataguard_stats 為 10g+ 視圖，9i 抓不到時保持 0
         try { m.put("dg_apply_lag_min", num(q1(st,
           "select nvl(round((extract(day from to_dsinterval(value))*1440)"+
           "+(extract(hour from to_dsinterval(value))*60)"+
@@ -193,17 +216,20 @@ public class OracleStats {
           m.put("dg_mrp_status", "\"" + (mrpSt!=null ? mrpSt.trim() : "NONE") + "\"");
         } catch (Exception e) { m.put("dg_mrp_status","\"NONE\""); }
 
+        // 9i-safe：dest_error 改從 v$archive_dest（含 target 欄位）撈
         try {
-          String destErr = q1(st,"select nvl(max(error),'') from v$archive_dest_status where target='STANDBY'");
+          String destErr = q1(st,
+            "select max(error) from v$archive_dest where target='STANDBY' and destination is not null and error is not null");
           String de = destErr!=null ? destErr.trim().replace("\"","'") : "";
           m.put("dg_dest_error", "\"" + de + "\"");
         } catch (Exception e) { m.put("dg_dest_error","\"\""); }
 
         {
-          int stby = 0, dest = 0;
+          int destCount = 0, stby = 0, destValid = 0;
+          try { destCount = Integer.parseInt(m.getOrDefault("dg_dest_count","0")); } catch (Exception e) {}
           try { stby = Integer.parseInt(m.getOrDefault("dg_standby_cnt","0")); } catch (Exception e) {}
-          try { dest = Integer.parseInt(m.getOrDefault("dg_dest_valid","0")); } catch (Exception e) {}
-          m.put("dg_configured", (stby>0||dest>0) ? "1" : "0");
+          try { destValid = Integer.parseInt(m.getOrDefault("dg_dest_valid","0")); } catch (Exception e) {}
+          m.put("dg_configured", (destCount>0||stby>0||destValid>0) ? "1" : "0");
         }
 
         // ── Materialized Views / Snapshots 刷新健康 ──

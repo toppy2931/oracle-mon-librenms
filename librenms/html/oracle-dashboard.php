@@ -217,28 +217,38 @@ function dgPanel(m){
     }
     const gap = num(m.dg_gap), lag = num(m.dg_apply_lag_min), tlag = num(m.dg_transport_lag_min);
     const swReady = num(m.dg_switchover)===1;
+    const destCount = num(m.dg_dest_count);
+    const destStatus = (m.dg_dest_status||'NONE').trim();
+    const destErr = (m.dg_dest_error||'').trim();
     const chkPrimary = num(m.db_open)===1;
-    const chkStandby = num(m.dg_standby_cnt)>0;
+    // 在 Primary 上看 standby 是否「實際運作」：destination 設定數 > 0 + 狀態 VALID + 無錯誤訊息
+    const chkStandbyOK = destCount>0 && destStatus==='VALID' && !destErr;
     const chkGap = gap===0;
     function chk(ok,label){ return `<div class="sw-chk ${ok?'ok':'ng'}"><span class="ic">${ok?'✓':'✗'}</span>${label}</div>`; }
-    const pri = num(m.dg_seq_current), stb = num(m.dg_seq_standby);
-    const seqDiff = Math.abs(pri - stb);
-    const logSyncVal = `主&nbsp;${fmtInt(pri)}&nbsp;↔&nbsp;備&nbsp;${fmtInt(stb)}&ensp;${seqDiff===0?'<span class="green">✓</span>':'<span class="yellow">⚠</span>'}&ensp;（差 ${seqDiff}）`;
+    // Log 同步改顯示「主庫 archived seq」↔「備庫 applied seq」，避免被當前 active log 干擾
+    const priArc = num(m.dg_seq_archived), stbApl = num(m.dg_seq_standby);
+    const seqDiff = Math.abs(priArc - stbApl);
+    const seqMark = seqDiff===0?'<span class="green">✓</span>':seqDiff<=3?'<span class="yellow">⚠</span>':'<span class="red">✗</span>';
+    const logSyncVal = `主&nbsp;${fmtInt(priArc)}&nbsp;↔&nbsp;備&nbsp;${fmtInt(stbApl)}&ensp;${seqMark}&ensp;（差 ${seqDiff}）`;
     const mrpSt = (m.dg_mrp_status||'NONE').trim();
-    const mrpMap = {'APPLYING_LOG':['green','套用中'],'WAIT_FOR_LOG':['grey','等待日誌'],'WAIT_FOR_GAP':['red','缺口卡住'],'IDLE':['yellow','IDLE'],'NONE':['red','未執行']};
+    // Primary 上 v$managed_standby 看不到 MRP（那是備庫端），所以 NONE 不再 = 異常
+    const mrpMap = {'APPLYING_LOG':['green','套用中'],'WAIT_FOR_LOG':['grey','等待日誌'],'WAIT_FOR_GAP':['red','缺口卡住'],'IDLE':['yellow','IDLE'],'NONE':['grey','—（Primary 端）']};
     const [mrpCls,mrpTxt] = mrpMap[mrpSt] || ['yellow', mrpSt];
-    const destErr = (m.dg_dest_error||'').trim();
+    // destination 狀態 pill
+    const dsMap = {'VALID':['green','VALID'],'ERROR':['red','ERROR'],'DEFERRED':['yellow','DEFERRED'],'INACTIVE':['grey','INACTIVE'],'NONE':['grey','—']};
+    const [dsCls,dsTxt] = dsMap[destStatus] || ['yellow', destStatus];
     const destErrRow = destErr ? `<div class="kv"><span class="k err">目的地錯誤</span><span class="v err" style="font-size:11px;word-break:break-all">${destErr}</span></div>` : '';
     return `<div class="panel" data-block="dg"><h4>Data Guard</h4>
         ${kv('角色', ROLE[num(m.dg_role)]||'—')}
         <div class="kv"><span class="k">Switchover</span><span class="v">${swReady?'<span class="pill green">就緒</span>':'<span class="pill yellow">未就緒</span>'}</span></div>
         <div class="sw-checks">
             ${chk(chkPrimary,'Primary DB 正常')}
-            ${chk(chkStandby,'Standby 已連線')}
+            ${chk(chkStandbyOK,'Standby destination 正常')}
             ${chk(chkGap,'Archive Gap = 0')}
         </div>
-        ${kv('Standby 程序', fmtInt(m.dg_standby_cnt))}
-        <div class="kv"><span class="k">MRP 狀態<span class="tip" data-tip="APPLYING_LOG  正在套用 ✓&#10;WAIT_FOR_LOG  等待日誌（正常待機）✓&#10;WAIT_FOR_GAP  缺口卡住 ✗&#10;IDLE          手動停止 ✗&#10;NONE          MRP 未執行 ✗">ⓘ</span></span><span class="v"><span class="pill ${mrpCls}">${mrpTxt}</span></span></div>
+        ${kv('STANDBY 設定數', fmtInt(destCount))}
+        ${kv('Destination 狀態', `<span class="pill ${dsCls}">${dsTxt}</span>`)}
+        <div class="kv"><span class="k">MRP 狀態<span class="tip" data-tip="APPLYING_LOG  正在套用 ✓&#10;WAIT_FOR_LOG  等待日誌（正常待機）✓&#10;WAIT_FOR_GAP  缺口卡住 ✗&#10;IDLE          手動停止 ✗&#10;NONE          此欄位需在 Standby 端查詢&#10;             （Primary 看不到 MRP/RFS）">ⓘ</span></span><span class="v"><span class="pill ${mrpCls}">${mrpTxt}</span></span></div>
         ${kv('Archive Gap', gapDot(gap))}
         ${kv('Transport Lag', lagDot(tlag))}
         ${kv('Apply Lag', lagDot(lag))}
@@ -350,8 +360,10 @@ function generateWarnings(dbs){
             warns.push({label, sev:'yellow', msg:`Data Guard Apply Lag = ${num(m.dg_apply_lag_min)} 分（超過 15 分鐘閾值）`});
         if(dgConf && num(m.dg_transport_lag_min)>15)
             warns.push({label, sev:'yellow', msg:`Data Guard Transport Lag = ${num(m.dg_transport_lag_min)} 分（Primary 尚未傳送至備庫）`});
-        if(dgConf && (m.dg_mrp_status==='WAIT_FOR_GAP'||m.dg_mrp_status==='NONE'))
-            warns.push({label, sev:'red', msg:`MRP 程序異常：${m.dg_mrp_status||'NONE'}（Standby 套用程序停止）`});
+        if(dgConf && m.dg_mrp_status==='WAIT_FOR_GAP')
+            warns.push({label, sev:'red', msg:`MRP 缺口卡住（Standby 端 archivelog 不連續）`});
+        if(dgConf && (m.dg_dest_status==='ERROR'||m.dg_dest_status==='DEFERRED'))
+            warns.push({label, sev:'red', msg:`Standby destination 狀態異常：${m.dg_dest_status}`});
         const de = (m.dg_dest_error||'').trim();
         if(dgConf && de) warns.push({label, sev:'red', msg:`Standby 目的地錯誤：${de}`});
 
