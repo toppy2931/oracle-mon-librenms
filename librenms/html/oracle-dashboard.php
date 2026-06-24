@@ -110,6 +110,18 @@ body{margin:0;background:#0b1020;color:#dfe6f5;font-family:"Segoe UI","Microsoft
 .tip{position:relative;cursor:help;color:#7b8aa6;font-size:11px;vertical-align:middle;margin-left:4px}
 .tip::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 5px);background:#0d1829;border:1px solid #2a3d6a;border-radius:6px;padding:8px 12px;font-size:11px;color:#cfe0ff;white-space:pre;line-height:1.9;z-index:30;pointer-events:none;opacity:0;transition:opacity .15s;min-width:240px;box-shadow:0 4px 14px rgba(0,0,0,.5)}
 .tip:hover::after{opacity:1}
+/* 可折疊指標說明 */
+.helpbox{margin-top:10px;border-top:1px dashed #2a3d6a;padding-top:8px}
+.helpbox summary{cursor:pointer;color:#7fa8e0;font-size:11px;letter-spacing:.3px;list-style:none;user-select:none;padding:2px 0}
+.helpbox summary::-webkit-details-marker{display:none}
+.helpbox summary::before{content:'▸';margin-right:6px;display:inline-block;transition:transform .15s;color:#5f6f8c}
+.helpbox[open] summary::before{transform:rotate(90deg)}
+.helpbox summary:hover{color:#cfe0ff}
+.helpbox .hb-body{margin-top:6px;font-size:11px;line-height:1.7;color:#9aa8c4}
+.helpbox .hb-body dl{margin:0;display:grid;grid-template-columns:auto 1fr;gap:3px 10px}
+.helpbox .hb-body dt{color:#cfe0ff;font-weight:600;white-space:nowrap}
+.helpbox .hb-body dd{margin:0;color:#9aa8c4}
+.helpbox .hb-body .note{margin-top:6px;padding:5px 8px;background:#0d1829;border-left:2px solid #4d8cff;color:#9aa8c4}
 </style>
 </head>
 <body>
@@ -230,10 +242,6 @@ function dgPanel(m){
     const seqDiff = Math.abs(priArc - stbApl);
     const seqMark = seqDiff===0?'<span class="green">✓</span>':seqDiff<=3?'<span class="yellow">⚠</span>':'<span class="red">✗</span>';
     const logSyncVal = `主&nbsp;${fmtInt(priArc)}&nbsp;↔&nbsp;備&nbsp;${fmtInt(stbApl)}&ensp;${seqMark}&ensp;（差 ${seqDiff}）`;
-    const mrpSt = (m.dg_mrp_status||'NONE').trim();
-    // Primary 上 v$managed_standby 看不到 MRP（那是備庫端），所以 NONE 不再 = 異常
-    const mrpMap = {'APPLYING_LOG':['green','套用中'],'WAIT_FOR_LOG':['grey','等待日誌'],'WAIT_FOR_GAP':['red','缺口卡住'],'IDLE':['yellow','IDLE'],'NONE':['grey','—（Primary 端）']};
-    const [mrpCls,mrpTxt] = mrpMap[mrpSt] || ['yellow', mrpSt];
     // destination 狀態 pill
     const dsMap = {'VALID':['green','VALID'],'ERROR':['red','ERROR'],'DEFERRED':['yellow','DEFERRED'],'INACTIVE':['grey','INACTIVE'],'NONE':['grey','—']};
     const [dsCls,dsTxt] = dsMap[destStatus] || ['yellow', destStatus];
@@ -248,12 +256,25 @@ function dgPanel(m){
         </div>
         ${kv('STANDBY 設定數', fmtInt(destCount))}
         ${kv('Destination 狀態', `<span class="pill ${dsCls}">${dsTxt}</span>`)}
-        <div class="kv"><span class="k">MRP 狀態<span class="tip" data-tip="APPLYING_LOG  正在套用 ✓&#10;WAIT_FOR_LOG  等待日誌（正常待機）✓&#10;WAIT_FOR_GAP  缺口卡住 ✗&#10;IDLE          手動停止 ✗&#10;NONE          此欄位需在 Standby 端查詢&#10;             （Primary 看不到 MRP/RFS）">ⓘ</span></span><span class="v"><span class="pill ${mrpCls}">${mrpTxt}</span></span></div>
         ${kv('Archive Gap', gapDot(gap))}
         ${kv('Transport Lag', lagDot(tlag))}
         ${kv('Apply Lag', lagDot(lag))}
         ${kv('Log 同步', logSyncVal)}
         ${destErrRow}
+        <details class="helpbox"><summary>各項指標說明</summary>
+        <div class="hb-body"><dl>
+            <dt>角色</dt><dd>本機 DB 在 Data Guard 中扮演的角色（PRIMARY 為主庫、PHYSICAL/LOGICAL STANDBY 為備庫）</dd>
+            <dt>Switchover</dt><dd>Oracle 認為主備是否符合「角色切換」前置條件；下方三項是更精準的實際判斷</dd>
+            <dt>STANDBY 設定數</dt><dd>v$archive_dest 內 target=STANDBY 的目的地數量；&gt; 0 即代表 DG 已設定</dd>
+            <dt>Destination 狀態</dt><dd>VALID=正常 / DEFERRED=暫停 / ERROR=傳輸失敗 / INACTIVE=未啟用</dd>
+            <dt>Archive Gap</dt><dd>主備之間缺失的 archivelog 數，0 為正常（閾值：0=綠、1–3=黃、&gt;3=紅）</dd>
+            <dt>Transport Lag</dt><dd>主庫已產生但尚未送到備庫的落後分鐘數（&lt;5 分=綠、5–30=黃、&gt;30=紅）</dd>
+            <dt>Apply Lag</dt><dd>備庫已收到但尚未套用的落後分鐘數，與 Transport Lag 同閾值</dd>
+            <dt>Log 同步</dt><dd>主庫已歸檔序號 ↔ 備庫已套用序號；差 0 = 完全同步</dd>
+            <dt>目的地錯誤</dt><dd>v$archive_dest.error 的最新訊息（例如 ORA-12541 監聽器無回應）</dd>
+        </dl>
+        <div class="note">註：MRP / RFS（套用 / 接收）程序狀態需在 <b>Standby 端</b>查詢 v$managed_standby；Primary 看不到，因此此處不顯示。</div>
+        </div></details>
     </div>`;
 }
 
@@ -360,8 +381,6 @@ function generateWarnings(dbs){
             warns.push({label, sev:'yellow', msg:`Data Guard Apply Lag = ${num(m.dg_apply_lag_min)} 分（超過 15 分鐘閾值）`});
         if(dgConf && num(m.dg_transport_lag_min)>15)
             warns.push({label, sev:'yellow', msg:`Data Guard Transport Lag = ${num(m.dg_transport_lag_min)} 分（Primary 尚未傳送至備庫）`});
-        if(dgConf && m.dg_mrp_status==='WAIT_FOR_GAP')
-            warns.push({label, sev:'red', msg:`MRP 缺口卡住（Standby 端 archivelog 不連續）`});
         if(dgConf && (m.dg_dest_status==='ERROR'||m.dg_dest_status==='DEFERRED'))
             warns.push({label, sev:'red', msg:`Standby destination 狀態異常：${m.dg_dest_status}`});
         const de = (m.dg_dest_error||'').trim();
