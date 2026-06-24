@@ -96,6 +96,11 @@ body{margin:0;background:#0b1020;color:#dfe6f5;font-family:"Segoe UI","Microsoft
 .settings-pop .sp-foot{margin-top:10px;border-top:1px solid #2a3d6a;padding-top:10px}
 .settings-pop button.reset{background:#2a3d6a;color:#cfe0ff;border:none;border-radius:4px;padding:5px 10px;font-size:12px;cursor:pointer}
 .settings-pop button.reset:hover{background:#37508a}
+/* Switchover 條件清單 */
+.sw-checks{margin:2px 0 6px 16px;font-size:12px;line-height:1.8}
+.sw-chk{display:flex;align-items:center;gap:6px}
+.sw-chk.ok{color:#3ddc84}.sw-chk.ng{color:#ff6b78}
+.sw-chk .ic{font-size:13px;font-weight:700;width:14px;text-align:center;flex-shrink:0}
 </style>
 </head>
 <body>
@@ -191,9 +196,19 @@ function dgPanel(m){
             <div class="notconf">未設定 Data Guard（無 standby）</div></div>`;
     }
     const gap = num(m.dg_gap), lag = num(m.dg_apply_lag_min);
+    const swReady = num(m.dg_switchover)===1;
+    const chkPrimary = num(m.db_open)===1;
+    const chkStandby = num(m.dg_standby_cnt)>0;
+    const chkGap = gap===0;
+    function chk(ok,label){ return `<div class="sw-chk ${ok?'ok':'ng'}"><span class="ic">${ok?'✓':'✗'}</span>${label}</div>`; }
     return `<div class="panel" data-block="dg"><h4>Data Guard</h4>
         ${kv('角色', ROLE[num(m.dg_role)]||'—')}
-        ${kv('Switchover', num(m.dg_switchover)===1?'<span class="pill green">就緒</span>':'<span class="pill yellow">未就緒</span>')}
+        <div class="kv"><span class="k">Switchover</span><span class="v">${swReady?'<span class="pill green">就緒</span>':'<span class="pill yellow">未就緒</span>'}</span></div>
+        <div class="sw-checks">
+            ${chk(chkPrimary,'Primary DB 正常')}
+            ${chk(chkStandby,'Standby 已連線')}
+            ${chk(chkGap,'Archive Gap = 0')}
+        </div>
         ${kv('Standby 程序', fmtInt(m.dg_standby_cnt))}
         ${kv('Archive Gap', gap>0?`<span class="pill red">${gap}</span>`:'<span class="pill green">0</span>')}
         ${kv('Apply Lag', lag>15?`<span class="pill yellow">${lag} 分</span>`:`${lag} 分`)}
