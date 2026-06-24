@@ -79,6 +79,15 @@ if ($action === 'toggle') {
     $rc = proc_close($proc);
     if ($rc !== 0) exit(json_encode(['error' => '刪除失敗：' . trim($err ?: $out)]));
 
+    // Post-check：清 PHP stat cache 後再驗證 conf 真的消失（保險閥）
+    clearstatcache(true, $conf_file);
+    if (file_exists($conf_file)) {
+        @file_put_contents('/var/log/oracle-admin.log',
+            date('Y-m-d H:i:s') . " [DELETE_FAIL] user=$username from=$client_ip alias=$alias rc=$rc out=" . trim($out) . " err=" . trim($err) . "\n",
+            FILE_APPEND);
+        exit(json_encode(['error' => "刪除指令回 rc=0 但 $conf_file 仍存在；可能權限問題，請手動 sudo rm 或檢查 /var/log/oracle-admin.log"]));
+    }
+
     // Update snmpd (via queue — /etc is EROFS under ProtectSystem=full)
     $proc2 = proc_open(
         ['sudo', '/opt/oracle-mon/admin/queue-request.sh', 'snmpd', 'update'],
