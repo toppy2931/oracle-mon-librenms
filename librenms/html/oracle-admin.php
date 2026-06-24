@@ -139,7 +139,7 @@ code{color:#60b4f8;background:transparent}
     <!-- 新增表單 -->
     <div id="addForm" class="mb-3 p-3" style="background:#0d1b2a;border-radius:6px;display:none">
       <div class="row g-2 mb-2">
-        <div class="col-2"><label class="form-label">別名 <span class="text-danger">*</span></label><input class="form-control" id="nAlias" placeholder="db2"></div>
+        <div class="col-2"><label class="form-label">別名 <span class="text-danger">*</span></label><input class="form-control" id="nAlias" placeholder="paweb" oninput="this.value=this.value.toLowerCase().replace(/[^a-z0-9-]/g,'')"><div class="text-muted" style="font-size:10px;line-height:1.3;margin-top:2px">小寫英數＋連字號；conf 檔名用</div></div>
         <div class="col-3"><label class="form-label">主機 IP <span class="text-danger">*</span></label><input class="form-control" id="nHost" placeholder="10.0.0.5"></div>
         <div class="col-1"><label class="form-label">Port</label><input class="form-control" id="nPort" value="1521"></div>
         <div class="col-2"><label class="form-label">SID <span class="text-danger">*</span></label><input class="form-control" id="nSid" placeholder="ORCL"></div>
@@ -545,7 +545,7 @@ async function addDb() {
         res.innerHTML = '<span class="ok">✓ 新增成功，重新整理中...</span>';
         setTimeout(() => location.reload(), 1200);
     } else {
-        res.innerHTML = `<span class="err">✗ ${j.error||'新增失敗'}</span>`;
+        res.innerHTML = `<span class="err">✗ ${escapeHtml(j.error||'新增失敗')}</span>`;
     }
 }
 
