@@ -30,6 +30,9 @@ public class OracleStats {
         m.put("sessions_total", num(q1(st,"select count(*) from v$session")));
         m.put("sessions_active", num(q1(st,
               "select count(*) from v$session where status='ACTIVE'")));
+        try { m.put("sessions_max", num(q1(st,
+              "select value from v$parameter where name='sessions'"))); }
+        catch (Exception e) { m.put("sessions_max","0"); }
 
         // ── v$sysstat batch（加 redo size / redo log space requests）──
         Map<String,String> ss = new HashMap<>();

@@ -101,6 +101,11 @@ body{margin:0;background:#0b1020;color:#dfe6f5;font-family:"Segoe UI","Microsoft
 .sw-chk{display:flex;align-items:center;gap:6px}
 .sw-chk.ok{color:#3ddc84}.sw-chk.ng{color:#ff6b78}
 .sw-chk .ic{font-size:13px;font-weight:700;width:14px;text-align:center;flex-shrink:0}
+/* 流量燈小點 */
+.dot-sm{width:9px;height:9px;border-radius:50%;display:inline-block;vertical-align:middle;margin-right:5px;flex-shrink:0}
+.dot-sm.red{background:#ff4d5e;box-shadow:0 0 5px #ff4d5e}
+.dot-sm.yellow{background:#ffc24b;box-shadow:0 0 5px #ffc24b}
+.dot-sm.green{background:#3ddc84;box-shadow:0 0 5px #3ddc84}
 /* Tooltip（ⓘ 說明） */
 .tip{position:relative;cursor:help;color:#7b8aa6;font-size:11px;vertical-align:middle;margin-left:4px}
 .tip::after{content:attr(data-tip);position:absolute;left:0;top:calc(100% + 5px);background:#0d1829;border:1px solid #2a3d6a;border-radius:6px;padding:8px 12px;font-size:11px;color:#cfe0ff;white-space:pre;line-height:1.9;z-index:30;pointer-events:none;opacity:0;transition:opacity .15s;min-width:240px;box-shadow:0 4px 14px rgba(0,0,0,.5)}
@@ -193,6 +198,17 @@ function statusOf(db){
 
 function kv(k,v,cls){ return `<div class="kv"><span class="k">${k}</span><span class="v ${cls||''}">${v}</span></div>`; }
 
+function dot(cls){ return `<span class="dot-sm ${cls}"></span>`; }
+function gapDot(v){ return dot(v===0?'green':v<=3?'yellow':'red')+fmtInt(v); }
+function lagDot(v){ return dot(v<5?'green':v<=30?'yellow':'red')+v+' 分'; }
+function sessDot(total,active,mx){
+    if(!mx) return fmtInt(total)+' ('+fmtInt(active)+')';
+    const pct = Math.round(total/mx*100);
+    return dot(pct<80?'green':pct<95?'yellow':'red')
+        +fmtInt(total)+' / '+fmtInt(mx)
+        +'&ensp;<span class="muted">('+pct+'%&thinsp;·&thinsp;active '+fmtInt(active)+')</span>';
+}
+
 function dgPanel(m){
     if(num(m.dg_configured)!==1){
         return `<div class="panel" data-block="dg"><h4>Data Guard</h4>
@@ -223,9 +239,9 @@ function dgPanel(m){
         </div>
         ${kv('Standby 程序', fmtInt(m.dg_standby_cnt))}
         <div class="kv"><span class="k">MRP 狀態<span class="tip" data-tip="APPLYING_LOG  正在套用 ✓&#10;WAIT_FOR_LOG  等待日誌（正常待機）✓&#10;WAIT_FOR_GAP  缺口卡住 ✗&#10;IDLE          手動停止 ✗&#10;NONE          MRP 未執行 ✗">ⓘ</span></span><span class="v"><span class="pill ${mrpCls}">${mrpTxt}</span></span></div>
-        ${kv('Archive Gap', gap>0?`<span class="pill red">${gap}</span>`:'<span class="pill green">0</span>')}
-        ${kv('Transport Lag', tlag>15?`<span class="pill yellow">${tlag} 分</span>`:`${tlag} 分`)}
-        ${kv('Apply Lag', lag>15?`<span class="pill yellow">${lag} 分</span>`:`${lag} 分`)}
+        ${kv('Archive Gap', gapDot(gap))}
+        ${kv('Transport Lag', lagDot(tlag))}
+        ${kv('Apply Lag', lagDot(lag))}
         ${kv('Log 同步', logSyncVal)}
         ${destErrRow}
     </div>`;
@@ -252,7 +268,7 @@ function healthPanel(m){
         ${kv('DB 開啟', num(m.db_open)===1?'<span class="pill green">READ WRITE</span>':'<span class="pill yellow">其他</span>')}
         ${kv('無效物件', io>0?`<span class="pill yellow">${fmtInt(io)}</span>`:'0')}
         ${kv('無效索引', ii>0?`<span class="pill yellow">${fmtInt(ii)}</span>`:'0')}
-        ${kv('連線數 (active)', `${fmtInt(m.sessions_total)} (${fmtInt(m.sessions_active)})`)}
+        ${kv('連線數', sessDot(num(m.sessions_total),num(m.sessions_active),num(m.sessions_max)))}
     </div>`;
 }
 
