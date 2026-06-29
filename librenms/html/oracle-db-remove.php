@@ -97,6 +97,16 @@ if ($action === 'toggle') {
     fclose($pipes2[1]); fclose($pipes2[2]);
     proc_close($proc2);
 
+    // Remove LibreNMS PHP files (non-fatal)
+    $proc3 = proc_open(
+        ['sudo', '/opt/oracle-mon/admin/remove-librenms-app.sh', $alias],
+        [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+        $pipes3
+    );
+    stream_get_contents($pipes3[1]); stream_get_contents($pipes3[2]);
+    fclose($pipes3[1]); fclose($pipes3[2]);
+    proc_close($proc3);
+
     // Soft-delete LibreNMS application (preserve RRD history)
     try {
         \DB::table('applications')

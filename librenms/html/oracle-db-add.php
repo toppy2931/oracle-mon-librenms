@@ -86,6 +86,19 @@ try {
     // Non-fatal: LibreNMS discovery will register it on next poll
 }
 
+// Step 4: Generate LibreNMS polling/graph/page PHP files from oracle-l1hweb template
+$proc3 = proc_open(
+    ['sudo', '/opt/oracle-mon/admin/generate-librenms-app.sh', $alias],
+    [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+    $pipes3
+);
+$out3 = stream_get_contents($pipes3[1]); $err3 = stream_get_contents($pipes3[2]);
+fclose($pipes3[1]); fclose($pipes3[2]);
+$rc3 = proc_close($proc3);
+if ($rc3 !== 0) {
+    error_log("generate-librenms-app.sh failed for $alias: " . trim($err3 ?: $out3));
+}
+
 // Log
 $username = Auth::user()->username;
 $client_ip = $_SERVER['REMOTE_ADDR'] ?? '';

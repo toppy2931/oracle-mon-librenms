@@ -25,7 +25,7 @@ $apps = Application::query()->hasAccess(Auth::user())
 foreach ($apps as $app) {
     echo '<div class="panel panel-default">
         <div class="panel-heading">
-        <h3 class="panel-title">L1HWEB（Oracle 9i 主機）
+        <h3 class="panel-title">' . e($app->displayName()) . '
         <div class="pull-right"><small class="muted">採集自 ' . e($app->device->displayName()) . '</small></div>
         </h3>
         </div>

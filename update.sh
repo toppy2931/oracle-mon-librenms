@@ -46,6 +46,9 @@ install -m 644 -o "$LIBRENMS_USER" -g "$LIBRENMS_USER" "$HERE/librenms/polling/o
 install -m 644 -o "$LIBRENMS_USER" -g "$LIBRENMS_USER" "$HERE/librenms/pages/device_apps/oracle-l1hweb.inc.php" "$PAGE_DEV/oracle-l1hweb.inc.php"
 install -m 644 -o "$LIBRENMS_USER" -g "$LIBRENMS_USER" "$HERE/librenms/pages/apps/oracle-l1hweb.inc.php" "$PAGE_APP/oracle-l1hweb.inc.php"
 
+say "更新 sudoers（新增指令需重新套用）"
+install -m 440 -o root -g root "$HERE/system/sudoers.oracle-admin" /etc/sudoers.d/oracle-admin
+
 say "清除 view 快取"
 sudo -u "$LIBRENMS_USER" bash -c "cd '$LIBRENMS_DIR' && php artisan view:clear" || true
 say "完成。"

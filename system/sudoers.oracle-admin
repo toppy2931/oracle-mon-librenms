@@ -10,5 +10,8 @@ librenms ALL=(root) NOPASSWD: /opt/oracle-mon/admin/manage-mgmt-cidrs.sh
 librenms ALL=(root) NOPASSWD: /opt/oracle-mon/admin/manage-nas-backup.sh
 librenms ALL=(root) NOPASSWD: /opt/oracle-mon/admin/set-custom-map-refresh.sh
 librenms ALL=(root) NOPASSWD: /opt/oracle-mon/admin/manage-dashboard-layout.sh
+# LibreNMS PHP 檔自動產生／移除（新增/刪除 DB 時由 oracle-db-add/remove.php 呼叫）
+librenms ALL=(root) NOPASSWD: /opt/oracle-mon/admin/generate-librenms-app.sh
+librenms ALL=(root) NOPASSWD: /opt/oracle-mon/admin/remove-librenms-app.sh
 # 特權佇列：web 只能「排入請求」，實際套用由 systemd oracle-mon-apply 以 root 執行
 librenms ALL=(root) NOPASSWD: /opt/oracle-mon/admin/queue-request.sh
