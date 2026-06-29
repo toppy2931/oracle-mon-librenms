@@ -53,7 +53,7 @@ with io.open(PATH, "r", encoding="utf-8") as f:
 if BEGIN in text and END in text:
     new_text = re.sub(
         r"[ \t]*" + re.escape(BEGIN) + r".*?" + re.escape(END) + r"\n?",
-        BLOCK,
+        lambda _m: BLOCK,  # lambda：避免 BLOCK 內反斜線（\App）被當 re repl 轉義
         text,
         flags=re.DOTALL,
     )
