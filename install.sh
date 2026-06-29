@@ -135,6 +135,9 @@ if command -v python3 >/dev/null; then
 
     say "修補 Custom Map blade（讓 custom_map_refresh 可獨立設定）"
     python3 "$HERE/system/custom-map-patch.py" "$LIBRENMS_DIR/resources/views/map/custom-view.blade.php" || warn "Custom Map blade 未修補，區塊 F GUI 將無效果"
+
+    say "修補 Apps 概觀（為 oracle-* app 註冊概觀縮圖，避免 Graph Template Missing）"
+    python3 "$HERE/system/apps-overview-patch.py" "$LIBRENMS_DIR/includes/html/pages/apps.inc.php" || warn "Apps 概觀未修補，概觀頁 oracle app 縮圖會顯示 Graph Template Missing"
 fi
 
 # ── 6) 告警規則（add-only，需要 DB 已有指標後較有意義）─────────

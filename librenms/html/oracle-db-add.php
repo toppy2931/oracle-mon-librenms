@@ -66,13 +66,16 @@ if (!($j2['ok'] ?? false) && !($j2['queued'] ?? false)) {
 }
 
 // Step 3: Add LibreNMS application (device_id=1 = monitor-vm)
+// upsert：若同 app_type 曾被 soft-delete（刪除後重新新增），必須 restore
+// （清 deleted_at），不能只在「無未刪除記錄時 insert」——否則 insert 會撞
+// unique(device_id, app_type) 而拋例外被下方 catch 靜默吞掉，導致該 app 仍是
+// 已刪除狀態：戰情室（讀 dbs/*.conf）有顯示、但應用程式頁（讀 applications 表）沒有。
 try {
-    $existing = \DB::table('applications')
+    $row = \DB::table('applications')
         ->where('device_id', 1)
         ->where('app_type', "oracle-$alias")
-        ->whereNull('deleted_at')
-        ->count();
-    if ($existing === 0) {
+        ->first();
+    if ($row === null) {
         \DB::table('applications')->insert([
             'device_id'    => 1,
             'app_type'     => "oracle-$alias",
@@ -81,6 +84,10 @@ try {
             'app_status'   => '',
             'discovered'   => 0,
         ]);
+    } elseif ($row->deleted_at !== null) {
+        \DB::table('applications')
+            ->where('app_id', $row->app_id)
+            ->update(['deleted_at' => null, 'app_state' => 'NOTPOLLED']);
     }
 } catch (\Exception $e) {
     // Non-fatal: LibreNMS discovery will register it on next poll
