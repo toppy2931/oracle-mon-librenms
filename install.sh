@@ -138,6 +138,9 @@ if command -v python3 >/dev/null; then
 
     say "修補 Apps 概觀（為 oracle-* app 註冊概觀縮圖，避免 Graph Template Missing）"
     python3 "$HERE/system/apps-overview-patch.py" "$LIBRENMS_DIR/includes/html/pages/apps.inc.php" || warn "Apps 概觀未修補，概觀頁 oracle app 縮圖會顯示 Graph Template Missing"
+
+    say "修補 Graph 自動對應（oracle 圖一律綁定 graph_type 指定 alias 的現役 app_id，避免選錯 app_id 破圖）"
+    python3 "$HERE/system/graph-app-autocorrect-patch.py" "$LIBRENMS_DIR/includes/html/graphs/application/auth.inc.php" || warn "Graph 自動對應未修補，dashboard widget 若選錯「應用」app_id 會破圖"
 fi
 
 # ── 6) 告警規則（add-only，需要 DB 已有指標後較有意義）─────────

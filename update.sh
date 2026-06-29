@@ -49,6 +49,9 @@ install -m 644 -o "$LIBRENMS_USER" -g "$LIBRENMS_USER" "$HERE/librenms/pages/app
 if command -v python3 >/dev/null; then
     say "修補 Apps 概觀（為 oracle-* app 註冊概觀縮圖，避免 Graph Template Missing）"
     python3 "$HERE/system/apps-overview-patch.py" "$LIBRENMS_DIR/includes/html/pages/apps.inc.php" || say "Apps 概觀未修補（apps.inc.php 結構可能已變）"
+
+    say "修補 Graph 自動對應（oracle 圖一律綁定 graph_type 指定 alias 的現役 app_id）"
+    python3 "$HERE/system/graph-app-autocorrect-patch.py" "$LIBRENMS_DIR/includes/html/graphs/application/auth.inc.php" || say "Graph 自動對應未修補（auth.inc.php 結構可能已變）"
 fi
 
 say "更新 sudoers（新增指令需重新套用）"
