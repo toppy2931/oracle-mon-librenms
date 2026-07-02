@@ -50,6 +50,16 @@ Browser  ─[POST + CSRF + X-CSRF-Token]──►  /opt/librenms/html/oracle-*.p
 
 ⚠️ **`re.sub` 處理含反斜線的替換字串**（如 `\LibrenmsConfig::get(...)`）必須用 lambda 繞 backreference 解析，否則炸 `re.error: bad escape \L`（已踩過，見 `custom-map-patch.py` 註解）。
 
+⚠️ **`daily.sh`（LibreNMS 每日自動更新）會被 patch 過的檔案卡住**：daily.sh 內部對 `/opt/librenms` 跑 `git pull`，若 `menu.blade.php`／`custom-view.blade.php` 等有我們的本地修改，git 會因「local changes would be overwritten」直接 abort，導致 GUI 右上角出現 `Error: Daily Update Failed`（已實際發生過）。修復流程：
+```bash
+sudo -u librenms git -C /opt/librenms diff resources/views/layouts/menu.blade.php   # 先確認只有我們的 patch，不是別人手動改的東西
+sudo -u librenms git -C /opt/librenms checkout -- resources/views/layouts/menu.blade.php
+sudo -u librenms /opt/librenms/daily.sh                                             # 這次會正常跑完
+sudo python3 /opt/oracle-mon-librenms/system/menu-patch.py /opt/librenms/resources/views/layouts/menu.blade.php   # 冪等，重新注入
+sudo -u librenms php /opt/librenms/artisan view:clear
+```
+`custom-view.blade.php` 若也被卡住，比照辦理，改跑 `system/custom-map-patch.py`。
+
 ---
 
 ## 重複跑安全（idempotency）
