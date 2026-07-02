@@ -236,6 +236,10 @@ sudo -u librenms sudo -n /opt/oracle-mon/admin/set-custom-map-refresh.sh get   #
 sudo /opt/oracle-mon-librenms/system/setup-mgmt-firewall.sh
 sudo EXTRA_CIDRS="10.20.0.0/16" /opt/oracle-mon-librenms/system/setup-mgmt-firewall.sh
 
+# 出 OVA 樣板前：清空站點資料（受監控 DB 密碼/歷史/機器身分等），預設 dry-run
+sudo /opt/oracle-mon-librenms/system/prepare-for-clone.sh              # 預覽，不刪任何東西
+sudo /opt/oracle-mon-librenms/system/prepare-for-clone.sh --yes        # 真正執行（互動仍需輸入 CONFIRM）
+
 # 重新編譯 Java collector
 ( cd /opt/oracle-mon && sudo javac -cp lib/ojdbc14.jar OracleStats.java )
 
