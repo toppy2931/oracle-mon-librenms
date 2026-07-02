@@ -1,0 +1,9 @@
+# Shell 腳本一律用 LF 換行，避免從 Windows 提交時混入 CRLF，
+# 導致 Linux 上 shebang 變成 `#!/usr/bin/env bash\r` → command not found。
+*.sh   text eol=lf
+*.php  text eol=lf
+*.py   text eol=lf
+*.inc  text eol=lf
+
+# 二進位驅動不做任何換行轉換
+*.jar  binary
