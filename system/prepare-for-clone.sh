@@ -326,24 +326,59 @@ step_graylog(){
     return $rc
 }
 
-# ── 步驟 4：清 jt-glogarch 歸檔檔案（先確認掛載點確實是獨立歸檔碟才清）────
+# ── 步驟 4：清 jt-glogarch 歸檔檔案 + 自己的狀態資料庫 ─────────────────
 step_glogarch(){
     local archive_dir="/data/graylog-archives"
-    if [ ! -d "$archive_dir" ]; then
-        say "  找不到 $archive_dir，跳過（可能未部署 jt-glogarch）"
+    local app_dir="/opt/jt-glogarch"
+
+    if [ ! -d "$archive_dir" ] && [ ! -d "$app_dir" ]; then
+        say "  找不到 $archive_dir 或 $app_dir，跳過（可能未部署 jt-glogarch）"
         return 0
     fi
+
+    local rc=0
+    local has_service=0
+    if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files 2>/dev/null | grep -q '^jt-glogarch'; then
+        has_service=1
+        systemctl stop jt-glogarch >/dev/null 2>&1 || true
+    fi
+
     # 額外保險：只有當 /data 是獨立掛載點（非根目錄底下的一般資料夾）才清空，
     # 避免萬一路徑設定錯誤，實際上清到系統碟的一般目錄
-    if mountpoint -q /data 2>/dev/null; then
-        safe_empty_dir "$archive_dir"
-        say "  已清空 $archive_dir（/data 為獨立掛載點，安全）"
-    else
-        warn "  /data 不是獨立掛載點，為安全起見不自動清空 $archive_dir，請手動確認後處理"
-        return 1
+    if [ -d "$archive_dir" ]; then
+        if mountpoint -q /data 2>/dev/null; then
+            safe_empty_dir "$archive_dir"
+            say "  已清空 $archive_dir（/data 為獨立掛載點，安全）"
+        else
+            warn "  /data 不是獨立掛載點，為安全起見不自動清空 $archive_dir，請手動確認後處理"
+            rc=1
+        fi
     fi
+
+    # jt-glogarch 自己的 SQLite 狀態庫（作業歷程/歸檔清單/通知設定/排程/行為稽核），
+    # 獨立於 $archive_dir 的實體歸檔檔案，不屬於本 repo 但同台部署。不清的話：
+    #   1. 會留下站點專屬的歷史紀錄（樣板不該有）
+    #   2. 其中快取的 Graylog 認證狀態在 MongoDB 被清空後會失效，造成背景 API
+    #      呼叫持續 401、被 jt-glogarch 判定 session 失效而不斷跳回登入頁
+    # 清掉後服務重啟會自動建立全新空白 DB，不影響登入（登入是即時問 Graylog API 驗證）。
+    if [ -f "$app_dir/jt-glogarch.db" ]; then
+        safe_rm_rf "$app_dir/jt-glogarch.db"
+        safe_rm_rf "$app_dir/jt-glogarch.db-shm"
+        safe_rm_rf "$app_dir/jt-glogarch.db-wal"
+        say "  已清空 jt-glogarch 狀態資料庫（作業歷程/歸檔清單/通知/排程）"
+    fi
+
+    # session 簽署金鑰：不清的話所有從本樣板 clone 出去的站點會共用同一把金鑰，
+    # 清掉後下次啟動自動重新產生（跟 SSH host key 同一種邏輯）
+    if [ -f "$app_dir/.session_secret" ]; then
+        safe_rm_rf "$app_dir/.session_secret"
+        say "  已清空 jt-glogarch session 簽署金鑰（下次啟動自動重新產生）"
+    fi
+
+    [ $has_service -eq 1 ] && { systemctl start jt-glogarch >/dev/null 2>&1 || true; }
+
     [ -d /var/log/jt-glogarch ] && find /var/log/jt-glogarch -type f -exec truncate -s 0 {} \; 2>/dev/null
-    return 0
+    return $rc
 }
 
 # ── 步驟 5：系統層清理（快取、日誌、歷史紀錄；不動任何已安裝套件本體）──────

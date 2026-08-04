@@ -145,6 +145,8 @@ jt-glogarch（`jasoncheng7115/jt-glogarch`）裝在同台 monitor-vm，本 repo 
 - **必須走 HTTPS**：其 `web/app.py` SessionMiddleware 寫死 `https_only=True`（secure cookie），HTTP 下瀏覽器拒存 cookie → 登入「閃一下」跳回 login。config `web.ssl_certfile/ssl_keyfile` 指回 `server.crt/server.key` 即 HTTPS。Web UI `https://<host>:8990`，用 **Graylog 帳號**登入（驗證走 Graylog `/api/system` Basic Auth）。
 - 安裝鐵則（與作者另一專案 jt-ipam 同源，曾 `chown -R /` 毀機）：原始碼放 `/opt/jt-glogarch` 本身（install.sh 跑 `pip install /opt/jt-glogarch`）；Ubuntu 24.04 需先 `pip install --break-system-packages --ignore-installed setuptools wheel`；systemd 服務那步是互動詢問，非互動跑會跳過需手動 `cp deploy/jt-glogarch.service`。
 - 歸檔落地在獨立碟 `/data/graylog-archives`（VG `vg-archive`/`/dev/sdc`），API 模式（非 OpenSearch Direct，因 9200 有認證）。
+- **自己的狀態資料庫是 `/opt/jt-glogarch/jt-glogarch.db`**（SQLite，WAL 模式，同目錄下 `.db-shm`/`.db-wal`）——作業歷程、歸檔清單、通知設定、排程作業、行為稽核**都存在這裡，不是存在 `/data/graylog-archives` 或 Graylog 的 Mongo/OpenSearch**。`prepare-for-clone.sh` step 4 會一併清除（連同 `.session_secret`，避免所有 clone 共用同一把 session 簽署金鑰）。
+- ⚠️ **若只清了 Graylog 的 MongoDB、沒清 `jt-glogarch.db`**：舊 DB 裡快取的 Graylog 認證狀態會失效，造成 jt-glogarch 背景呼叫 `/api/streams`、`/api/system` 持續 401，被判定 session 失效而不斷跳回登入頁（外觀像是「點歸檔清單就被登出」）。修法是停服務、砍掉 `jt-glogarch.db*`、重啟即可自動重建全新空白 DB，不影響登入（登入本身是即時打 Graylog API 驗證，不依賴這個 DB）。
 
 ---
 
@@ -265,6 +267,53 @@ sudo -u librenms php /opt/librenms/poller.php -h 127.0.0.1
 # 直接看採集 JSON（不透過 LibreNMS）
 sudo /opt/oracle-mon/run.sh l1hweb | python3 -m json.tool
 ```
+
+---
+
+## 樣板機（OVA）出廠預設帳密
+
+`prepare-for-clone.sh` 只清 MongoDB 的 `graylog` 資料庫與 OpenSearch 索引資料，**不會動 `/etc/graylog/server/server.conf`**——Graylog 的 `root_password_sha2`（admin 密碼雜湊）是設定檔層級的資料，不受清除影響，會原封不動跟著 OVA 一起匯出。
+
+**出廠預設帳密（每個新站點部署後務必立即更改）**：
+- Graylog Web UI（`:9000`）：`admin` / `Graylog@2026!`
+- jt-glogarch（`:8990`）：與 Graylog 同一組帳密（經由 Graylog API 認證，本身不存密碼）
+
+**新站點首次開機後的預期行為（勿誤判為異常）**：
+1. 因 MongoDB 資料已清空，Graylog 會顯示「Fresh installation detected」並在 `server.log` 印出一組**隨機一次性密碼**——這組密碼只用於背景 `GraylogCertificateProvisioningPeriodical` 跟本機 Data Node 自動做憑證配對，配對完成（約數分鐘內，`server.log` 會出現第二次 `Started listener bound to [0.0.0.0:9000]`）後自動失效。**正式登入一律用上面的出廠預設帳密，不要用這組隨機密碼**
+2. **樣板已內建 Syslog UDP 514 / GELF TCP 12201 兩個 Input**（清除流程後手動於 System → Inputs 重新設定並保留在樣板內），新站點開機後這兩個 Input 會直接跟著存在、不用重建，**但防火牆不會自動跟著開**——`setup-mgmt-firewall.sh` 預設 `MGMT_PORTS` 故意不含 514/udp、12201/tcp（log 來源可能跨網段，無法用「本機網段」規則概括），新站點須依實際 log 來源另外手動 `ufw allow`
+3. OpenSearch cluster 單節點必為 `yellow`（1 unassigned replica shard），因預設 index template 要求 1 個 replica 但單節點無處放置，非錯誤
+4. 若要讓新站點強制走全新 Preflight 設定（不共用出廠密碼），需另外清空 `server.conf` 的 `root_password_sha2` 欄位
+
+---
+
+## Graylog 進階整合：FortiGate 解析 / GeoIP / jt-gelflow
+
+樣板內建了一套「FortiGate CEF log → 結構化欄位 → GeoIP 定位 → jt-gelflow 視覺化」的完整鏈路，供新站點防火牆（FortiGate/PaloAlto）接進來時參考或直接沿用。
+
+**FortiGate 欄位解析**（`System → Inputs → Syslog UDP 514 → Manage extractors`）：
+FortiGate CEF 格式的 `key=value` 內容用 **6 個獨立 Grok pattern Extractor**（不是單一大 pattern）解析：`src=%{IP:src}`、`dst=%{IP:dst}`、`spt=%{NUMBER:spt}`、`dpt=%{NUMBER:dpt}`、`proto=%{NUMBER:proto}`、`act=%{WORD:act}`。這些是 CEF **標準**欄位（非 `FTNTFGT` 前綴的 Fortinet 自訂欄位），理論上通用於其他有支援 CEF 輸出的設備。**拆成多個獨立 Extractor 是刻意設計**：某類 log（如 deny）缺少某欄位時，單一欄位的 Extractor 不匹配就單純跳過，不會像一條大 pattern 那樣整筆解析失敗。
+
+**PaloAlto 尚未處理**：預設是 CSV 位置對應格式（非 key=value），欄位順序依 PAN-OS 版本/log 類型不同，需要實際樣本才能正確建對應規則，延後到有真實資料或客戶現場時處理。
+
+**GeoIP 查詢**（繞開 Graylog 內建 GeoIP Resolver 的 UI bug）：
+- ⚠️ **`System → Configurations → Geo-Location Processor` 這個全域設定介面，取消勾選「Enforce default schema」會觸發後端 bug**（`Couldn't parse cluster configuration ... GeoIpResolverConfig` 反序列化錯誤，Graylog 7.1.3 已驗證）。**改用 Lookup Table + Pipeline Rule** 完全繞開這個介面：
+  1. `System → Lookup Tables` 建立 Data Adapter（`geoip-city-adapter`，type: Geo IP - MaxMind/IPinfo，File path: `/etc/graylog/server/geoip/GeoLite2-City.mmdb`）+ Cache（`geoip-cache`，node-local in-memory）+ Lookup Table（`geoip-lookup`）
+  2. `System → Pipelines → Manage rules` 建兩條**獨立**規則（`GeoIP enrich FortiGate src`／`dst`），各自用 `when has_field("src")` 判斷、`then set_field("src_geo", lookup_value("geoip-lookup", to_string($message.src)))`
+  3. **重要語法坑**：Graylog Pipeline Rule 的 `then` 底下**沒有 `if/then/end` 巢狀條件語法**（會報 `Unknown function if`），條件判斷只能寫在最上層的 `when`，需要「欄位存在才處理」的邏輯必須拆成多條獨立規則，不能塞進單一規則的 action 區塊裡
+  4. 兩條規則放進同一個新建 Pipeline（例如 `GeoIP Enrichment`）的 Stage 0，**另外新建 Pipeline，不要動 `Default Routing` 那條 `Managed by Application` 的系統管理 pipeline**
+  5. `lookup_value()` 回傳的 `single_value` 已經是 `"lat,lng"` 字串格式，可直接 `set_field`，不需要額外轉換
+- ⚠️ **mmdb 路徑常被 UI 預先填錯**：實際檔案在 `/etc/graylog/server/geoip/GeoLite2-City.mmdb`（含 `geoip` 子目錄），設定表單有時會預填少一層目錄的錯誤路徑，存檔前務必核對。
+
+**jt-gelflow 串接**（獨立上游專案，`/opt/jt-gelflow`）：
+- 監聽 port **依 `config.json` 實際設定為準，不要假設官方文件範例值**——這台是 `UDP 12301` / `TCP 12302`（刻意跟 Graylog 自己的 GELF Input `12201`錯開避免衝突）
+- Graylog 端建 **`System → Outputs` → GELF Output**（Destination host `127.0.0.1`、Port 依上一點確認的實際值、Protocol UDP），**掛到 `Default Stream`**（內建），欄位對應（jt-gelflow 設定 → 欄位對應）改成實際解析出的欄位名：來源/目的 IP 用 `src`/`dst`，GeoIP 座標用 `src_geo`/`dst_geo`
+- ⚠️ **Graylog Input 精靈的陷阱**：用 `System → Inputs → Launch new input` 精靈新增 Input 時，精靈會**自動建立一個同名自訂 stream（如 `default_stream`）+ 一條 `Managed by Application` 路由規則**，把該 Input 的訊息導去這個自訂 stream、順便讓它們**不會進到內建 Default Stream**。若要讓所有流量單純留在內建 Default Stream，需要到 `System/Pipelines → Manage rules` 找到 `Input setup wizard routing rule` 描述的那條規則刪掉，並到 `System/Pipelines → Manage pipelines` 把附屬的空殼 pipeline 跟 `Streams` 裡對應的自訂 stream 一併刪除
+- jt-gelflow 自己的官方測試腳本 `scripts/test_data_generator.py` **內部寫死用 UDP 送到 `localhost:12201`**（沒有 `--host`/`--port` 參數可覆寫），跟這台的 `12301` 對不上，**不要用它測試**，改用一行 Python `socket.sendto()` 手動送符合格式的測試封包
+
+**OpenSearch Data Node Heap 大小**：
+- 樣板預設在 `/etc/graylog/datanode/datanode.conf` 加了 `opensearch_heap = 8g`（原本這個 key 不存在，用內建預設值極小，曾觸發 `Data Node Heap Size Warning`）
+- `8g` 是抓「新站點實體 RAM 下限 16G 的 50%」訂出的保守值，避免部署到記憶體較小的站點時 OOM。**若確認新站點實體 RAM ≥ 24G，部署後建議手動調高到 `11g`~`12g`**（RAM 的 50%）以取得更好效能，改完要 `sudo systemctl restart graylog-datanode`
+- 驗證方式：`ps aux | grep opensearch | grep -o "\-Xmx[0-9a-zA-Z]*"`
 
 ---
 
