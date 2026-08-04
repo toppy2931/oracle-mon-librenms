@@ -1,12 +1,20 @@
 # 整合監控平台單機部署 Runbook
-# LibreNMS + Graylog + jt-ipam on Ubuntu 24.04
+# LibreNMS + Graylog + jt-ipam + jt-glogarch + jt-gelflow on Ubuntu 24.04
 
 > **適用場景**：小型至中型環境（≤ 100 台設備），資源有限、單台 VM 部署
 > **較大規模請改用** [雙 VM 部署](integrated-deployment.md)（100–500 台）
 > **OS**：Ubuntu 24.04 LTS
-> **更新日期**：2026-06-14（v2：依 172.16.1.94 重裝實測，修正 7 處 LibreNMS 安裝盲點）
+> **更新日期**：2026-08-04（v3：依 172.16.1.92 重裝實測，新增 jt-glogarch / jt-gelflow 章節，修正 jt-ipam 新版腳本行為）
 >
-> **本次修正項目**：
+> **本次修正項目（v3）**：
+> 1. **jt-ipam §7.1–7.2 pgvector patch 已過時**：新版 `jt-ipam.sh` 改用 `_pick_pg()`/`_pkg_installable()` 函式邏輯，舊版的固定字串 patch 對不上，改成「先用 `apt-cache madison` 驗證再決定要不要 patch」的判斷流程
+> 2. **jt-ipam `--tls-mode self-signed` 不會建立 nginx vhost**（重大修正，推翻舊版 §7.4/§8.2 的前提）：這個模式下 backend 自己在 8443 做 TLS 直連，前端完全沒人服務。§7.3–§7.5、§8.2 全部改寫，改用官方 `deploy/nginx/jt-ipam.conf` 手動設定「nginx 模式」
+> 3. 新增 **§7bis 安裝 jt-glogarch**（Graylog 歸檔工具，含獨立歸檔碟規劃）
+> 4. 新增 **§7ter 安裝 jt-gelflow**（即時流量視覺化，含與 Graylog 自身 GELF Input 的埠號衝突處理）
+> 5. §1.2/§4 磁碟規劃新增 `/dev/sdc`（jt-glogarch 歸檔碟）
+> 6. 新增疑難排解：**nginx `reload` 有時不會套用新設定，需改用 `restart`**
+>
+> **歷史更新（v2，2026-06-14）**：
 > 1. §4.1 lv-backup 改 `-l 100%FREE`（避免 VG metadata 佔用導致 `-L 60G` 少 1 extent 失敗）
 > 2. §4.1 mkfs 步驟加 `-F`/`-f` 並標註【必要】；末尾加 `blkid` 驗證
 > 3. §4.3 fstab 改用 `/dev/vg-data/lv-xxx` device path，移除 `UUID=<placeholder>` 模板
@@ -15,9 +23,8 @@
 > 6. §5.12 新增 snmpd 安裝設定章節（之前完全缺失）
 > 7. §5.13 SNMP Community 設定（移除已不存在的 `--json` flag）
 >
-> **歷史更新**：jt-ipam 章節改用官方腳本流程，新增 REPO_ROOT 致命陷阱與 pgvector/nginx 修正
->
 > ⚠️ **部署 jt-ipam 前務必先讀 [§7.0 致命陷阱](#-70-致命陷阱絕不可把腳本單獨複製到-tmp-執行會摧毀整台系統)** —— 從錯誤路徑執行安裝腳本會 `chown -R jtipam /` 摧毀整台系統。
+> ⚠️ **同一作者的腳本不代表同一套安全模式** —— jt-glogarch / jt-gelflow 雖與 jt-ipam 同作者，**實測沒有**相同的 `REPO_ROOT` 陷阱，但每次導入新的第三方安裝腳本前，仍應先 `grep` 確認一次，不要憑經驗假設。
 
 ---
 
@@ -31,6 +38,8 @@
 - [5. 安裝 LibreNMS](#5-安裝-librenms)
 - [6. 安裝 Graylog（含 OpenSearch + MongoDB）](#6-安裝-graylog含-opensearch--mongodb)
 - [7. 安裝 jt-ipam（含 PostgreSQL + Redis）](#7-安裝-jt-ipam含-postgresql--redis)
+- [7bis. 安裝 jt-glogarch（Graylog 歸檔）](#7bis-安裝-jt-glogarchgraylog-歸檔)
+- [7ter. 安裝 jt-gelflow（即時流量視覺化）](#7ter-安裝-jt-gelflow即時流量視覺化)
 - [8. Nginx 統一設定](#8-nginx-統一設定)
 - [9. 三者整合](#9-三者整合)
 - [10. 備份策略](#10-備份策略)
@@ -45,14 +54,18 @@
 
 | 服務 | 職責 | Port |
 |------|------|------|
-| **LibreNMS** | SNMP 網路監控、設備圖表、告警 | :80 / :443 |
-| **Graylog** | Log 集中收集、搜尋、告警 | :9000（Web）、:5044（Beats）、:12201（GELF）|
+| **LibreNMS** | SNMP 網路監控、設備圖表、告警 | :80 |
+| **Graylog** | Log 集中收集、搜尋、告警 | :9000（Web）、:5044（Beats）、:12201/udp（GELF Input）、:514/udp（Syslog）|
 | **Graylog Datanode** | 嵌入式 OpenSearch 管理（graylog 7.x 取代獨立 OpenSearch）| :9200（內部，不對外）|
 | **MongoDB** | Graylog 的設定資料庫 | :27017（內部）|
-| **jt-ipam** | IP 位址管理、與 LibreNMS/Graylog 整合 | :8080 |
+| **jt-ipam** | IP 位址管理、與 LibreNMS/Graylog 整合 | :443（nginx，見 §7.3）；backend 僅 loopback :8000 |
+| **jt-glogarch** | Graylog 訊息定期歸檔到獨立磁碟 | :8990（Web，backend 自己 TLS）|
+| **jt-gelflow** | Graylog 訊息即時流量視覺化（Sankey/2D/3D） | :8099（Web）、:12301/udp+:12302/tcp（GELF 收集，**不可用 12201**，見 §7ter）|
 | **MariaDB** | LibreNMS 資料庫 | :3306（內部）|
 | **PostgreSQL** | jt-ipam 資料庫 | :5432（內部）|
 | **Redis** | jt-ipam 快取 | :6379（內部）|
+
+> ⚠️ **`jt-ipam` 的 port 隨 `--tls-mode` 而異**：`self-signed`（backend 直接 TLS）是 `:8443`；`nginx`（backend 純 HTTP + nginx 做 TLS/靜態檔）才是外部真正要用的 `:443`。詳見 §7.3。
 
 ### 資源需求（建議）
 
@@ -60,9 +73,11 @@
 |------|-----|------|
 | LibreNMS + MariaDB | 2–3 GB | |
 | Graylog（Java heap） | 3–4 GB | 設 `-Xms3g -Xmx3g` |
-| Graylog Datanode（OpenSearch heap） | 4–6 GB | **不可超過 31 GB** |
+| Graylog Datanode（OpenSearch heap） | 4–6 GB | **不可超過 31 GB**；實測抓「實體 RAM 的 50%」 |
 | MongoDB | 1 GB | |
 | jt-ipam + PostgreSQL + Redis | 2–3 GB | |
+| jt-glogarch | ~0.1 GB | 純 Python，含 Chromium headless（PDF 報表用）另計 |
+| jt-gelflow | ~0.1 GB | 純 Python asyncio，非常輕量 |
 | OS + Nginx + 緩衝 | 2 GB | |
 | **總計（建議）** | **≥ 16 GB** | 24 GB 較穩定 |
 
@@ -80,9 +95,11 @@
 | RAM | 16 GB | 24 GB |
 | 系統磁碟 | 100 GB | 150 GB |
 | 資料磁碟 | 300 GB | 500 GB |
+| 歸檔磁碟（如裝 jt-glogarch） | — | 500 GB |
 | OS | Ubuntu 24.04 LTS | Ubuntu 24.04 LTS |
 
 > 建議**分兩顆虛擬磁碟**：`/dev/sda`（OS）+ `/dev/sdb`（資料），方便快照與擴容。
+> **若計劃安裝 jt-glogarch**，另加一顆 `/dev/sdc` 當獨立歸檔碟（見 §4.4）——不裝 jt-glogarch 可省略這顆。
 
 ### 1.2 LVM 規劃
 
@@ -357,6 +374,27 @@ df -hT | grep vg-data
 > sudo blkid | grep vg-data    # 應有 8 行
 > sudo lvs                      # 應列出 8 個 LV
 > ```
+
+### 4.4 jt-glogarch 歸檔碟（選配，僅計劃安裝 jt-glogarch 時需要）
+
+```bash
+# 確認第三顆碟代號（通常是 /dev/sdc）
+lsblk
+
+sudo pvcreate /dev/sdc
+sudo vgcreate vg-archive /dev/sdc
+sudo lvcreate -l 100%FREE -n lv-glogarch vg-archive
+sudo mkfs.ext4 -F /dev/vg-archive/lv-glogarch
+
+sudo mkdir -p /data
+echo "/dev/vg-archive/lv-glogarch /data ext4 defaults 0 2" | sudo tee -a /etc/fstab
+sudo mount -a
+
+df -h /data
+```
+
+> jt-glogarch 官方安裝腳本會自己建立 `/data/graylog-archives` 子目錄並設定擁有者，
+> 這裡只需要確保 `/data` 是一個獨立掛載點（歸檔資料量大，不要跟系統碟混在一起）。
 
 ---
 
@@ -1068,24 +1106,41 @@ sudo git clone https://github.com/jasoncheng7115/jt-ipam.git /opt/jt-ipam
 # 之後一律用完整路徑 /opt/jt-ipam/scripts/jt-ipam.sh，不要 cp 到別處
 ```
 
-### 7.1 先手動安裝 pgvector（繞過腳本誤判）
+### 7.1 pgvector 檢查（先驗證這台實際狀況，不要無條件套 patch）
 
-Ubuntu 24.04（noble）的 **PGDG repo 沒有** `postgresql-16-pgvector`，
-但 **Ubuntu 官方 repo 有**。必須在跑安裝腳本前先手動裝好：
+> ⚠️ **這節內容依 `jt-ipam.sh` 版本而異，兩種版本行為不同，先確認再動手**：
+> - **舊版**：腳本用固定的 `die "pgvector ... not installable"` 字串判斷失敗，且用 `apt-cache madison` 只查 PGDG repo，PGDG 若沒提供該版本的 pgvector 套件就會誤判（即使 Ubuntu 官方 repo 其實有裝得起來的版本）
+> - **新版（2026-08 起實測）**：改用 `_pick_pg()` + `_pkg_installable()` 函式邏輯，會依序嘗試 PG 16→17→18，`_pkg_installable()` 本質上還是呼叫 `apt-cache madison`，但函式本身**只檢查套件是否列在任何已啟用的 repo（不限 PGDG）**——若 Ubuntu 官方 repo 本身就提供該版本的 pgvector（Ubuntu 24.04 目前是如此，`postgresql-16-pgvector` 在 `noble/universe`），新版腳本會自動找到並成功，**完全不需要 patch**。
+
+**先驗證這台的實際情況**：
 
 ```bash
+apt-cache madison postgresql-16-pgvector
+```
+
+- **有輸出**（顯示版本號與來源，例如 `noble/universe`）→ **不需要 patch**，直接跳到 §7.3 執行安裝即可，腳本自己會裝好
+- **完全沒輸出** → 代表這台的套件庫確實沒有現成的 pgvector，需要先手動處理（見下方 fallback）
+
+**Fallback（若上面完全沒輸出）**：
+
+```bash
+# 先確認 jt-ipam.sh 是否為新版（有 _pick_pg 函式）
+grep -n "_pick_pg\|_pkg_installable" /opt/jt-ipam/scripts/jt-ipam.sh
+
+# 若找到 _pick_pg：新版邏輯，代表這台套件庫真的沒有可用版本，
+# 需自行加入 PGDG repo 或其他來源後再重跑 apt-cache madison 確認，而不是 patch 腳本本身
+
+# 若找不到（舊版腳本）：手動裝好套件，再套用 §7.2 的字串 patch
 sudo apt-get update
 sudo apt-get install -y postgresql-16-pgvector
 ```
 
-> jt-ipam.sh 用 `apt-cache madison`（檢查 repo 是否「提供」此套件）而非 `dpkg -l`（檢查是否「已安裝」）
-> 來判斷 pgvector。因 PGDG repo 不提供，腳本會誤判失敗 ——
-> 即使已從 Ubuntu repo 裝好仍然 `FATAL: pgvector ... not installable`。需 patch（見 7.2）。
+### 7.2 （僅舊版腳本需要）Patch jt-ipam.sh 的 pgvector 檢查
 
-### 7.2 Patch jt-ipam.sh 的 pgvector 檢查
+> 只有在 §7.1 確認是**舊版**（沒有 `_pick_pg` 函式、且固定字串比對失敗）時才需要這步。新版腳本不要套用這個 patch（目標字串已經不存在，patch 會直接印出「找不到目標字串」而不會造成任何改動，屬於安全的 no-op，但也不解決問題——新版請回頭看 §7.1 的 fallback）。
 
 ```bash
-# 確認 die 那行的行號（約 line 250）
+# 確認 die 那行的行號跟目標字串是否存在
 grep -n "pgvector for PostgreSQL" /opt/jt-ipam/scripts/jt-ipam.sh
 
 # 套用 patch：若 dpkg 顯示已安裝就跳過 die
@@ -1102,23 +1157,22 @@ if old in content:
         f.write(content)
     print("✅ patch 成功")
 else:
-    print("❌ 找不到目標字串，請確認腳本版本（可能官方已修正）")
+    print("❌ 找不到目標字串——這是新版腳本，請回頭看 §7.1")
 PYEOF
 ```
 
 ### 7.3 執行安裝（務必用完整 repo 路徑）
 
 ```bash
-# self-signed TLS，以 VM IP（或域名）作為 FQDN
 sudo bash /opt/jt-ipam/scripts/jt-ipam.sh install \
     --tls-mode self-signed \
-    --public-fqdn 172.16.1.94 2>&1 | grep -v "chown: changing ownership of '/proc"
+    --public-fqdn 172.16.1.92 2>&1 | grep -v "chown: changing ownership of '/proc"
 
 # 說明：
 #  - 一律用 /opt/jt-ipam/scripts/jt-ipam.sh 完整路徑（見 7.0）
 #  - --public-fqdn 換成實際 IP 或域名
 #  - grep -v 過濾掉腳本遞迴 chown /opt/jt-ipam 時碰到 /proc 的無害錯誤噪音
-#  - 參數是 --public-fqdn（不是 --fqdn）；--tls-mode 可選 self-signed / letsencrypt / none
+#  - 參數是 --public-fqdn（不是 --fqdn）；--tls-mode 可選 self-signed / nginx / letsencrypt / none
 ```
 
 腳本完成後會建立：
@@ -1128,32 +1182,273 @@ sudo bash /opt/jt-ipam/scripts/jt-ipam.sh install \
 | 系統使用者 | `jtipam`（home `/var/lib/jt-ipam`）|
 | PostgreSQL 資料庫 | `jt_ipam` |
 | systemd 服務 | `jt-ipam-backend.service`、`jt-ipam-sync.timer`、`jt-ipam-backup.timer` |
-| nginx vhost | self-signed TLS（見 7.4 衝突處理）|
 | 管理員初始密碼 | `/etc/jt-ipam/.admin-initial-password` |
 
-### 7.4 修復 nginx port 80 衝突（與 LibreNMS）
+### 7.4 ⚠️ 重要：`--tls-mode self-signed` 不會建立 nginx vhost，前端沒人服務
 
-jt-ipam 的 nginx vhost 預設使用 `listen 80 default_server`，會與 LibreNMS 的 port 80
-衝突（同一 port 出現兩個 `default_server` 會讓 `nginx -t` 失敗，或 jt-ipam 搶走 `/` 根路由）。
+> 這點**推翻了舊版文件的假設**（舊版以為官方腳本永遠會自建 nginx vhost）。實測 2026-08 版腳本行為如下：
 
-```bash
-# 找出含 default_server 的 jt-ipam vhost 檔（位置依腳本版本可能在 sites-available 或 conf.d）
-grep -rl "default_server" /etc/nginx/sites-available/ /etc/nginx/conf.d/ 2>/dev/null
+`--tls-mode self-signed` 的實際意思是：**backend（uvicorn）自己直接處理 TLS**，監聽在 `0.0.0.0:8443`，安裝過程會明確印出：
 
-# 移除 jt-ipam vhost 的 default_server（檔名依上一行輸出調整）
-sudo sed -i 's/listen 80 default_server;/listen 80;/' /etc/nginx/sites-available/jt-ipam
-sudo sed -i 's/listen \[::\]:80 default_server;/listen [::]:80;/' /etc/nginx/sites-available/jt-ipam
-
-sudo nginx -t && sudo systemctl reload nginx
+```
+[jt-ipam] Skipping nginx (mode: self-signed — uvicorn terminates TLS directly)
+[jt-ipam]   Backend (TLS) on https://<IP>:8443/
 ```
 
-### 7.5 取得管理員初始密碼並驗證
+**這個模式下完全沒有 nginx vhost**，也沒有任何東西服務 `frontend/dist` 編譯出來的靜態檔案——backend 本身是純 FastAPI API，`main.py` 只 mount 了 `/api/mcp`、`/mcp`，**沒有 `StaticFiles` 掛載**。用瀏覽器打 `https://<IP>:8443/` 只會看到 `{"detail":"Not Found"}`（FastAPI 預設 404），`/docs` 也是同樣結果——這不代表安裝失敗，是這個模式本來就沒人服務前端。
+
+**要有可用的 Web UI，必須改用 `nginx` 模式**（backend 只認純 HTTP + loopback，nginx 負責 TLS + 服務前端 + 反代 API），見 §7.5。
+
+### 7.5 切換到 nginx 模式（讓前端頁面真正可用）
+
+**第一步：確認官方 nginx 設定檔存在**
+
+```bash
+find /opt/jt-ipam -path "*/deploy/nginx*" -type f
+# 應找到：jt-ipam.conf、jt-ipam-proxy.conf（本機用）
+# 以及 jt-ipam-external-proxy.conf 系列（給「另外架一層外部反代」的情境，這裡用不到）
+```
+
+**第二步：改 `backend.env`，讓 backend 改成純 HTTP、只聽 loopback**
+
+```bash
+# 先查程式碼確認 backend_tls_mode 的合法值（不要用猜的）
+grep -n "backend_tls_mode\|BACKEND_TLS_MODE" /opt/jt-ipam/backend/app/core/config.py
+# 預設值是 "nginx"，且驗證邏輯要求 nginx 模式時 BACKEND_BIND_HOST 必須是 loopback
+
+sudo cp /etc/jt-ipam/backend.env /etc/jt-ipam/backend.env.bak-selfsigned
+
+sudo sed -i \
+  -e "s|^APP_PUBLIC_URL=.*|APP_PUBLIC_URL=https://<VM_IP>|" \
+  -e "s|^API_PUBLIC_URL=.*|API_PUBLIC_URL=https://<VM_IP>|" \
+  -e "s|^CORS_ORIGINS=.*|CORS_ORIGINS=https://<VM_IP>|" \
+  -e "s|^BACKEND_TLS_MODE=.*|BACKEND_TLS_MODE=nginx|" \
+  -e "s|^BACKEND_BIND_HOST=.*|BACKEND_BIND_HOST=127.0.0.1|" \
+  -e "s|^BACKEND_BIND_PORT=.*|BACKEND_BIND_PORT=8000|" \
+  /etc/jt-ipam/backend.env
+# 把 <VM_IP> 換成實際 IP；grep 一次確認全部改對
+grep -E "^APP_PUBLIC_URL|^API_PUBLIC_URL|^CORS_ORIGINS|^BACKEND_TLS_MODE|^BACKEND_BIND_HOST|^BACKEND_BIND_PORT" /etc/jt-ipam/backend.env
+```
+
+**第三步：安裝 nginx 設定檔，同時處理跟 LibreNMS 的 port 80 衝突**
+
+官方 `jt-ipam.conf` 預設 `listen 80 default_server` + `server_name ipam.example.com`（佔位域名）。純 IP 存取（無 DNS）的情境下：
+- **`server_name` 要改成實際 IP**（瀏覽器打 IP 時送出的 Host header 才會精確比對到這個 vhost）
+- **port 80 的 `default_server` 要拿掉**，否則會跟 LibreNMS 的 vhost（§5.8，`server_name localhost`）衝突——**且因為「精確比對 server_name」優先權高於 `default_server`**，衝突發生時通常是 jt-ipam 贏、LibreNMS 的 `http://<IP>/` 反而連不上（見 §12 疑難排解）
+
+```bash
+sudo cp /opt/jt-ipam/deploy/nginx/jt-ipam.conf /tmp/jt-ipam.conf
+
+sudo sed -i \
+  -e 's|listen 80 default_server;|listen 80;|' \
+  -e 's|listen \[::\]:80 default_server;|listen [::]:80;|' \
+  -e 's|server_name ipam\.example\.com;|server_name <VM_IP>;|g' \
+  /tmp/jt-ipam.conf
+# 確認改對（port 80 兩行沒有 default_server，server_name 兩處都是實際 IP）
+grep -n "listen 80\|listen \[::\]:80\|server_name" /tmp/jt-ipam.conf
+
+sudo cp /tmp/jt-ipam.conf /etc/nginx/conf.d/jt-ipam.conf
+sudo mkdir -p /etc/nginx/snippets
+sudo cp /opt/jt-ipam/deploy/nginx/jt-ipam-proxy.conf /etc/nginx/snippets/jt-ipam-proxy.conf
+
+sudo nginx -t
+# 「ssl_stapling ignored, issuer certificate not found」是自簽憑證的正常警告，非錯誤
+```
+
+**第四步：套用設定**
+
+```bash
+# ⚠️ 用 restart，不要只用 reload——實測 reload 有時不會完全套用新設定（見 §12）
+sudo systemctl restart nginx
+sudo systemctl restart jt-ipam-backend
+
+# 驗證後端改成純 HTTP:8000
+curl -s http://127.0.0.1:8000/healthz
+
+# 驗證前端頁面（應回 200，不再是 {"detail":"Not Found"}）
+curl -sk -o /dev/null -w "%{http_code}\n" https://<VM_IP>/
+```
+
+**這時候 port 80 換成 jt-ipam 的自動導向、LibreNMS 打不開了怎麼辦？** 見 §12「LibreNMS Web UI 打不開，被 jt-ipam 導去 HTTPS」。
+
+**如果只是要快速測試 API、不在乎有沒有前端**，可以保留 `self-signed` 模式不處理（backend 直接 TLS 在 8443，`/healthz`、`/docs` 等 API 端點正常可用），跳過整個 §7.5，直接看 §7.6。
+
+### 7.6 取得管理員初始密碼並驗證
 
 ```bash
 sudo cat /etc/jt-ipam/.admin-initial-password
 sudo systemctl status jt-ipam-backend --no-pager | grep "Active:"
 sudo systemctl is-active jt-ipam-backend postgresql redis-server
 ```
+
+---
+
+## 7bis. 安裝 jt-glogarch（Graylog 歸檔）
+
+> jt-glogarch 定期把 Graylog 的訊息匯出歸檔到獨立磁碟，並提供 Web UI 瀏覽/搜尋歷史歸檔。
+> **選配**：只在需要長期保存 log 原始資料時安裝，不影響 LibreNMS/Graylog/jt-ipam 的運作。
+
+### 7bis.0 安全性檢查（同作者不代表同一套風險，每次都要驗證）
+
+```bash
+sudo git clone https://github.com/jasoncheng7115/jt-glogarch.git /opt/jt-glogarch
+
+find /opt/jt-glogarch -maxdepth 2 -iname "install.sh"
+# 實測在 deploy/install.sh
+
+grep -n "REPO_ROOT\|dirname.*BASH_SOURCE\|chown -R" /opt/jt-glogarch/deploy/install.sh
+```
+
+> **實測結果（2026-08）**：`chown -R` 只對 `$INSTALL_DIR`/`$ARCHIVE_DIR`/`$CONFIG_DIR` 這三個**寫死的絕對路徑**（`/opt/jt-glogarch`、`/data/graylog-archives`、`/etc/jt-glogarch`）操作，**沒有** jt-ipam 那種用 `dirname "${BASH_SOURCE[0]}"` 推導路徑的模式，因此沒有同樣的致命陷阱。**但每次導入新腳本仍應照這個流程驗證，不要因為「同作者」就跳過檢查。**
+
+### 7bis.1 執行安裝
+
+```bash
+sudo bash /opt/jt-glogarch/deploy/install.sh
+```
+
+腳本會自動：裝 Python 依賴（含 PEP 668 `--break-system-packages` 自動偵測）、建立 `jt-glogarch` 系統使用者、裝 PDF 報表用的 Chromium（透過 playwright）+ CJK 字型、建立目錄（`/data/graylog-archives`、`/etc/jt-glogarch`、`/opt/jt-glogarch/certs`）、產生自簽憑證、詢問是否安裝 systemd 服務（互動輸入 `Y`；若要非互動全自動可能需查該版本是否支援對應的環境變數旗標）。
+
+> ⚠️ **前提：`/data` 必須已經是獨立掛載點**（見 §4.4），否則歸檔會寫進系統碟。
+
+### 7bis.2 啟動服務 + 開防火牆
+
+```bash
+sudo systemctl enable --now jt-glogarch
+sudo systemctl status jt-glogarch --no-pager | grep -E "●|Active"
+
+sudo ufw allow 8990/tcp comment "jt-glogarch"
+```
+
+### 7bis.3 首次設定精靈（瀏覽器）
+
+沒有 `config.yaml` 時會自動導向設定精靈：`https://<VM_IP>:8990/`（自簽憑證，瀏覽器會跳警告，正常）。
+
+**Step 1 — Graylog Server**：
+- Name：自訂（如 `graylog-main`）
+- Graylog URL：**`http://127.0.0.1:9000`**（同機服務用 loopback，不要填實際對外 IP——這樣未來這台機器換 IP 時，這個設定完全不用跟著改，這是同機服務串接的標準做法）
+- Authentication：`API Token`（不是帳號密碼）——先到 Graylog Web UI 右上角個人選單 → **Edit Tokens** → Create Token 產生一組，貼進來
+- Verify SSL certificate：不用勾（因為是純 HTTP，沒有 TLS）
+- 點 **Test** 確認顯示 `Connected (<版本號>)`
+
+**Step 2 — OpenSearch（optional）**：**建議直接 Skip**。Graylog 內嵌的 OpenSearch（`:9200`）預設有做認證加密，直連要另外處理憑證/帳密，只是「加速大量匯出」的選配優化。用 Step 1 的 Graylog API 模式已經足夠核心歸檔功能。
+
+**Step 3 — Archive Storage**：預設會帶出 `/data/graylog-archives`，不用改。
+
+**Step 4 — Backup Admin Account**：本機 `localadmin` 備援帳號，**建議設定密碼、不要留空**——留空等於停用備援，萬一 Graylog 掛了會連 jt-glogarch 都進不去。可用 `openssl rand -base64 12` 產生一組。
+
+**Step 5**：完成後進入儀表板，確認「Graylog 伺服器」那張卡片顯示綠勾、狀態正常。
+
+### 7bis.4 硬體規格建議面板（jt-glogarch 自帶功能，僅供參考）
+
+儀表板會自動偵測本機 RAM/CPU，給出 Graylog/OpenSearch heap 建議值。**這是它自己的偵測邏輯，不是我們手動設定的一部分**，其中「OpenSearch heap」欄位在某些版本可能顯示 `nullG`（工具本身的顯示小瑕疵），可忽略，實際 heap 大小仍以 §6.4/§12 中我們手動設定的 `opensearch_heap` 為準。
+
+---
+
+## 7ter. 安裝 jt-gelflow（即時流量視覺化）
+
+> jt-gelflow 即時接收 GELF 訊息並畫出來源/目的節點的流量圖（Flow / 2D Map / 3D Globe / Sankey）。
+> **選配**，需要 Graylog 端另外設定一個 GELF Output 把訊息轉送過去才會有畫面。
+
+### 7ter.0 安全性檢查
+
+```bash
+sudo git clone https://github.com/jasoncheng7115/jt-gelflow.git /opt/jt-gelflow
+
+find /opt/jt-gelflow -maxdepth 2 -iname "install.sh"
+# 實測直接在 /opt/jt-gelflow/install.sh（不在 deploy/ 底下，跟 jt-glogarch 不同）
+
+grep -n "chown\|INSTALL_DIR=\|SCRIPT_DIR=\|dirname" /opt/jt-gelflow/install.sh
+```
+
+> **實測結果**：`INSTALL_DIR="${JT_GELFLOW_DIR:-/opt/jt-gelflow}"` 是寫死的預設值（可用環境變數覆寫，非危險推導），且腳本內完全沒有 `chown` 相關指令。安全。
+
+### 7ter.1 執行安裝
+
+```bash
+sudo bash /opt/jt-gelflow/install.sh
+```
+
+會自動：裝 Python/Node 依賴、`npm run build` 前端、從 `config.example.json` 種一份 `config.json`、把 CLI 連結到 `/usr/local/bin/jt-gelflow`、詢問是否安裝 systemd 服務（非互動環境下 60 秒無輸入會預設 `Y`，可用 `JT_GELFLOW_YES=1` 跳過詢問）。完成後會印出：
+
+```
+Web UI:    http://<VM_IP>:8099
+GELF UDP:  12201
+GELF TCP:  12202
+```
+
+### ⚠️ 7ter.2 埠號衝突：預設 GELF UDP 12201 會撞上 Graylog 自己的 GELF Input
+
+> **這是這次實測發現最重要的坑**：官方安裝完印出的預設值（`12201`/`12202`）**剛好跟 §6.9 設定的 Graylog 自身 GELF UDP Input 用同一個 port**。如果 §6.9 已經設定過 Graylog 的 GELF UDP Input，jt-gelflow 啟動時會因為 port 被佔用而 **crash loop**（`systemctl status` 顯示 `restart counter` 持續往上跳，即使某次查看時剛好顯示 `active (running)` 也可能只是重啟循環中的一瞬間，不能只看單次狀態就判斷正常）。
+
+**先確認有沒有真的衝突**：
+
+```bash
+sudo journalctl -u jt-gelflow -n 50 --no-pager | grep -i "address already in use"
+# 若有輸出，代表確實衝突，往下處理
+
+sudo ss -ulnp | grep 12201
+# 確認佔用者是誰（若是 java + graylog 帳號，就是 Graylog 自己的 GELF Input）
+```
+
+**若確認衝突，把 jt-gelflow 改到別的 port（例如 12301/12302）**：
+
+```bash
+sudo systemctl stop jt-gelflow
+
+sudo python3 -c "
+import json
+with open('/opt/jt-gelflow/config.json') as f:
+    cfg = json.load(f)
+cfg['gelf_udp_port'] = 12301
+cfg['gelf_tcp_port'] = 12302
+with open('/opt/jt-gelflow/config.json', 'w') as f:
+    json.dump(cfg, f, indent=2)
+"
+
+sudo systemctl start jt-gelflow
+sleep 3
+sudo systemctl status jt-gelflow --no-pager   # 確認沒有 restart counter 持續增加
+sudo ss -ulnp | grep 12301                    # 確認換成功
+```
+
+### 7ter.3 開防火牆
+
+```bash
+sudo ufw allow 8099/tcp comment "jt-gelflow web"
+sudo ufw allow 12301/udp comment "jt-gelflow GELF UDP"   # 埠號依 §7ter.2 實際結果調整
+sudo ufw allow 12302/tcp comment "jt-gelflow GELF TCP"
+```
+
+### 7ter.4 手動驗證收發是否正常（跳過 Graylog，直接測 jt-gelflow 本身）
+
+```bash
+python3 -c "
+import socket, json, time
+msg = {
+    'version': '1.1', 'host': 'test-host',
+    'short_message': 'test message', 'timestamp': time.time(),
+    'source_ip': '10.0.0.5', 'destination_ip': '10.0.0.10', 'network_bytes': 1024,
+}
+data = json.dumps(msg).encode('utf-8')
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s.sendto(data, ('127.0.0.1', 12301))
+"
+```
+
+去瀏覽器開 `http://<VM_IP>:8099` 確認畫面出現 `10.0.0.5`/`10.0.0.10` 兩個節點、右上角流量計數器有跳動。
+
+### 7ter.5 設定 Graylog Output，接收真實流量
+
+Graylog Web UI：
+
+1. **System → Outputs → Add new output**
+2. Type：`GELF Output`
+3. Title：`JT-GELFLOW`
+4. 設定：`Transport protocol=UDP`、`Destination host=127.0.0.1`、`Destination port=`（§7ter.2 實際使用的 port，例如 `12301`），其他保留預設
+5. 存檔後，**Streams → Default Stream（或想要視覺化的 stream）→ Manage Outputs** → 勾選剛建的 `JT-GELFLOW`
+
+若這台目前沒有實際 log 來源（例如防火牆）持續送資料進 Graylog，畫面會維持空白（`0 in / 0 out`），這不是設定錯誤，純粹是沒有真實流量可畫；用 §7ter.4 的手動測試已經足以驗證整條管線是通的。
 
 ---
 
@@ -1165,24 +1460,25 @@ sudo systemctl is-active jt-ipam-backend postgresql redis-server
 外部請求
   :80  /          → LibreNMS（PHP-FPM）
   :9000            → Graylog（直接 bind，無需 nginx 代理）
-  :443 (+ :80)     → jt-ipam（官方腳本自建 vhost，self-signed TLS，反向代理後端）
+  :443             → jt-ipam（nginx 模式：nginx 服務前端靜態檔 + 反代 API 到 backend:8000）
 ```
 
-### 8.2 jt-ipam Nginx 設定（由官方腳本自動建立）
+> `self-signed` 模式（backend 直接在 8443 做 TLS）**不經過 nginx**，跟上圖無關，只有 API 可用、無前端。
 
-> jt-ipam 的 nginx vhost 由 `scripts/jt-ipam.sh` 在 §7.3 安裝時**自動建立**，
-> 監聽 443（self-signed TLS）與 80。**不需手動建立 conf**。
-> 唯一需要的後處理是移除其 port 80 的 `default_server`，避免與 LibreNMS 衝突 ——
-> 詳見 [§7.4](#74-修復-nginx-port-80-衝突與-librenms)。
+### 8.2 jt-ipam Nginx 設定（需手動安裝，非官方腳本自動建立）
+
+> ⚠️ **與舊版文件描述不同**：`--tls-mode self-signed` **不會**自動建立 nginx vhost（見 §7.4）。
+> 要有 nginx vhost，必須照 §7.5 手動安裝官方的 `deploy/nginx/jt-ipam.conf` + `jt-ipam-proxy.conf`，
+> 並自行處理 `default_server`/`server_name` 與 LibreNMS 的相容性。
 
 ```bash
-# 確認 jt-ipam vhost 已存在並通過語法檢查
-grep -rl "jt-ipam\|jtipam" /etc/nginx/sites-available/ /etc/nginx/conf.d/ 2>/dev/null
+# 確認 jt-ipam vhost 已安裝並通過語法檢查
+grep -rl "jt-ipam\|jtipam" /etc/nginx/conf.d/ /etc/nginx/sites-available/ 2>/dev/null
 sudo nginx -t
 ```
 
-> 若需要把 jt-ipam 改成獨立 port（例如 8080）而非搶 80/443，可在其 vhost 內調整 `listen`，
-> 但預設 self-signed TLS 流程已足夠內網使用。
+> 若需要把 jt-ipam 改成獨立 port（不跟 LibreNMS 搶 80/443），可在 `jt-ipam.conf` 內調整 `listen`，
+> 但要同步修改 `backend.env` 的 `APP_PUBLIC_URL`/`CORS_ORIGINS`。
 
 ### 8.3 （可選）SSL/TLS 設定
 
@@ -1718,7 +2014,51 @@ find /usr /bin /sbin -perm /6000 -type f | wc -l # 乾淨系統約 30+；數字�
 
 ### jt-ipam 安裝：pgvector not installable / nginx default_server 衝突
 
-見 §7.1–7.2（pgvector 先手動裝 + patch 腳本）與 §7.4（移除 nginx port 80 default_server）。
+見 §7.1–7.2（先驗證 `apt-cache madison`，新版腳本通常不需要 patch）與 §7.5（nginx 模式的 default_server/server_name 處理）。
+
+### jt-ipam：`https://<IP>:8443/` 回 `{"detail":"Not Found"}`
+
+代表用的是 `self-signed` 模式，backend 直接 TLS 但**沒有服務前端**。這是預期行為，不是安裝失敗。要有可用 Web UI 請照 §7.5 切換到 `nginx` 模式。
+
+### LibreNMS Web UI 打不開，被 jt-ipam 導去 HTTPS（`http://<IP>/` 回 301/302 到 `https://<IP>/`）
+
+**根本原因**：jt-ipam 的 nginx 設定檔（`jt-ipam.conf`）在 port 80 有一個「自動導向 HTTPS」的區塊，若其 `server_name` 設成了跟瀏覽器存取時送出的 Host header 完全相符的值（例如直接用 IP 存取、`server_name` 也設成同一個 IP），**這個「精確比對」會贏過 LibreNMS vhost 的 `default_server` 或寬鬆比對**，導致所有 `http://<IP>/` 的請求都被 jt-ipam 攔截、強制轉去 443。
+
+```bash
+# 確認是否真的是這個問題
+curl -sv http://<IP>/ 2>&1 | grep -E "^< |^> "
+# 若看到 301 + Location: https://<IP>/，確認命中
+
+# 找出 jt-ipam.conf 裡 HTTP redirect 那個 server block 的起訖行號
+grep -n "^server {\|^}" /etc/nginx/conf.d/jt-ipam.conf
+```
+
+**修法**：這個 redirect 區塊對「純 IP 存取、外部使用者一律用 `https://<IP>/`」的情境不是必要功能（不需要靠它自動導向），直接註解掉整段（找到對應的起訖行號後替換）：
+
+```bash
+# 把 <起始行>,<結束行> 換成上一步確認的實際行號
+sudo sed -i '<起始行>,<結束行>s/^/#/' /etc/nginx/conf.d/jt-ipam.conf
+sudo nginx -t
+sudo systemctl restart nginx   # 用 restart，不要只用 reload，見下一條
+```
+
+修完後 `http://<IP>/` 應該正常回到 LibreNMS 登入頁的 302，`https://<IP>/` 不受影響繼續是 jt-ipam。
+
+### nginx `reload` 沒有真的套用新設定，要改用 `restart`
+
+實測遇過改完 conf.d 檔案、`nginx -t` 通過、`systemctl reload nginx` 也沒有報錯，但用 `curl` 驗證行為卻還是舊設定（例如上面那條 LibreNMS 被攔截的問題，`reload` 後仍持續被導向 HTTPS）。**改用完整重啟一次就正常生效**：
+
+```bash
+sudo systemctl restart nginx
+```
+
+判斷是否命中此問題：比對 `ps -eo pid,lstart,cmd | grep "nginx: worker"` 的啟動時間，若跟 `systemctl reload` 時間對不上（worker 沒有真的重生），代表 reload 沒有確實套用，改用 `restart`。**每次改完 nginx conf 驗證行為異常時，先試一次 `restart` 再繼續深入排查**，避免把「reload 沒套用」誤判成設定本身寫錯。
+
+### jt-gelflow crash loop：`OSError: [Errno 98] Address already in use`
+
+見 §7ter.2——多半是預設的 `12201/udp` 撞上 Graylog 自己的 GELF UDP Input。用 `sudo journalctl -u jt-gelflow -n 50` 確認錯誤訊息，`sudo ss -ulnp | grep 12201` 找出真正佔用者，再照 §7ter.2 把 jt-gelflow 改到別的 port。
+
+**重要**：`systemctl status` 單次顯示 `active (running)` 不代表沒問題——crash loop 中的服務會反覆呈現「剛啟動」的狀態，**務必看 `restart counter is at N` 這行**，數字持續增加才是真正判斷 crash loop 的依據。
 
 ---
 
@@ -1732,6 +2072,13 @@ find /usr /bin /sbin -perm /6000 -type f | wc -l # 乾淨系統約 30+；數字�
 | Graylog Datanode | — | 由 graylog-datanode 管理，無獨立帳號 |
 | jt-ipam | admin | 安裝時自動產生，見 `/etc/jt-ipam/.admin-initial-password` |
 | PostgreSQL (jt_ipam) | jtipam | 由 `scripts/jt-ipam.sh` 自動產生並寫入 jt-ipam 設定 |
+| jt-glogarch | localadmin | 設定精靈 Step 4 自訂（備援帳號，正常登入走 Graylog API Token）|
+| jt-gelflow | — | 無登入機制，純 Web UI 視覺化面板 |
 
 > ⚠️ 部署完成後請立即更改所有預設/初始密碼。
 > jt-ipam 的資料庫名為 `jt_ipam`、系統使用者為 `jtipam`、後端服務為 `jt-ipam-backend.service`。
+
+
+
+
+
