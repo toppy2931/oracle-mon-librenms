@@ -43,6 +43,8 @@ for req in "$REQ_DIR"/*.req; do
             else
                 out='{"ok":false,"error":"snmpd 更新失敗，詳見 oracle-admin.log"}'
             fi ;;
+        jtipam/update-ip)
+            out="$("$ADMIN/manage-jt-ipam-ip.sh" update-ip "${args[@]}" 2>>"$LOG")" ;;
         *)
             out='{"ok":false,"error":"applier 拒絕未知請求"}' ;;
     esac

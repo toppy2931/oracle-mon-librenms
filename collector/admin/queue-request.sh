@@ -6,7 +6,7 @@
 # 操作交給 oracle-mon-apply.sh（systemd 觸發、root、無 namespace 限制）。
 #
 # Usage: queue-request.sh <type> <action> [args...]
-#   type/action 白名單：fw/add  fw/remove  nas/save  nas/sync  nas/unmount
+#   type/action 白名單：fw/add  fw/remove  nas/save  nas/sync  nas/unmount  jtipam/update-ip
 #
 # 流程：寫 requests/<id>.req（每行一個 argv token）→ 等 applier 產生
 #       results/<id>.json（最多 ~12s）→ 輸出之；逾時則回 {queued:true}。
@@ -22,7 +22,7 @@ shift 2 2>/dev/null || true
 
 # 白名單：擋掉任意 type/action（applier 端會再驗一次）
 case "$TYPE/$ACTION" in
-    fw/add|fw/remove|fw/delete-rule|nas/save|nas/sync|nas/unmount|net/plan|snmpd/update) ;;
+    fw/add|fw/remove|fw/delete-rule|nas/save|nas/sync|nas/unmount|net/plan|snmpd/update|jtipam/update-ip) ;;
     *) printf '{"ok":false,"error":"不允許的請求：%s/%s"}\n' "$TYPE" "$ACTION"; exit 1 ;;
 esac
 

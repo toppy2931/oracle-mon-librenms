@@ -428,6 +428,43 @@ SELECT log_mode FROM v$database;     -- 應回 ARCHIVELOG 或 NOARCHIVELOG</pre>
   </div>
 </div>
 
+<!-- ═══ 區塊 G：jt-ipam 對外 IP 修改 ══════════════════════════════ -->
+<div class="card">
+  <div class="card-header">
+    <h5>▌ 區塊 G — jt-ipam IP 位址管理（更新對外存取 IP）</h5>
+  </div>
+  <div class="card-body">
+    <div class="row g-3">
+      <div class="col-md-6">
+        <label class="form-label">目前設定</label>
+        <div class="result-box" id="jtipamCurrent">載入中…</div>
+        <div class="text-muted mt-1" style="font-size:11px">
+          讀自 <code>/etc/jt-ipam/backend.env</code> 的 <code>APP_PUBLIC_URL</code>。
+        </div>
+
+        <label class="form-label mt-3">新 IP <span class="text-danger">*</span></label>
+        <input type="text" class="form-control" id="jtipamNewIp" placeholder="172.16.1.92">
+        <div class="text-muted mt-1" style="font-size:11px">
+          Port 沿用目前設定，不會改變。套用後會依序：改 <code>backend.env</code> 三個欄位 →
+          改 nginx <code>server_name</code> → <code>nginx -t</code> 驗證 →
+          <code>restart jt-ipam-backend</code> + <code>restart nginx</code>。
+        </div>
+        <div class="d-flex gap-2 mt-2">
+          <button class="btn btn-warning btn-sm" onclick="jtipamUpdateIp()">套用新 IP</button>
+        </div>
+      </div>
+      <div class="col-md-6">
+        <label class="form-label">操作結果</label>
+        <div class="result-box" id="jtipamResult">—</div>
+        <div class="text-muted mt-2" style="font-size:11px">
+          ⚠ 這會重啟 nginx，LibreNMS 網站會有短暫（&lt;1 秒）中斷。<br>
+          nginx 設定驗證失敗時會自動還原備份、不執行 restart，不會讓網站掛掉。
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 </div><!-- /container -->
 
 <script>
@@ -946,6 +983,33 @@ async function doClearCustomMapRefresh() {
     }
 }
 
+// ── Block G：jt-ipam IP 位址管理 ──────────────────────────
+async function loadJtIpam() {
+    const j = await api('/oracle-jtipam-ip.php', {action: 'list'});
+    if (!j.ok) {
+        document.getElementById('jtipamCurrent').innerHTML = `<span class="err">${escapeHtml(j.error||'載入失敗')}</span>`;
+        return;
+    }
+    document.getElementById('jtipamCurrent').innerHTML = `<code>${escapeHtml(j.url||'—')}</code>`;
+    if (j.ip) document.getElementById('jtipamNewIp').placeholder = j.ip;
+}
+
+async function jtipamUpdateIp() {
+    const ip = document.getElementById('jtipamNewIp').value.trim();
+    if (!ip) { alert('請輸入新 IP'); return; }
+    if (!/^(\d{1,3}\.){3}\d{1,3}$/.test(ip)) { alert('IP 格式不正確'); return; }
+    if (!confirm(`確定把 jt-ipam 對外 IP 改成「${ip}」？\n\n會重啟 jt-ipam-backend + nginx，LibreNMS 網站會有短暫中斷。`)) return;
+    setResult('jtipamResult', '<span class="info">套用中（改設定 + nginx -t 驗證 + restart 服務）…</span>');
+    const j = await api('/oracle-jtipam-ip.php', {action: 'update-ip', new_ip: ip});
+    if (j.ok) {
+        setResult('jtipamResult', `<span class="ok">✓ 已套用：https://${escapeHtml(j.new_ip)}:${escapeHtml(j.port)}</span>`);
+        document.getElementById('jtipamNewIp').value = '';
+        loadJtIpam();
+    } else {
+        setResult('jtipamResult', `<span class="err">✗ ${escapeHtml(j.error||'套用失敗')}</span>`);
+    }
+}
+
 // Init: load first DB into Block A form
 document.addEventListener('DOMContentLoaded', () => {
     const sel = document.getElementById('dbSelect');
@@ -953,6 +1017,7 @@ document.addEventListener('DOMContentLoaded', () => {
     loadFirewall();
     loadNas();
     loadCustomMapRefresh();
+    loadJtIpam();
 });
 </script>
 </body>
