@@ -25,8 +25,7 @@ TARGETS=(
     /opt/librenms/.env
     # jt-gelflow / jt-ipam
     /opt/jt-gelflow/config.json
-    /opt/jt-ipam/.env
-    /opt/jt-ipam/config.json
+    /etc/jt-ipam/backend.env
     # Graylog
     /etc/graylog/server/server.conf
     /etc/graylog/datanode/datanode.conf

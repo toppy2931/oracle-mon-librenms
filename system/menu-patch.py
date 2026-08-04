@@ -11,6 +11,9 @@ Managed block (inside @can('admin')):
        （jt-glogarch 強制 secure cookie / https_only，故須走 HTTPS；HTTP 會導致登入無法保持）
        用 JS location.hostname 動態組 URL，故 monitor-vm IP 異動時，
        按鈕連線會自動跟著使用者當前存取的 IP/主機名，無需改設定。
+  - jt-ipam IP位址管理 → https://<目前瀏覽器主機>:8443
+       （jt-ipam nginx 模式對外 port 統一用 8443，非標準 443，見 docs/single-vm-deployment.md §7.5）
+       同樣用 JS location.hostname 動態組 URL，不寫死 IP。
 
 Upsert 行為：若已存在 BEGIN..END 區塊則「整段替換」為最新內容（可重跑更新）；
 若不存在則插入於 Settings「Validate Config」@endcanany 之後。
@@ -34,6 +37,7 @@ BLOCK = (
     "                        <li><a href=\"/oracle-dashboard.php\"><i class=\"fa fa-desktop fa-fw fa-lg\" aria-hidden=\"true\"></i> Oracle 戰情室</a></li>\n"
     "                        <li><a href=\"/jt-gelflow/\" target=\"_blank\"><i class=\"fa fa-globe fa-fw fa-lg\" aria-hidden=\"true\"></i> jt-gelflow 流量視覺化</a></li>\n"
     "                        <li><a href=\"#\" onclick=\"window.open('https://'+location.hostname+':8990','_blank');return false;\"><i class=\"fa fa-archive fa-fw fa-lg\" aria-hidden=\"true\"></i> jt-glogarch 日誌歸檔</a></li>\n"
+    "                        <li><a href=\"#\" onclick=\"window.open('https://'+location.hostname+':8443','_blank');return false;\"><i class=\"fa fa-sitemap fa-fw fa-lg\" aria-hidden=\"true\"></i> jt-ipam IP位址管理</a></li>\n"
     "                        @endcan\n"
     "                        " + END + "\n"
 )
