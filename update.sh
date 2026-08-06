@@ -47,6 +47,12 @@ install -m 644 -o "$LIBRENMS_USER" -g "$LIBRENMS_USER" "$HERE/librenms/pages/dev
 install -m 644 -o "$LIBRENMS_USER" -g "$LIBRENMS_USER" "$HERE/librenms/pages/apps/oracle-l1hweb.inc.php" "$PAGE_APP/oracle-l1hweb.inc.php"
 
 if command -v python3 >/dev/null; then
+    say "修補 LibreNMS 齒輪選單"
+    python3 "$HERE/system/menu-patch.py" "$LIBRENMS_DIR/resources/views/layouts/menu.blade.php" || say "選單未自動修補，請見 README 手動加入"
+
+    say "修補 Custom Map blade（讓 custom_map_refresh 可獨立設定）"
+    python3 "$HERE/system/custom-map-patch.py" "$LIBRENMS_DIR/resources/views/map/custom-view.blade.php" || say "Custom Map blade 未修補，區塊 F GUI 將無效果"
+
     say "修補 Apps 概觀（為 oracle-* app 註冊概觀縮圖，避免 Graph Template Missing）"
     python3 "$HERE/system/apps-overview-patch.py" "$LIBRENMS_DIR/includes/html/pages/apps.inc.php" || say "Apps 概觀未修補（apps.inc.php 結構可能已變）"
 
