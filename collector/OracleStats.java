@@ -21,6 +21,10 @@ public class OracleStats {
     String errorString = "";
     try {
       Class.forName("oracle.jdbc.OracleDriver");
+      // An unreachable host (network drop, firewall silently dropping SYN, VM
+      // down) used to hang here for the OS TCP connect timeout (minutes), which
+      // blocked the whole dashboard behind one dead DB. Bound it explicitly.
+      DriverManager.setLoginTimeout(5);
       try (Connection c = DriverManager.getConnection(url, user, pass);
            Statement st = c.createStatement()) {
 

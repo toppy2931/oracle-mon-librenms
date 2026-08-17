@@ -33,7 +33,12 @@ if (is_dir($conf_dir)) {
     }
 }
 
+// Probe every enabled DB CONCURRENTLY. This used to be a sequential loop —
+// one unreachable host would block the whole page behind its own hang. Each
+// test-db.sh child now also has its own `timeout 10` guard (run.sh), so the
+// total wait here is bounded by the slowest single probe, not the sum of all.
 $results = [];
+$jobs = [];
 foreach ($dbs as $d) {
     $alias = preg_replace('/[^a-z0-9\-]/', '', strtolower($d['DB_ALIAS']));
     if (!$alias) {
@@ -57,20 +62,32 @@ foreach ($dbs as $d) {
         continue;
     }
 
-    $out = '';
-    $err = '';
     $process = proc_open(
         ['sudo', '/opt/oracle-mon/admin/test-db.sh', $alias],
         [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
         $pipes
     );
-    if (is_resource($process)) {
-        $out = stream_get_contents($pipes[1]);
-        $err = stream_get_contents($pipes[2]);
-        fclose($pipes[1]);
-        fclose($pipes[2]);
-        proc_close($process);
+    if (!is_resource($process)) {
+        $entry['connected'] = false;
+        $entry['error']     = '無法啟動探測程序';
+        $entry['metrics']   = [];
+        $results[] = $entry;
+        continue;
     }
+    $jobs[] = ['entry' => $entry, 'process' => $process, 'pipes' => $pipes];
+}
+
+// All probes above are now running concurrently in the background. Collecting
+// them sequentially here is safe (no deadlock) because each one prints a
+// single small JSON line — far under the OS pipe buffer — so none of them
+// blocks waiting for us to read before it can finish.
+foreach ($jobs as $job) {
+    $entry = $job['entry'];
+    $out   = stream_get_contents($job['pipes'][1]);
+    $err   = stream_get_contents($job['pipes'][2]);
+    fclose($job['pipes'][1]);
+    fclose($job['pipes'][2]);
+    proc_close($job['process']);
 
     $j    = json_decode(trim($out), true);
     $data = $j['data'] ?? [];

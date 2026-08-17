@@ -11,4 +11,4 @@ if [ -n "${DB_HOST}" ]; then
     ORA_PASS="${DB_PASS}"
     export ORA_URL ORA_USER ORA_PASS
 fi
-exec java -cp /opt/oracle-mon:/opt/oracle-mon/lib/ojdbc14.jar OracleStats
+exec timeout 10 java -cp /opt/oracle-mon:/opt/oracle-mon/lib/ojdbc14.jar OracleStats
