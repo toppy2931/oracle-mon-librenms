@@ -87,6 +87,15 @@ try {
         $assert(in_array((string) $id, array_map('strval', $open), true), '未結案列表應包含這個案件');
         $assert($svc->summary($H)['open'] >= 1, '統計的未結案數應 >= 1');
     });
+    $check('統計：未結案依嚴重性、最近建立的案件（總覽用）', function () use ($svc, $H, $assert) {
+        $open = $svc->openBySeverity($H);
+        $assert(($open['high'] ?? 0) >= 1, '自我測試的案件是高風險、處理中，未結案的高風險應 >= 1');
+        $recent = $svc->createdWithin(1, $H);
+        $assert(count($recent) >= 1, '最近 1 天建立的案件應包含自我測試的案件');
+        foreach ($recent as $r) {
+            $assert(isset($r['created_at'], $r['severity']), '每列要有建立時間與嚴重性');
+        }
+    });
     $check('交易失敗時整筆復原', function () use ($repo, $pdo, $assert, $tag) {
         $k = 'selftest-rollback-' . bin2hex(random_bytes(3));
         try {

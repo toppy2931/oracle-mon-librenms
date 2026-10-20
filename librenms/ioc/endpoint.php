@@ -12,15 +12,17 @@ require_once __DIR__ . '/bootstrap.php';
 use Illuminate\Support\Facades\DB;
 use Ioc\Access;
 use Ioc\CaseService;
+use Ioc\CaseView;
+use Ioc\Fleet;
 use Ioc\GraylogClient;
 use Ioc\GraylogUnavailable;
+use Ioc\LandscapeService;
 use Ioc\OverviewService;
 use Ioc\PdoCaseRepo;
-use Ioc\Time;
 use Ioc\UnavailableLogSource;
 
 const IOC_READER_CONF = '/etc/oracle-mon/graylog-reader.conf';
-const IOC_OVERVIEW_CACHE = 'ioc:overview:v1:';     // 後面接 live 或 demo；總覽的伺服器端快取（20 秒）
+const IOC_OVERVIEW_CACHE = 'ioc:overview:v2:';     // 後面接 live 或 demo；總覽的伺服器端快取（20 秒）。內容形狀改了就要升版號
 
 /** 事件案有異動就讓總覽快取失效，否則 KPI「待處理事件」會比（即時查詢的）分頁角標落後最多 20 秒。 */
 function ioc_overview_cache_forget(): void
@@ -127,31 +129,52 @@ function ioc_pick($input, array $keys): array
     return $out;
 }
 
-/** LibreNMS 的設備狀態。讀不到回傳 null（總覽會標示「無法取得」，不是 0 台）。 */
-function ioc_devices(): ?array
+/**
+ * LibreNMS 的設備（含站點＝設備的「位置」、可用率）。讀不到回傳 null（總覽會標示「無法取得」，不是 0 台）。
+ * devices.last_polled 是主機本地時間（LibreNMS 要求 PHP 與資料庫時區一致），不是 UTC，Fleet 會照這個時區轉換。
+ */
+function ioc_fleet(): ?Fleet
 {
     try {
-        $rows = DB::table('devices')->where('disabled', 0)->where('ignore', 0)
-            ->get(['hostname', 'sysName', 'display', 'status', 'status_reason', 'last_polled']);
+        $rows = DB::table('devices')
+            ->leftJoin('locations', 'locations.id', '=', 'devices.location_id')
+            ->where('devices.disabled', 0)->where('devices.ignore', 0)
+            ->get(['devices.device_id', 'devices.hostname', 'devices.sysName', 'devices.display', 'devices.type', 'devices.status',
+                   'devices.status_reason', 'devices.last_polled', 'locations.location as location_name', 'locations.lat', 'locations.lng']);
     } catch (\Throwable $e) {
         error_log('[ioc] devices: ' . $e->getMessage());
         return null;
     }
-    $up   = 0;
-    $down = [];
-    foreach ($rows as $r) {
-        if ((int) $r->status === 1) {
-            $up++;
-        } elseif (count($down) < 20) {
-            $down[] = [
-                'name'        => (string) ($r->display ?: ($r->sysName ?: $r->hostname)),
-                'reason'      => (string) $r->status_reason,
-                // devices.last_polled 是主機本地時間（LibreNMS 要求 PHP 與資料庫時區一致），不是 UTC
-                'last_polled' => Time::toTaipei($r->last_polled === null ? null : (string) $r->last_polled, 'Y-m-d H:i:s', date_default_timezone_get()),
-            ];
+    // 可用率讀不到不拖垮整份設備清單：該欄位就是 null，畫面標「沒有可用率資料」
+    $avail = [];
+    try {
+        foreach (DB::table('availability')->whereIn('duration', [86400, 604800])->get(['device_id', 'duration', 'availability_perc']) as $a) {
+            if ($a->availability_perc === null) {
+                continue;            // 還沒累積出可用率：是「沒有資料」，(float) null 會變成 0% 把平均拉低
+            }
+            $avail[(int) $a->device_id][(int) $a->duration] = (float) $a->availability_perc;
         }
+    } catch (\Throwable $e) {
+        error_log('[ioc] availability: ' . $e->getMessage());
     }
-    return ['total' => count($rows), 'up' => $up, 'down_list' => $down];
+    $out = [];
+    foreach ($rows as $r) {
+        $id    = (int) $r->device_id;
+        $out[] = [
+            'name'        => (string) ($r->display ?: ($r->sysName ?: $r->hostname)),
+            'aliases'     => [$r->hostname, $r->sysName, $r->display],
+            'type'        => $r->type,
+            'status'      => $r->status,
+            'reason'      => $r->status_reason,
+            'last_polled' => $r->last_polled,
+            'location'    => $r->location_name,
+            'lat'         => $r->lat,
+            'lng'         => $r->lng,
+            'avail_1d'    => $avail[$id][86400] ?? null,
+            'avail_7d'    => $avail[$id][604800] ?? null,
+        ];
+    }
+    return new Fleet($out, date_default_timezone_get());
 }
 
 /** @return array<string,mixed> */
@@ -162,11 +185,18 @@ function ioc_overview(bool $demo, string $level): array
     } catch (GraylogUnavailable $e) {
         $logs = new UnavailableLogSource($e->getMessage());   // 例如還沒建立唯讀帳號：日誌區塊標示尚未設定，其他照常
     }
+    $fleet = ioc_fleet();
     try {
-        $cases = ioc_service()->summary($level);
+        $svc    = ioc_service();
+        $cases  = $svc->summary($level);
+        $open   = $svc->openBySeverity($level);
+        $latest = array_map([CaseView::class, 'row'], $svc->listCases(['status' => '', 'limit' => LandscapeService::LATEST_CASES], $level)['items']);
+        $trend  = $svc->createdWithin(LandscapeService::TREND_DAYS, $level);
     } catch (\Throwable $e) {
         error_log('[ioc] cases: ' . $e->getMessage());
-        $cases = null;                                         // 例如資料表還沒建立
+        $cases = $open = $latest = $trend = null;              // 例如資料表還沒建立：事件案相關的區塊整組標「無法取得」
     }
-    return (new OverviewService($logs, $demo))->build(ioc_devices(), $cases);
+    $overview = (new OverviewService($logs, $demo))->build($fleet === null ? null : $fleet->legacy(), $cases);
+    $overview['landscape'] = (new LandscapeService())->build($fleet, $cases, $open, $latest, $trend, $overview['coverage']);
+    return $overview;
 }

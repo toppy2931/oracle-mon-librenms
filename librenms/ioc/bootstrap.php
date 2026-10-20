@@ -14,6 +14,7 @@ if (!defined('IOC_LIB_LOADED')) {
     foreach ([
         'Errors', 'Labels', 'Access', 'Time', 'CaseFlow', 'CaseRepo', 'CaseService', 'PdoCaseRepo', 'Schema',
         'LogSource', 'GraylogClient', 'UnavailableLogSource', 'OverviewService', 'CaseView',
+        'Fleet', 'RiskScore', 'LandscapeService',
     ] as $f) {
         require_once __DIR__ . '/' . $f . '.php';
     }

@@ -37,6 +37,20 @@ interface CaseRepo
     /** @return array<string,int> 各狀態的筆數 */
     public function countByStatus(): array;
 
+    /** @return array<string,int> 還沒結案的案件，各嚴重性的筆數 */
+    public function countOpenBySeverity(): array;
+
+    /** createdSince() 最多回幾筆。 */
+    public const CREATED_SINCE_LIMIT = 5000;
+
+    /**
+     * 給趨勢圖用：指定時間（UTC，'Y-m-d H:i:s'）之後建立的案件，只取建立時間與嚴重性。
+     * 最多 CREATED_SINCE_LIMIT 筆，超過時留下**最新的**（捨棄較早的），呼叫端要用筆數判斷有沒有被截斷。
+     *
+     * @return array<int,array{created_at:string,severity:string}> 依建立時間由新到舊
+     */
+    public function createdSince(string $utc): array;
+
     /**
      * 在交易內執行；$fn 丟出例外就回復。回傳 $fn 的結果。
      *

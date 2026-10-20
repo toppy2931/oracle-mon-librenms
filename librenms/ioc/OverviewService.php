@@ -223,19 +223,14 @@ final class OverviewService
      */
     private function kpi(?array $devices, ?array $cases, array $coverage, array $suspicious, ?array $login): array
     {
-        $unknown = static fn (string $key, string $label, string $why): array =>
-            ['key' => $key, 'label' => $label, 'value' => null, 'state' => 'unknown', 'sub' => $why];
+        // $na：沒有值時卡片的大字。預設「無法取得」（讀取失敗）；不是失敗而是「還沒接入」時寫得更貼近原因
+        $unknown = static fn (string $key, string $label, string $why, ?string $na = null): array =>
+            ['key' => $key, 'label' => $label, 'value' => null, 'state' => 'unknown', 'sub' => $why, 'na' => $na];
 
         // 1) 整體運作：受監控設備＋「有資料的」日誌來源類型，正常的比例。尚未接入的來源不算在分母
-        $present = $okSrc = 0;
-        if ($coverage['ok']) {
-            foreach ($coverage['data'] as $c) {
-                if ($c['status'] !== 'none') {
-                    $present++;
-                    $okSrc += $c['status'] === 'ok' ? 1 : 0;
-                }
-            }
-        }
+        $counts  = self::sourceCounts($coverage);
+        $present = $counts === null ? 0 : $counts['present'];
+        $okSrc   = $counts === null ? 0 : $counts['ok'];
         if ($devices === null || !$coverage['ok']) {
             $ops = $unknown('ops', '今日整體運作', '設備或日誌來源的資料無法取得，無法計算');
         } else {
@@ -263,7 +258,7 @@ final class OverviewService
             $susp = $unknown('suspicious', '可疑登入事件', $suspicious['error']);
         } elseif ($login !== null && $login['all_missing']) {
             // 會產生登入事件的來源一個都沒接入：0 筆是「沒有日誌」，不是「沒有可疑事件」，不能顯示成綠色的 0
-            $susp = $unknown('suspicious', '可疑登入事件', '尚未接入任何登入類來源（' . implode('、', $login['missing']) . '），無法判斷');
+            $susp = $unknown('suspicious', '可疑登入事件', '尚未接入任何登入類來源（' . implode('、', $login['missing']) . '），無法判斷', '尚未接入');
         } else {
             $d = $suspicious['data'];
             $sub = sprintf('登入失敗／帳號鎖定／高權限操作 · 涉及 %s%d 個帳號', $d['accounts_capped'] ? '至少 ' : '', $d['accounts']);
@@ -313,6 +308,28 @@ final class OverviewService
     private function q(string $query): string
     {
         return '(' . $query . ') AND ' . ($this->demo ? 'ioc_demo:true' : 'NOT ioc_demo:true');
+    }
+
+    /**
+     * 「有資料的」來源類型有幾類、其中正常接收的有幾類（還沒接入的不算進去）。涵蓋資料取不到回傳 null。
+     * 整體運作 KPI 與風險分數共用這個定義，不要各自再算一次。
+     *
+     * @param array<string,mixed> $coverage 涵蓋區塊（['ok'=>…,'data'=>…]）
+     * @return array{present:int,ok:int}|null
+     */
+    public static function sourceCounts(array $coverage): ?array
+    {
+        if (!$coverage['ok']) {
+            return null;
+        }
+        $present = $ok = 0;
+        foreach ($coverage['data'] as $c) {
+            if ($c['status'] !== 'none') {
+                $present++;
+                $ok += $c['status'] === 'ok' ? 1 : 0;
+            }
+        }
+        return ['present' => $present, 'ok' => $ok];
     }
 
     /**

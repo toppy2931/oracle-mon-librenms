@@ -13,7 +13,6 @@ final class CaseService
 {
     private const TEXT_MAX  = 2000;
     private const SHORT_MAX = 128;
-    private const OPEN      = ['new', 'ack', 'in_progress'];
 
     private CaseRepo $repo;
     /** @var callable():string */
@@ -98,7 +97,7 @@ final class CaseService
         $this->requireView($level);
         $status = (string) ($filter['status'] ?? '');
         if ($status === 'open') {
-            $statuses = self::OPEN;
+            $statuses = CaseFlow::OPEN;
         } elseif ($status === '') {
             $statuses = [];
         } elseif (isset(Labels::CASE_STATUS[$status])) {
@@ -126,6 +125,33 @@ final class CaseService
         }
         $counts['open'] = $counts['new'] + $counts['ack'] + $counts['in_progress'];
         return $counts;
+    }
+
+    /** @return array<string,int> 未結案的件數，依嚴重性（high／medium／low，沒有的是 0） */
+    public function openBySeverity(?string $level): array
+    {
+        $this->requireView($level);
+        $out = array_fill_keys(array_keys(Labels::CASE_SEVERITY), 0);
+        foreach ($this->repo->countOpenBySeverity() as $severity => $n) {
+            if (isset($out[$severity])) {
+                $out[$severity] = (int) $n;
+            }
+        }
+        return $out;
+    }
+
+    /**
+     * 最近 $days 天建立的案件（只有建立時間 UTC 與嚴重性），給趨勢圖用。
+     * 多抓一天，讓台北時間的日期邊界不會漏；怎麼分日、怎麼畫是 LandscapeService 的事。
+     *
+     * @return array<int,array{created_at:string,severity:string}>
+     */
+    public function createdWithin(int $days, ?string $level): array
+    {
+        $this->requireView($level);
+        $days  = max(1, min(366, $days));
+        $since = gmdate('Y-m-d H:i:s', (int) strtotime(($this->now)() . ' UTC') - ($days + 1) * 86400);
+        return $this->repo->createdSince($since);
     }
 
     public function transition(int $id, string $to, string $actor, ?string $level, ?string $resolution = null, ?string $note = null): void

@@ -6,6 +6,7 @@
  * 需登入，角色為 admin（可處理事件案）或 global-read（唯讀）。資料來自 ioc-data.php 與 ioc-cases.php，
  * 權限在後端檢查；這個頁面只決定「要不要顯示按鈕」，不是權限控管（IS-013）。
  * 日誌內容都用 textContent 放進畫面，不用 innerHTML，避免日誌裡的惡意內容變成 XSS。
+ * 版面（左側導覽、頂列、總覽的區塊）參照提案簡報，整理見 docs/ioc/gui-from-proposal-deck.md。
  */
 
 $init_modules = ['web', 'auth'];
@@ -29,12 +30,14 @@ header("Content-Security-Policy: frame-ancestors 'self'");
 
 $config = json_encode([
     'level'  => $level,
+    'user'   => (string) Auth::user()->username,
     'csrf'   => csrf_token(),
     'demo'   => $demo,
     'labels' => [
         'caseStatus'   => Ioc\Labels::CASE_STATUS,
         'caseSeverity' => Ioc\Labels::CASE_SEVERITY,
         'resolution'   => Ioc\Labels::RESOLUTION,
+        'siteLevel'    => Ioc\Fleet::LEVELS,
     ],
 ], JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
 ?>
@@ -46,31 +49,44 @@ $config = json_encode([
 <title>智慧維運與資安態勢中心</title>
 <style>
 :root{--bg:#07111f;--panel:#0f1c2e;--panel2:#132238;--line:#203551;--text:#e7eef8;--muted:#8fa4bf;
-  --green:#36d399;--yellow:#f5c451;--red:#ff6b6b;--blue:#61a8ff;--gray:#778ba6}
+  --green:#36d399;--yellow:#f5c451;--orange:#ff9f43;--red:#ff6b6b;--blue:#61a8ff;--gray:#778ba6}
 *{box-sizing:border-box}
+[hidden]{display:none!important}   /* 作者樣式的 display 會蓋掉瀏覽器內建的 [hidden]，角標就藏不起來 */
 body{margin:0;background:radial-gradient(circle at 10% 0%,rgba(35,84,160,.24),transparent 32%),var(--bg);color:var(--text);
   font:14px/1.6 "Noto Sans TC","Microsoft JhengHei",system-ui,sans-serif}
 a{color:var(--blue)}
-.shell{max-width:1600px;margin:0 auto;padding:18px}
-.top{display:flex;gap:16px;align-items:center;justify-content:space-between;flex-wrap:wrap;padding:16px 20px;border:1px solid var(--line);border-radius:16px;background:linear-gradient(180deg,#111f32,#0a1727)}
-.top h1{margin:0;font-size:22px;letter-spacing:.3px}
-.top p{margin:2px 0 0;color:var(--muted);font-size:13px}
-.chips{display:flex;gap:8px;flex-wrap:wrap}
+.app{display:flex;min-height:100vh}
+.side{width:212px;flex:none;position:sticky;top:0;height:100vh;overflow:auto;padding:16px 10px;background:linear-gradient(180deg,#0b1a2e,#08121f);border-right:1px solid var(--line)}
+.brand{padding:4px 10px 14px;font-weight:800;font-size:15px;letter-spacing:.3px}
+.brand small{display:block;color:var(--muted);font-weight:400;font-size:11px;letter-spacing:0}
+.nav{display:flex;flex-direction:column;gap:4px}
+.nav button{display:flex;justify-content:space-between;align-items:center;gap:8px;width:100%;text-align:left;font:inherit;color:#c3d2e6;background:transparent;border:1px solid transparent;border-radius:10px;padding:8px 12px;cursor:pointer}
+.nav button:hover:not([disabled]){background:rgba(97,168,255,.08)}
+.nav button[aria-current=page]{color:#fff;background:var(--panel2);border-color:var(--blue)}
+.nav button[disabled]{color:#5f748f;cursor:not-allowed}
+.nav .tag{font-size:10px;color:#5f748f;border:1px solid #2a4060;border-radius:999px;padding:0 6px}
+.nav .sep{margin:10px 12px 4px;color:#5f748f;font-size:11px}
+.main{flex:1;min-width:0;padding:18px;max-width:1700px}
+.topbar{display:flex;gap:16px;align-items:center;justify-content:space-between;flex-wrap:wrap;padding:14px 20px;border:1px solid var(--line);border-radius:16px;background:linear-gradient(180deg,#111f32,#0a1727)}
+.topbar h1{margin:0;font-size:20px;letter-spacing:.3px}
+.topbar p{margin:2px 0 0;color:var(--muted);font-size:13px}
+.chips{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .chip{padding:5px 11px;border:1px solid var(--line);border-radius:999px;background:#0a1728;color:#c8d6e7;font-size:12px;white-space:nowrap}
 .chip b{color:#fff}
 .chip.demo{border-color:var(--yellow);color:var(--yellow)}
-.tabs{display:flex;gap:6px;align-items:center;margin:14px 0 4px;flex-wrap:wrap}
-.tabs button{font:inherit;color:var(--muted);background:transparent;border:1px solid var(--line);border-radius:10px;padding:7px 16px;cursor:pointer}
-.tabs button[aria-selected=true]{color:#fff;background:var(--panel2);border-color:var(--blue)}
-.tabs .sp{flex:1}
-.badge-n{display:inline-block;min-width:20px;padding:0 6px;margin-left:6px;border-radius:999px;background:var(--red);color:#fff;font-size:11px;text-align:center}
-[hidden]{display:none!important}   /* 作者樣式的 display 會蓋掉瀏覽器內建的 [hidden]，角標就藏不起來 */
+.bell{position:relative;display:inline-flex;align-items:center;justify-content:center;width:36px;height:36px;border:1px solid var(--line);border-radius:50%;background:#0a1728;color:#c8d6e7;cursor:pointer;padding:0}
+.bell:hover{border-color:var(--blue)}
+.bell svg{width:18px;height:18px;fill:currentColor}
+.bell .n{position:absolute;top:-4px;right:-4px;min-width:18px;height:18px;padding:0 4px;border-radius:999px;background:var(--red);color:#fff;font-size:11px;line-height:18px;text-align:center}
+.badge-n{display:inline-block;min-width:20px;padding:0 6px;border-radius:999px;background:var(--red);color:#fff;font-size:11px;text-align:center}
 .banner{margin:10px 0;padding:10px 14px;border:1px solid var(--yellow);border-radius:10px;background:rgba(245,196,81,.08);color:#ffe49d}
 .banner.err{border-color:var(--red);background:rgba(255,107,107,.08);color:#ffc0c0}
 .grid{display:grid;gap:14px;margin-top:14px}
-.kpis{grid-template-columns:repeat(5,minmax(0,1fr))}
+.kpis6{grid-template-columns:repeat(6,minmax(0,1fr))}
+.kpis2{grid-template-columns:repeat(2,minmax(0,1fr))}
 .two{grid-template-columns:1.25fr .75fr}
-.even{grid-template-columns:1fr 1fr}
+.three{grid-template-columns:minmax(0,.85fr) minmax(0,1.45fr) minmax(0,1fr)}
+.even{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
 .card{border:1px solid var(--line);border-radius:14px;background:linear-gradient(180deg,#122238,#0c192b);overflow:hidden;min-width:0}
 .card-h{padding:12px 16px;border-bottom:1px solid var(--line);display:flex;justify-content:space-between;gap:10px;align-items:baseline}
 .card-h h2{margin:0;font-size:14px}
@@ -78,20 +94,21 @@ a{color:var(--blue)}
 .card-b{padding:12px 16px;overflow-x:auto}
 .kpi{padding:14px 16px;min-height:112px}
 .kpi .l{font-size:12px;color:var(--muted)}
-.kpi .v{font-size:30px;font-weight:800;margin:6px 0 4px;letter-spacing:-.5px}
+.kpi .v{font-size:28px;font-weight:800;margin:6px 0 4px;letter-spacing:-.5px}
 .kpi .s{font-size:12px;color:#9db1ca}
 .good .v{color:var(--green)}.warn .v{color:var(--yellow)}.bad .v{color:var(--red)}.unknown .v{color:var(--gray)}
-.unknown .v{font-size:22px}
+.unknown .v{font-size:20px}
 table{width:100%;border-collapse:collapse;font-size:12px}
 th{text-align:left;color:#87a0bd;font-weight:600;padding:8px;border-bottom:1px solid var(--line);white-space:nowrap}
 td{padding:9px 8px;border-bottom:1px solid rgba(32,53,81,.65);vertical-align:middle}
 tbody tr:hover{background:rgba(97,168,255,.05)}
 tr.click{cursor:pointer}
-tr.click:focus-visible,.btn:focus-visible,.tabs button:focus-visible,select:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid var(--blue);outline-offset:1px}
+tr.click:focus-visible,.btn:focus-visible,.nav button:focus-visible,.bell:focus-visible,select:focus-visible,input:focus-visible,textarea:focus-visible{outline:2px solid var(--blue);outline-offset:1px}
 .badge{display:inline-flex;align-items:center;gap:6px;padding:3px 9px;border-radius:999px;font-size:11px;border:1px solid transparent;white-space:nowrap}
 .badge::before{content:"";width:6px;height:6px;border-radius:50%;background:currentColor}
 .b-green{color:#aaf2d6;border-color:rgba(54,211,153,.3);background:rgba(54,211,153,.08)}
 .b-yellow{color:#ffe49d;border-color:rgba(245,196,81,.3);background:rgba(245,196,81,.08)}
+.b-orange{color:#ffd0a0;border-color:rgba(255,159,67,.35);background:rgba(255,159,67,.08)}
 .b-red{color:#ffc0c0;border-color:rgba(255,107,107,.35);background:rgba(255,107,107,.08)}
 .b-gray{color:#b7c4d5;border-color:#425671;background:rgba(128,145,170,.08)}
 .b-blue{color:#c8e0ff;border-color:rgba(97,168,255,.34);background:rgba(97,168,255,.08)}
@@ -119,34 +136,54 @@ code{background:#0a1423;border:1px solid var(--line);border-radius:6px;padding:2
 .tl li{padding:8px 0 8px 14px;border-left:2px solid var(--line);position:relative;font-size:13px}
 .tl li::before{content:"";position:absolute;left:-5px;top:14px;width:8px;height:8px;border-radius:50%;background:var(--blue)}
 .tl .when{color:var(--muted);font-size:11px}
+.gauge{display:block;width:100%;max-width:240px;margin:0 auto}
+.g-score{font-size:34px;font-weight:800;fill:#fff}
+.g-sub{font-size:11px;fill:var(--muted)}
+.g-level{text-align:center;font-weight:700;margin:2px 0 10px}
+.part{margin:8px 0}
+.part .pl{display:flex;justify-content:space-between;font-size:12px;color:#c8d6e7}
+.bar{height:6px;margin-top:3px;background:#0a1423;border-radius:3px;overflow:hidden}
+.bar i{display:block;height:100%;border-radius:3px}
+.chart{display:block;width:100%;height:auto}
+.chart text{font-size:10px;fill:var(--muted)}
+.legend{display:flex;gap:14px;flex-wrap:wrap;font-size:12px;color:#c8d6e7;margin-top:6px}
+.legend i{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:5px;vertical-align:-1px}
+.counts{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;margin-bottom:8px}
+.counts .cnt{padding:6px 8px;border:1px solid var(--line);border-radius:10px;background:#0a1728;font-size:11px;color:var(--muted);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.counts .cnt b{display:block;font-size:20px;color:#fff}
+.rank{display:flex;gap:10px;align-items:center;padding:8px 0;border-bottom:1px solid rgba(32,53,81,.55)}
+.rank:last-child{border-bottom:0}
+.rank .no{width:22px;height:22px;border-radius:50%;background:#0a1728;border:1px solid var(--line);text-align:center;font-size:12px;line-height:20px;flex:none}
+.rank .nm{flex:1;min-width:0;font-weight:600;font-size:13px;word-break:break-word}
 .toast{position:fixed;right:16px;bottom:16px;max-width:420px;padding:10px 14px;border-radius:10px;background:#1b4a86;color:#fff;display:none;z-index:9}
 .toast.err{background:#8a2b2b}
 footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
-@media(max-width:1180px){.kpis{grid-template-columns:repeat(3,1fr)}.two,.even,.split{grid-template-columns:1fr}}
-@media(max-width:720px){.shell{padding:10px}.kpis{grid-template-columns:repeat(2,1fr)}}
+@media(max-width:1280px){.kpis6{grid-template-columns:repeat(3,minmax(0,1fr))}.three{grid-template-columns:1fr}}
+@media(max-width:1180px){.two,.even,.split{grid-template-columns:1fr}}
+@media(max-width:900px){.app{flex-direction:column}.side{position:static;width:auto;height:auto;padding:10px}.nav{flex-direction:row;overflow-x:auto}.nav button{white-space:nowrap;width:auto}.nav .sep{display:none}.main{padding:10px}}
+@media(max-width:720px){.kpis6,.kpis2{grid-template-columns:repeat(2,minmax(0,1fr))}}
 </style>
 </head>
 <body>
-<div class="shell">
-  <header class="top">
-    <div>
-      <h1>智慧維運與資安態勢中心</h1>
-      <p>維運總覽・事件案管理</p>
-    </div>
-    <div class="chips" id="chips"></div>
-  </header>
-
-  <nav class="tabs" aria-label="功能">
-    <button type="button" data-tab="overview" aria-selected="true">維運總覽</button>
-    <button type="button" data-tab="cases" aria-selected="false">事件案<span class="badge-n" id="cases-badge" hidden></span></button>
-    <span class="sp"></span>
-    <a href="/">返回 LibreNMS</a>
-  </nav>
-
-  <div id="banner"></div>
-  <main id="view-overview"></main>
-  <main id="view-cases" hidden></main>
-  <footer>日誌來自 Graylog（唯讀帳號），設備來自 LibreNMS，事件案存在 LibreNMS 資料庫。稽核準備度的計算方式尚未定義，因此暫不顯示。</footer>
+<div class="app">
+  <aside class="side">
+    <div class="brand">IOC 智慧維運中心<small>智慧維運與資安態勢</small></div>
+    <nav class="nav" id="nav" aria-label="功能"></nav>
+  </aside>
+  <div class="main">
+    <header class="topbar">
+      <div>
+        <h1 id="page-title">維運總覽</h1>
+        <p id="page-sub"></p>
+      </div>
+      <div class="chips" id="chips"></div>
+    </header>
+    <div id="banner"></div>
+    <main id="view-overview"></main>
+    <main id="view-cases" hidden></main>
+    <main id="view-security" hidden></main>
+    <footer>日誌來自 Graylog（唯讀帳號），設備與站點（LibreNMS 的「位置」）來自 LibreNMS，事件案存在 LibreNMS 資料庫。灰色的「尚未提供」項目還沒有資料來源，不會顯示假數字。</footer>
+  </div>
 </div>
 <div class="toast" id="toast" role="status"></div>
 
@@ -157,7 +194,20 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
   const CFG = JSON.parse(document.getElementById('ioc-config').textContent);
   const CAN_HANDLE = CFG.level === 'handler';
   const REFRESH_MS = 60000;
-  const state = { tab: 'overview', filter: 'open', selected: null, form: null, overview: null, loadedAt: 0, overviewError: null };
+  const state = { tab: 'overview', filter: 'open', selected: null, form: null, overview: null, loadedAt: 0, overviewError: null, summary: null };
+
+  // 左側導覽。off＝簡報有、但目前沒有資料來源的項目：顯示成停用，不能點進去看到空白或假數字
+  const NAV = [
+    { key: 'overview', label: '總覽', title: '維運總覽', sub: '站點、資產、事件與資料來源一覽' },
+    { key: 'cases', label: '事件案', title: '事件案管理', sub: '建立、確認、處理與結案，每一步都有紀錄', badge: true },
+    { key: 'security', label: '資安', title: '資安事件', sub: '登入、帳號與防火牆阻擋' },
+    { sep: '尚未提供' },
+    { key: 'risk', label: '風險與弱點', off: true },
+    { key: 'config', label: '組態治理', off: true },
+    { key: 'audit', label: '稽核與證據', off: true },
+    { key: 'reports', label: '報表', off: true },
+  ];
+  const PAGES = NAV.filter((n) => n.key && !n.off).map((n) => n.key);
 
   // ── 小工具：一律用 DOM 與 textContent 建立節點，資料不經過 innerHTML ──
   const h = (tag, attrs, ...kids) => {
@@ -174,14 +224,33 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     }
     return e;
   };
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const sv = (tag, attrs, ...kids) => {
+    const e = document.createElementNS(SVG_NS, tag);
+    for (const [k, v] of Object.entries(attrs || {})) {
+      if (v === false || v == null) continue;
+      e.setAttribute(k, String(v));
+    }
+    for (const c of kids.flat(Infinity)) {
+      if (c === null || c === undefined || c === false) continue;
+      e.append(c instanceof Node ? c : document.createTextNode(String(c)));
+    }
+    return e;
+  };
   const $ = (sel) => document.querySelector(sel);
   const badge = (text, cls) => h('span', { class: 'badge b-' + cls }, text);
   const levelBadge = (label) => badge(label, { '高': 'red', '中': 'yellow', '低': 'green' }[label] || 'gray');
   const stateOf = { ok: 'green', delayed: 'yellow', stale: 'red', none: 'gray', unknown: 'gray' };
   const STATUS_COLOR = { new: 'red', ack: 'yellow', in_progress: 'blue', closed: 'gray' };
   const LEVEL_TO_SEVERITY = { high: 'high', medium: 'medium', low: 'low' };
+  // 站點異常等級（離線設備的比例）：正常、輕微、中度、嚴重
+  const SITE_COLOR = { normal: '#36d399', minor: '#f5c451', moderate: '#ff9f43', severe: '#ff6b6b' };
+  const SITE_BADGE = { normal: 'green', minor: 'yellow', moderate: 'orange', severe: 'red' };
+  const SITE_LABEL = CFG.labels.siteLevel;     // 名稱由伺服器（Fleet::LEVELS）提供，畫面不另外寫一份
+  const RISK_COLOR = { low: '#36d399', medium: '#f5c451', high: '#ff6b6b' };
   const fmt = (n) => Number(n).toLocaleString('zh-TW');
   const luceneQ = (field, value) => field + ':"' + String(value).replace(/[\\"]/g, '\\$&') + '"';
+  const pct = (n) => Math.max(0, Math.min(100, Number(n) || 0));   // 長條寬度只吃數字，不吃字串
 
   let toastTimer = null;
   function toast(msg, isErr) {
@@ -210,27 +279,82 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     return data;
   }
 
-  // ── 頁首與頁籤 ──
-  function renderChips() {
-    const ov = state.overview;
-    const age = state.loadedAt ? Math.round((Date.now() - state.loadedAt) / 1000) : null;
+  // ── 外框：左側導覽與頂列 ──
+  // 導覽與頂列只建立一次，之後只就地更新文字與屬性。整個重建（replaceChildren）會讓鍵盤焦點掉光：
+  // 頂列每秒更新一次、導覽每次切頁與每分鐘重新整理都會發生，鍵盤使用者就按不到鈴鐺與導覽按鈕。
+  const navEls = {};
+  const top = {};
+
+  function buildNav() {
+    $('#nav').replaceChildren(...NAV.map((n) => {
+      if (n.sep) return h('div', { class: 'sep' }, n.sep);
+      if (n.off) return h('button', { type: 'button', disabled: true, 'aria-disabled': 'true', 'aria-label': n.label + '（尚未提供）', title: '目前沒有這項的資料來源，尚未提供' }, n.label, h('span', { class: 'tag' }, '尚未提供'));
+      const badgeEl = n.badge ? h('span', { class: 'badge-n', hidden: true }) : null;
+      const btn = h('button', { type: 'button', onclick: () => setTab(n.key) }, n.label, badgeEl);
+      navEls[n.key] = { btn, badgeEl };
+      return btn;
+    }));
+  }
+
+  function renderNav() {
+    for (const [key, el] of Object.entries(navEls)) {
+      if (state.tab === key) el.btn.setAttribute('aria-current', 'page'); else el.btn.removeAttribute('aria-current');
+      if (el.badgeEl) {
+        const open = state.summary ? state.summary.open : 0;
+        el.badgeEl.hidden = open <= 0;
+        el.badgeEl.textContent = open > 0 ? String(open) : '';
+      }
+    }
+  }
+
+  function buildTopbar() {
+    top.updated = h('b', null, '—');
+    top.age = document.createTextNode('');
+    top.bellN = h('span', { class: 'n', hidden: true });
+    top.bell = h('button', { class: 'bell', type: 'button', onclick: () => openCases('new') },
+      sv('svg', { viewBox: '0 0 24 24', 'aria-hidden': 'true' }, sv('path', { d: 'M12 22a2 2 0 0 0 2-2h-4a2 2 0 0 0 2 2zm6-6v-5c0-3.07-1.64-5.64-4.5-6.32V4a1.5 1.5 0 0 0-3 0v.68C7.63 5.36 6 7.92 6 11v5l-2 2v1h16v-1l-2-2z' })),
+      top.bellN);
     // 注意：replaceChildren(null) 會把 null 當成文字「null」插進去，所以要先濾掉
     $('#chips').replaceChildren(...[
       CFG.demo ? h('span', { class: 'chip demo' }, '範例資料模式') : null,
-      h('span', { class: 'chip' }, '期間：', h('b', null, ov ? ov.meta.range_label : '最近 24 小時')),
-      h('span', { class: 'chip' }, '更新：', h('b', null, ov ? ov.meta.generated_at : '—'), age === null ? '' : '（' + age + ' 秒前）'),
-      h('span', { class: 'chip' }, '身分：', h('b', null, CAN_HANDLE ? '處理者' : '檢視者（唯讀）')),
+      h('span', { class: 'chip' }, '更新：', top.updated, top.age),
+      h('span', { class: 'chip' }, h('b', null, CFG.user), '　', CAN_HANDLE ? '處理者' : '檢視者（唯讀）'),
+      top.bell,
+      h('a', { href: '/' }, '返回 LibreNMS'),
     ].filter(Boolean));
   }
 
-  function setTab(tab) {
+  function renderTopbar() {
+    const ov = state.overview;
+    const page = NAV.find((n) => n.key === state.tab) || NAV[0];
+    $('#page-title').textContent = page.title;
+    $('#page-sub').textContent = page.sub;
+    top.updated.textContent = ov ? ov.meta.generated_at : '—';
+    top.age.textContent = state.loadedAt ? '（' + Math.round((Date.now() - state.loadedAt) / 1000) + ' 秒前）' : '';
+    const fresh = state.summary ? state.summary.new : 0;
+    top.bellN.hidden = fresh <= 0;
+    top.bellN.textContent = fresh > 0 ? String(fresh) : '';
+    top.bell.title = fresh > 0 ? '有 ' + fresh + ' 件待確認的事件案' : '沒有待確認的事件案';
+    top.bell.setAttribute('aria-label', '待確認的事件案 ' + fresh + ' 件');
+  }
+
+  function setTab(tab, force) {
+    if (!PAGES.includes(tab)) tab = 'overview';
     const changed = state.tab !== tab;
     state.tab = tab;
-    document.querySelectorAll('.tabs button').forEach((b) => b.setAttribute('aria-selected', String(b.dataset.tab === tab)));
-    $('#view-overview').hidden = tab !== 'overview';
-    $('#view-cases').hidden = tab !== 'cases';
+    PAGES.forEach((p) => { $('#view-' + p).hidden = p !== tab; });
+    try { history.replaceState(null, '', location.pathname + location.search + '#' + tab); } catch (e) { /* 沒有也無妨 */ }
+    renderNav(); renderTopbar();
     // 已經在事件案頁籤時再按一次不要重載，否則填到一半的表單會被清掉
-    if (tab === 'cases' && (changed || !$('#case-right'))) { loadCases(); }
+    if (tab === 'cases' && (changed || force || !$('#case-right'))) { loadCases(); }
+  }
+
+  /** 開事件案頁並套用狀態篩選（鈴鐺用）。 */
+  function openCases(filter) {
+    state.filter = filter;
+    state.form = null;
+    state.selected = null;
+    setTab('cases', true);
   }
 
   function renderBanner() {
@@ -246,7 +370,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     $('#banner').replaceChildren(...parts);
   }
 
-  // ── 維運總覽 ──
+  // ── 共用區塊 ──
   const unavailable = (msg) => h('div', { class: 'alert' }, '無法取得：' + msg);
   // 「沒有事件」要說清楚是真的沒事，還是根本沒有日誌（登入類來源沒接入就沒有日誌，不能讓人以為沒事）
   const emptyNote = (base) => {
@@ -265,7 +389,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     const unknown = k.value === null || k.value === undefined;
     return h('div', { class: 'card kpi ' + k.state },
       h('div', { class: 'l' }, k.label),
-      h('div', { class: 'v' }, unknown ? '無法取得' : String(k.value)),
+      h('div', { class: 'v' }, unknown ? (k.na || '無法取得') : String(k.value)),
       h('div', { class: 's' }, k.sub));
   }
 
@@ -328,6 +452,110 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     return rows;
   }
 
+  // ── 總覽的新區塊（簡報「地政資訊環境總覽」）──
+  function gauge(score, color) {
+    const cx = 90, cy = 90, r = 70;
+    const pt = (deg) => [cx + r * Math.cos(deg * Math.PI / 180), cy - r * Math.sin(deg * Math.PI / 180)];
+    const arc = (from, to) => {
+      const a = pt(from), b = pt(to);
+      return 'M' + a[0].toFixed(1) + ' ' + a[1].toFixed(1) + ' A' + r + ' ' + r + ' 0 0 1 ' + b[0].toFixed(1) + ' ' + b[1].toFixed(1);
+    };
+    const end = Math.max(0.001, 180 - 1.8 * pct(score));    // 左端 180 度走到右端 0 度
+    return sv('svg', { viewBox: '0 0 180 108', class: 'gauge', role: 'img', 'aria-label': '整體風險分數 ' + score + ' 分（滿分 100，越高越好）' },
+      sv('path', { d: arc(180, 0.001), fill: 'none', stroke: '#203551', 'stroke-width': 14, 'stroke-linecap': 'round' }),
+      score > 0 ? sv('path', { d: arc(180, end), fill: 'none', stroke: color, 'stroke-width': 14, 'stroke-linecap': 'round' }) : null,
+      sv('text', { x: cx, y: 84, 'text-anchor': 'middle', class: 'g-score' }, String(score)),
+      sv('text', { x: cx, y: 102, 'text-anchor': 'middle', class: 'g-sub' }, '/ 100'));
+  }
+
+  function renderRisk(sec) {
+    if (!sec.ok) return unavailable(sec.error);
+    const d = sec.data;
+    const color = RISK_COLOR[d.level] || '#778ba6';
+    const parts = Object.values(d.parts).map((p) => h('div', { class: 'part' },
+      h('div', { class: 'pl' }, h('span', null, p.label + '（權重 ' + p.weight + '）'), h('span', null, p.score === null ? '無資料' : p.score + ' 分')),
+      h('div', { class: 'bar' }, p.score === null ? null : h('i', { style: 'width:' + pct(p.score) + '%;background:' + color }))));
+    return [
+      gauge(d.score, color),
+      h('div', { class: 'g-level', style: 'color:' + color }, d.level_label),
+      ...parts,
+      d.missing.length ? h('p', { class: 'note warn' }, d.missing.join('、') + '沒有可用的資料，分數只算其他分項。') : null,
+      h('p', { class: 'note' }, '提案版公式：各分項加權平均，分數越高越好；≥85 低風險、≥65 中等風險。'),
+    ];
+  }
+
+  function renderTrend(sec) {
+    if (!sec.ok) return unavailable(sec.error);
+    const t = sec.data;
+    const W = 560, H = 170, L = 30, R = 8, T = 10, B = 22, n = t.days.length;
+    const max = Math.max(1, ...t.series.high, ...t.series.medium, ...t.series.low);
+    const x = (i) => L + (W - L - R) * i / Math.max(1, n - 1);
+    const y = (v) => T + (H - T - B) * (1 - v / max);
+    const colors = { high: '#ff6b6b', medium: '#f5c451', low: '#36d399' };
+    const names = { high: '高風險', medium: '中風險', low: '低風險' };
+    const grid = [0, 0.5, 1].map((f) => {
+      const v = Math.round(max * f);
+      return [sv('line', { x1: L, x2: W - R, y1: y(v), y2: y(v), stroke: '#203551', 'stroke-width': 1 }), sv('text', { x: L - 4, y: y(v) + 3, 'text-anchor': 'end' }, String(v))];
+    });
+    const lines = Object.keys(colors).map((k) => sv('polyline', { fill: 'none', stroke: colors[k], 'stroke-width': 2, 'stroke-linejoin': 'round',
+      points: t.series[k].map((v, i) => x(i).toFixed(1) + ',' + y(v).toFixed(1)).join(' ') }));
+    const ticks = [0, Math.floor((n - 1) / 2), n - 1].map((i) => sv('text', { x: x(i), y: H - 6, 'text-anchor': i === 0 ? 'start' : (i === n - 1 ? 'end' : 'middle') }, t.days[i].slice(5)));
+    return [
+      sv('svg', { viewBox: '0 0 ' + W + ' ' + H, class: 'chart', role: 'img', 'aria-label': '近 ' + n + ' 日新建事件案數，依嚴重性分三條線，共 ' + t.total + ' 件' }, grid, lines, ticks),
+      h('div', { class: 'legend' }, Object.keys(colors).map((k) => h('span', null, h('i', { style: 'background:' + colors[k] }), names[k]))),
+      t.total === 0 ? h('p', { class: 'note' }, '最近 ' + n + ' 日沒有新建的事件案。') : null,
+    ];
+  }
+
+  function siteMap(items) {
+    const pts = items.filter((s) => s.lat !== null && s.lng !== null);
+    const W = 320, H = 220, P = 30;
+    const lats = pts.map((s) => s.lat), lngs = pts.map((s) => s.lng);
+    const minLat = Math.min(...lats), maxLat = Math.max(...lats), minLng = Math.min(...lngs), maxLng = Math.max(...lngs);
+    const spanLat = Math.max(maxLat - minLat, 0.01), spanLng = Math.max(maxLng - minLng, 0.01);
+    const k = Math.min((W - 2 * P) / spanLng, (H - 2 * P) / spanLat);     // 等比例，不做地圖投影；沒有底圖
+    const ox = (W - spanLng * k) / 2, oy = (H - spanLat * k) / 2;
+    const px = (s) => ox + (s.lng - minLng) * k, py = (s) => oy + (maxLat - s.lat) * k;
+    return sv('svg', { viewBox: '0 0 ' + W + ' ' + H, class: 'chart', role: 'img', 'aria-label': '站點位置散佈圖，共 ' + pts.length + ' 個站點' },
+      sv('rect', { x: 0.5, y: 0.5, width: W - 1, height: H - 1, rx: 10, fill: '#0a1423', stroke: '#203551' }),
+      pts.map((s) => sv('circle', { cx: px(s).toFixed(1), cy: py(s).toFixed(1), r: 7, fill: SITE_COLOR[s.level], 'fill-opacity': 0.9, stroke: '#07111f', 'stroke-width': 2 },
+        sv('title', null, s.name + '：' + SITE_LABEL[s.level] + '（' + s.issues + '）'))),
+      pts.length <= 12 ? pts.map((s) => sv('text', { x: (px(s) + 10).toFixed(1), y: (py(s) + 3).toFixed(1) }, s.name)) : null);
+  }
+
+  function renderSites(sec) {
+    if (!sec.ok) return unavailable(sec.error);
+    const d = sec.data;
+    const noCoord = d.items.filter((s) => s.lat === null || s.lng === null).length;
+    return [
+      h('div', { class: 'counts' }, Object.keys(SITE_LABEL).map((lv) => h('div', { class: 'cnt' }, h('b', { style: 'color:' + SITE_COLOR[lv] }, String(d.counts[lv])), SITE_LABEL[lv]))),
+      d.has_locations ? siteMap(d.items) : h('p', { class: 'note warn' }, '這些位置在 LibreNMS 裡沒有座標，無法畫散佈圖（設備位置設定 → 座標）。'),
+      // 沒座標的站點不在圖上；不說的話會被誤認為那些站點不存在或沒問題（上面的計數與排行都有算進去）
+      d.has_locations && noCoord > 0 ? h('p', { class: 'note warn' }, '另有 ' + noCoord + ' 個站點在 LibreNMS 沒有座標，沒有畫在圖上；上面的計數與下方的排行有算進去。') : null,
+      d.unlocated > 0 ? h('p', { class: 'note warn' }, '另有 ' + d.unlocated + ' 台設備尚未指定位置，不屬於任何站點。') : null,
+      h('p', { class: 'note' }, '站點異常等級看離線設備的比例：<25% 輕微、<50% 中度、≥50% 嚴重。散佈圖沒有底圖（離線環境不載入外部地圖）。'),
+    ];
+  }
+
+  function renderRanking(sec) {
+    if (!sec.ok) return unavailable(sec.error);
+    return sec.data.map((s) => h('div', { class: 'rank' },
+      h('span', { class: 'no' }, String(s.rank)), h('span', { class: 'nm' }, s.name),
+      badge(SITE_LABEL[s.level], SITE_BADGE[s.level]), h('span', { class: 'd', style: 'color:var(--muted);font-size:12px;min-width:5em;text-align:right' }, s.issues)));
+  }
+
+  function renderLatest(sec) {
+    if (!sec.ok) return unavailable(sec.error);
+    if (!sec.data.length) return h('p', { class: 'note' }, '還沒有任何事件案。');
+    const open = (id) => { state.selected = Number(id); state.form = null; setTab('cases'); };
+    return h('table', null,
+      h('thead', null, h('tr', null, ['建立時間', '事件內容', '站點', '嚴重性', '狀態', '處理人員'].map((x) => h('th', null, x)))),
+      h('tbody', null, sec.data.map((c) => h('tr', { class: 'click', tabindex: '0', onclick: () => open(c.id),
+        onkeydown: (ev) => { if (ev.key === 'Enter' || ev.key === ' ') { ev.preventDefault(); open(c.id); } } },
+        h('td', null, c.time), h('td', null, c.title), h('td', null, c.site || '—'), h('td', null, levelBadge(c.severity_label)),
+        h('td', null, badge(c.status_label, STATUS_COLOR[c.status] || 'gray')), h('td', null, c.assignee || '—')))));
+  }
+
   function renderOverview() {
     const ov = state.overview;
     const root = $('#view-overview');
@@ -335,14 +563,39 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
       root.replaceChildren(state.overviewError ? unavailable(state.overviewError) : h('p', { class: 'note' }, '載入中…'));
       return;
     }
+    const L = ov.landscape;
+    if (!L) {
+      root.replaceChildren(unavailable('伺服器沒有回傳總覽資料，請重新整理頁面'));
+      return;
+    }
     root.replaceChildren(
-      h('section', { class: 'grid kpis' }, ov.kpi.map(kpiCard)),
+      h('section', { class: 'grid kpis6' }, L.kpi.map(kpiCard)),
+      h('section', { class: 'grid three' },
+        section('整體風險概況', '分數越高越好', renderRisk(L.risk)),
+        section('近 30 日新建事件案', '依嚴重性', renderTrend(L.trend)),
+        section('站點分佈', '依 LibreNMS 的位置', renderSites(L.sites))),
+      h('section', { class: 'grid even' },
+        section('站點健康度排行', '離線設備比例高的在前', renderRanking(L.ranking)),
+        section('最新事件', '事件案，最近更新的在前', renderLatest(L.latest_cases))),
+      h('section', { class: 'grid even' },
+        section('各類系統資料是否都有進來？', '資料涵蓋與新鮮度（' + ov.meta.range_label + '）', renderCoverage(ov.coverage)),
+        section('需要關注的設備', '維運視角', renderDevices(ov.devices))));
+  }
+
+  function renderSecurity() {
+    const ov = state.overview;
+    const root = $('#view-security');
+    if (!ov) {
+      root.replaceChildren(state.overviewError ? unavailable(state.overviewError) : h('p', { class: 'note' }, '載入中…'));
+      return;
+    }
+    const pick = (key) => ov.kpi.find((k) => k.key === key);
+    root.replaceChildren(
+      h('p', { class: 'note', style: 'margin:0' }, '這一頁的統計期間：' + ov.meta.range_label + '（「誰在什麼設備上做了什麼」列的是這段期間內最新的 15 筆）。'),
+      h('section', { class: 'grid kpis2' }, [pick('suspicious'), pick('sources')].filter(Boolean).map(kpiCard)),
       h('section', { class: 'grid two' },
         section('誰在什麼設備上做了什麼？', '使用者、來源位址與設備關聯', renderActivity(ov.activity)),
-        section('各類系統資料是否都有進來？', '資料涵蓋與新鮮度', renderCoverage(ov.coverage))),
-      h('section', { class: 'grid even' },
-        section('最需要注意的帳號與來源', ov.meta.range_label, renderAttention(ov.attention.accounts, ov.attention.denied_sources)),
-        section('需要關注的設備', '維運視角', renderDevices(ov.devices))));
+        section('最需要注意的帳號與來源', ov.meta.range_label, renderAttention(ov.attention.accounts, ov.attention.denied_sources))));
   }
 
   async function loadOverview() {
@@ -353,7 +606,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     } catch (e) {
       state.overviewError = e.message;
     }
-    renderOverview(); renderBanner(); renderChips();
+    renderOverview(); renderSecurity(); renderBanner(); renderTopbar();
     refreshBadge();
   }
 
@@ -361,10 +614,9 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
   async function refreshBadge() {
     try {
       const r = await api('/ioc-cases.php', { action: 'summary' });
-      const b = $('#cases-badge');
-      b.hidden = r.summary.open === 0;
-      b.textContent = String(r.summary.open);
-    } catch (e) { /* 角標拿不到就不顯示，不影響其他功能 */ }
+      state.summary = r.summary;
+      renderNav(); renderTopbar();
+    } catch (e) { /* 角標與鈴鐺拿不到就不顯示，不影響其他功能 */ }
   }
 
   const openCase = (id) => { state.selected = id; state.form = null; renderRight(); };
@@ -505,11 +757,12 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
   }
 
   // ── 啟動 ──
-  document.querySelectorAll('.tabs button').forEach((b) => b.addEventListener('click', () => setTab(b.dataset.tab)));
-  if (location.hash === '#cases') setTab('cases');
-  renderChips(); renderOverview(); loadOverview();
+  buildNav(); buildTopbar(); renderNav(); renderTopbar(); renderOverview(); renderSecurity();
+  const first = location.hash.replace('#', '');
+  if (PAGES.includes(first) && first !== 'overview') setTab(first);
+  loadOverview();
   setInterval(loadOverview, REFRESH_MS);
-  setInterval(() => { renderChips(); if (state.overviewError) renderBanner(); }, 1000);
+  setInterval(() => { renderTopbar(); if (state.overviewError) renderBanner(); }, 1000);
 })();
 </script>
 </body>
