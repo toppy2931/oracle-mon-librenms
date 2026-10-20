@@ -280,7 +280,7 @@ sudo /opt/oracle-mon/run.sh l1hweb | python3 -m json.tool
 
 **新站點首次開機後的預期行為（勿誤判為異常）**：
 1. 因 MongoDB 資料已清空，Graylog 會顯示「Fresh installation detected」並在 `server.log` 印出一組**隨機一次性密碼**——這組密碼只用於背景 `GraylogCertificateProvisioningPeriodical` 跟本機 Data Node 自動做憑證配對，配對完成（約數分鐘內，`server.log` 會出現第二次 `Started listener bound to [0.0.0.0:9000]`）後自動失效。**正式登入一律用上面的出廠預設帳密，不要用這組隨機密碼**
-2. **樣板已內建 Syslog UDP 514 / GELF TCP 12201 兩個 Input**（清除流程後手動於 System → Inputs 重新設定並保留在樣板內），新站點開機後這兩個 Input 會直接跟著存在、不用重建，**但防火牆不會自動跟著開**——`setup-mgmt-firewall.sh` 預設 `MGMT_PORTS` 故意不含 514/udp、12201/tcp（log 來源可能跨網段，無法用「本機網段」規則概括），新站點須依實際 log 來源另外手動 `ufw allow`
+2. **樣板已內建 Syslog UDP 514 / GELF UDP 12201 兩個 Input**（清除流程後手動於 System → Inputs 重新設定並保留在樣板內；舊版這裡寫 GELF TCP，monitor-vm 實測 `ss -lntu | grep 12201` 只有 udp，以實機為準），新站點開機後這兩個 Input 會直接跟著存在、不用重建，**但防火牆不會自動跟著開**——`setup-mgmt-firewall.sh` 預設 `MGMT_PORTS` 故意不含 514/udp、12201/udp（log 來源可能跨網段，無法用「本機網段」規則概括），新站點須依實際 log 來源另外手動 `ufw allow`
 3. OpenSearch cluster 單節點必為 `yellow`（1 unassigned replica shard），因預設 index template 要求 1 個 replica 但單節點無處放置，非錯誤
 4. 若要讓新站點強制走全新 Preflight 設定（不共用出廠密碼），需另外清空 `server.conf` 的 `root_password_sha2` 欄位
 
@@ -292,6 +292,8 @@ sudo /opt/oracle-mon/run.sh l1hweb | python3 -m json.tool
 
 **FortiGate 欄位解析**（`System → Inputs → Syslog UDP 514 → Manage extractors`）：
 FortiGate CEF 格式的 `key=value` 內容用 **6 個獨立 Grok pattern Extractor**（不是單一大 pattern）解析：`src=%{IP:src}`、`dst=%{IP:dst}`、`spt=%{NUMBER:spt}`、`dpt=%{NUMBER:dpt}`、`proto=%{NUMBER:proto}`、`act=%{WORD:act}`。這些是 CEF **標準**欄位（非 `FTNTFGT` 前綴的 Fortinet 自訂欄位），理論上通用於其他有支援 CEF 輸出的設備。**拆成多個獨立 Extractor 是刻意設計**：某類 log（如 deny）缺少某欄位時，單一欄位的 Extractor 不匹配就單純跳過，不會像一條大 pattern 那樣整筆解析失敗。
+
+⚠️ **monitor-vm 實測（2026-10-20）與上面這段不同**：FortiGate 的 CEF 實際由 pipeline `fortigate_normalize`（`key_value()` 解析，產生 `srcip`／`dstip`／`action`…）處理，訊息被 stream `FortiGate Syslog`（規則：`message` 含 `deviceExternalId=`）收走並**移出 Default Stream**；第二條規則 `fortigate-extract-flow-fields` 另外產生 `source_ip`／`destination_ip`（註解寫明是 jt-gelflow 期望的欄位名）。**以實機為準**，完整內容與 stage 順序見 [docs/ioc/existing-graylog-config.md](docs/ioc/existing-graylog-config.md)。
 
 **PaloAlto 尚未處理**：預設是 CSV 位置對應格式（非 key=value），欄位順序依 PAN-OS 版本/log 類型不同，需要實際樣本才能正確建對應規則，延後到有真實資料或客戶現場時處理。
 
@@ -323,9 +325,10 @@ FortiGate CEF 格式的 `key=value` 內容用 **6 個獨立 Grok pattern Extract
 
 - **規則由 `system/graylog-pipelines.py` 產生，經 REST 冪等套用**（`print`／`plan`／`apply`／`remove`）。**不要在 Graylog 介面手改 `ioc-*` 規則或 `IOC Normalize - *` pipeline**，下次 `install.sh`／`update.sh` 會蓋掉；要改就改該檔再重跑 `apply`。`remove` 只刪自己建立的，不動 GeoIP 那組。
 - 帳密在 `/etc/oracle-mon/graylog-api.conf`（600）。檔案不存在時 `install.sh`／`update.sh` 直接略過，所以現有部署不受影響。工具**沒有**「關閉憑證驗證」選項（規格 IS-043），HTTPS 自簽請用 `GRAYLOG_CA_FILE`。
-- 設計取捨：每條 pipeline 只用 stage 0（stage 不滿足 match 條件時後面的 stage 不會跑，fallback 鏈會悄悄斷掉）；規則互相獨立、條件互斥，不依賴同一 stage 內的執行順序；條件全寫在 `when`（同上方 GeoIP 的語法坑）。來源欄位名稱因 shipper 而異，用 `coalesce()` 列候選欄位。
+- 設計取捨：每條 pipeline 只有一個 stage（stage 不滿足 match 條件時後面的 stage 不會跑，fallback 鏈會悄悄斷掉）；規則互相獨立、條件互斥，不依賴同一 stage 內的執行順序；條件全寫在 `when`（同上方 GeoIP 的語法坑）。來源欄位名稱因 shipper 而異，用 `coalesce()` 列候選欄位。
+- **防火牆 pipeline 是 stage 2，且要連到 FortiGate 的自訂 stream**：同一 stream 上的 pipeline 依 stage 編號跨 pipeline 一起往下跑，`srcip`／`dstip`／`action` 由既有的 `fortigate_normalize` 在 stage 0 產生，所以排在它之後；FortiGate 訊息又不在 Default Stream，所以設定檔要有 `GRAYLOG_FIREWALL_STREAMS=FortiGate Syslog`（標題或 ID，找不到會報錯不會默默略過）。**Windows pipeline 不可連到那個 stream**（它把 `source_ip` 當候選欄位，而 `fortigate-extract-flow-fields` 會產生同名欄位）。連線只增不減，不會拿掉別人手動連的 stream。
 - **新增 `event_action` 代碼要同步補 `docs/ioc/phase0.md` 的中文對照表**，測試會擋。
-- **這組規則還沒在真實 Graylog 上驗證過**（本機只有對假 API 的測試）。第一次套用先在測試環境，照 phase0.md §4 的清單逐項確認。
+- **驗證狀態**（2026-10-20，monitor-vm）：API 與規則語法已驗證，Windows／Linux／網路設備／防火牆用重播資料驗證過；**防火牆規則對真實 FortiGate 流量、缺帳號欄位的 Windows 事件尚待驗證**。結果與待辦見 phase0.md §4。這台沒有真實 Windows 事件。
 - 測試：`python3 -m unittest discover -s tests`。Windows 上 `subprocess` 找 `bash` 會優先挑到 System32 的 WSL 啟動器（環境變數傳不進去、輸出被轉碼），`tests/test_phase0_tools.py` 的 `find_bash()` 已排除。
 - `tools/replay-sample-logs.py` 沒有預設目標，避免誤打正式環境；送出的每筆都帶 `ioc_demo=true`，入口與報表必須排除（規格 IS-054～056）。
 - `system/ioc-preflight.sh` 是上線前唯讀自檢（出廠密碼、HTTP/HTTPS、設定檔權限、pipeline 是否已套用）。

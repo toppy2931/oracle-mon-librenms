@@ -10,6 +10,7 @@ graylog-pipelines.py — IOC 欄位標準化 pipeline 的冪等套用工具（Gr
   graylog-pipelines.py print    印出規則與 pipeline 原始碼（離線，不連 Graylog）
   graylog-pipelines.py plan     比對現況，列出將新增／更新什麼（唯讀）
   graylog-pipelines.py apply    冪等套用：規則 → pipeline → 連到 Default Stream
+                                （防火牆另連到 GRAYLOG_FIREWALL_STREAMS 指定的 stream）
   graylog-pipelines.py remove   回滾：解除連線並刪除本工具建立的 pipeline 與規則
 
 設定（環境變數優先於設定檔 /etc/oracle-mon/graylog-api.conf，格式 KEY=VALUE）：
@@ -17,13 +18,17 @@ graylog-pipelines.py — IOC 欄位標準化 pipeline 的冪等套用工具（Gr
   GRAYLOG_USER / GRAYLOG_PASS
   GRAYLOG_CA_FILE    HTTPS 自簽或內部 CA 的 PEM。沒有「關閉憑證驗證」選項（規格 IS-043）
   GRAYLOG_STREAM_ID  預設 Default Stream（000000000000000000000001）
+  GRAYLOG_FIREWALL_STREAMS  防火牆日誌所在的 stream，標題或 ID，逗號分隔，例如 FortiGate Syslog。
+                     該 stream 若把訊息移出了 Default Stream，不設的話防火牆規則看不到真實流量
   GRAYLOG_API_CONF   指定設定檔路徑（測試用）
 
-退出碼：0 成功；1 失敗（API 錯誤、規則檢查未過）；2 缺少設定。
+退出碼：0 成功；1 失敗（API 錯誤、規則檢查未過、找不到指定的 stream）；2 缺少設定。
 
 設計取捨（改規則前先看）：
-  * 每條 pipeline 只有 stage 0。stage 不滿足 match 條件時，後面的 stage 不會執行，
-    多 stage 的 fallback 鏈會悄悄斷掉。
+  * 每條 pipeline 只有一個 stage。stage 不滿足 match 條件時，後面的 stage 不會執行，
+    多 stage 的 fallback 鏈會悄悄斷掉。Windows／Linux／網路設備用 stage 0；防火牆用 stage 2：
+    同一個 stream 上的 pipeline 是依 stage 編號跨 pipeline 一起往下跑，FortiGate 的欄位由既有的
+    fortigate_normalize 在 stage 0、1 產生，排在它們之後才讀得到（見 docs/ioc/existing-graylog-config.md）。
   * 規則之間互不依賴、條件互斥：不假設同一 stage 內規則的執行順序。
   * 來源欄位名稱因收集方式而異（Winlogbeat 的 winlog_*、NXLog 的 EventID…），
     用 to_string(欄位, 預設值) 巢狀取第一個存在的。要支援新來源只要在 coalesce() 加欄位名。
@@ -49,6 +54,11 @@ STANDARD_FIELDS = frozenset([
     "ioc_schema", "log_type", "event_action", "severity",
     "user_name", "src_ip", "dst_ip", "host_name", "target_name",
 ])
+# 預設 stage 0。防火牆規則要讀 fortigate_normalize（stage 0、1）產生的欄位，所以排 stage 2
+STAGE = {PIPELINE_PREFIX + "Firewall": 2}
+# 這些 pipeline 除了 Default Stream，還連到設定檔指定的 stream。這台的 FortiGate 訊息被路由到自訂
+# stream 並移出 Default Stream，只連 Default 的 pipeline 看不到它們。
+STREAM_KEYS = {PIPELINE_PREFIX + "Firewall": "GRAYLOG_FIREWALL_STREAMS"}
 
 
 # ── 規則產生 ────────────────────────────────────────────────────────────
@@ -159,15 +169,18 @@ def linux_rules():
 
 
 def firewall_rules():
-    """沿用既有 FortiGate CEF extractor 產生的 src/dst/act。三條規則寫入的欄位互不重疊。"""
-    act = "lowercase(%s)" % coalesce("act")
+    """FortiGate 的欄位由既有 pipeline fortigate_normalize 產生：srcip/dstip/action 是它整理過的，
+    src/dst/act 是 CEF 原始欄位；其他 CEF 設備只有後者。兩種都認，先取整理過的。
+    三條規則寫入的欄位互不重疊，條件互斥。"""
+    src, dst = coalesce("srcip", "src"), coalesce("dstip", "dst")
+    act = "lowercase(%s)" % coalesce("action", "act")
     deny = " || ".join('contains(%s, "%s")' % (act, w) for w in ("deny", "drop", "block", "reject"))
     allow = " || ".join('contains(%s, "%s")' % (act, w) for w in ("accept", "allow", "pass"))
-    has = 'has_field("src") && has_field("dst")'
+    has = '%s != "" && %s != ""' % (src, dst)
     return [
         rule("fw-base", has,
-             [("log_type", lit("firewall")), ("src_ip", coalesce("src")),
-              ("dst_ip", coalesce("dst")), ("host_name", coalesce("source"))]),
+             [("log_type", lit("firewall")), ("src_ip", src),
+              ("dst_ip", dst), ("host_name", coalesce("source"))]),
         rule("fw-deny", "%s && (%s)" % (has, deny),
              [("event_action", lit("fw_deny")), ("severity", lit("low"))]),
         rule("fw-allow", "%s && (%s) && !(%s)" % (has, allow, deny),
@@ -213,8 +226,12 @@ def pipelines():
     }
 
 
+def stage_of(title):
+    return STAGE.get(title, 0)
+
+
 def pipeline_source(title, rules):
-    lines = ['pipeline "%s"' % title, "stage 0 match either"]
+    lines = ['pipeline "%s"' % title, "stage %d match either" % stage_of(title)]
     lines += ['  rule "%s"' % t for t, _ in rules]
     lines.append("end")
     return "\n".join(lines)
@@ -286,18 +303,57 @@ P_PIPE = "/api/system/pipelines/pipeline"
 P_CONN = "/api/system/pipelines/connections"
 
 
-def connected_ids(gl, stream_id):
-    """查不到就當作都沒連：之後的連線動作本身是冪等的。"""
+def connected_map(gl):
+    """{pipeline id: {已連的 stream id}}。查不到就當作都沒連：之後的連線動作本身是冪等的。"""
     try:
         data = gl.call("GET", P_CONN)
     except ApiError:
-        return set()
+        return {}
     if not isinstance(data, list):
-        return set()
-    return {pid for c in data if c.get("stream_id") == stream_id for pid in c.get("pipeline_ids", [])}
+        return {}
+    out = {}
+    for c in data:
+        for pid in c.get("pipeline_ids", []):
+            out.setdefault(pid, set()).add(c.get("stream_id"))
+    return out
 
 
-def sync(gl, stream_id, dry_run, say=print):
+def resolve_streams(gl, names):
+    """stream 標題或 ID → ID。找不到就報錯並列出現有的，不默默略過（否則防火牆規則會悄悄沒套到）。"""
+    data = gl.call("GET", "/api/streams")
+    if not isinstance(data, dict) or not isinstance(data.get("streams"), list):
+        raise ApiError(200, "非預期的回應格式（/api/streams）；Graylog API 版本是否不同？")
+    by_title = {s["title"]: s["id"] for s in data["streams"]}
+    known_ids = set(by_title.values())
+    ids = []
+    for n in names:
+        if n in by_title:
+            ids.append(by_title[n])
+        elif n in known_ids:
+            ids.append(n)
+        else:
+            raise ApiError(0, "找不到 stream「%s」。現有：%s" % (n, "、".join(sorted(by_title)) or "（無）"))
+    return ids
+
+
+def stream_targets(gl, conf):
+    """每條 pipeline 要連的 stream：一律有 Default Stream，部分另加設定檔指定的。"""
+    default = conf["GRAYLOG_STREAM_ID"]
+    names = {t: [n.strip() for n in conf.get(STREAM_KEYS.get(t, ""), "").split(",") if n.strip()]
+             for t in pipelines()}
+    all_names = sorted({n for ns in names.values() for n in ns})
+    resolved = dict(zip(all_names, resolve_streams(gl, all_names))) if all_names else {}
+    targets = {}
+    for title, ns in names.items():
+        targets[title] = [default]
+        for n in ns:
+            if resolved[n] not in targets[title]:
+                targets[title].append(resolved[n])
+    return targets
+
+
+def sync(gl, targets, dry_run, say=print):
+    """targets: {pipeline 標題: [要連的 stream ID]}"""
     changes = 0
     wanted = pipelines()
 
@@ -339,16 +395,18 @@ def sync(gl, stream_id, dry_run, say=print):
             else:
                 say("[Pipeline] %s：無變更" % title)
 
-    connected = connected_ids(gl, stream_id)
+    connected = connected_map(gl)
     for title in wanted:
         pid = pipe_ids.get(title)
-        if pid is not None and pid in connected:
-            say("[連線] %s → stream %s：無變更" % (title, stream_id))
-            continue
-        say("[連線] %s → stream %s：新增" % (title, stream_id))
-        changes += 1
-        if not dry_run and pid is not None:
-            gl.call("POST", P_CONN + "/to_pipeline", {"pipeline_id": pid, "stream_ids": [stream_id]})
+        have = connected.get(pid, set()) if pid is not None else set()
+        missing = [s for s in targets[title] if s not in have]
+        for s in targets[title]:
+            say("[連線] %s → stream %s：%s" % (title, s, "新增" if s in missing else "無變更"))
+        changes += len(missing)
+        if missing and not dry_run and pid is not None:
+            # to_pipeline 是整組取代，所以帶入既有的連線：只增不減
+            gl.call("POST", P_CONN + "/to_pipeline",
+                    {"pipeline_id": pid, "stream_ids": sorted(have | set(targets[title]))})
     return changes
 
 
@@ -395,7 +453,8 @@ def load_config(env=None):
     env = os.environ if env is None else env
     path = env.get("GRAYLOG_API_CONF", CONF_PATH)
     conf = parse_conf(path)
-    for k in ("GRAYLOG_URL", "GRAYLOG_USER", "GRAYLOG_PASS", "GRAYLOG_CA_FILE", "GRAYLOG_STREAM_ID"):
+    for k in ("GRAYLOG_URL", "GRAYLOG_USER", "GRAYLOG_PASS", "GRAYLOG_CA_FILE", "GRAYLOG_STREAM_ID",
+              "GRAYLOG_FIREWALL_STREAMS"):
         if env.get(k):
             conf[k] = env[k]
     conf.setdefault("GRAYLOG_URL", "http://127.0.0.1:9000")
@@ -450,7 +509,7 @@ def main(argv=None):
         if cmd == "remove":
             print("REMOVE: deleted=%d" % remove(gl))
         else:
-            n = sync(gl, conf["GRAYLOG_STREAM_ID"], dry_run=(cmd == "plan"))
+            n = sync(gl, stream_targets(gl, conf), dry_run=(cmd == "plan"))
             print("%s: changes=%d" % (cmd.upper(), n))
     except ApiError as e:
         print("Graylog API 錯誤：%s" % e, file=sys.stderr)

@@ -24,6 +24,8 @@ class FakeGraylog:
     def __init__(self, user="admin", password="secret"):
         self.expect_auth = "Basic " + base64.b64encode(("%s:%s" % (user, password)).encode()).decode()
         self.rules, self.pipes, self.conns = {}, {}, {}   # id -> obj；conns: stream_id -> [pipeline_id]
+        # 仿真實環境：另有一個把訊息移出 Default Stream 的 FortiGate 自訂 stream
+        self.streams = {"000000000000000000000001": "Default Stream", "6a33ef93a68ab16ef006f414": "FortiGate Syslog"}
         self.requests = []                                 # (method, path, body)
         self.header_violations = []                        # 缺 X-Requested-By 的請求（Graylog 會拒絕）
         fake = self
@@ -69,6 +71,9 @@ class FakeGraylog:
         return [(m, p) for m, p, _ in self.requests if m != "GET"]
 
     def route(self, method, path, body):
+        if path == "/api/streams" and method == "GET":
+            return 200, {"total": len(self.streams),
+                         "streams": [{"id": i, "title": t, "rules": []} for i, t in self.streams.items()]}
         base = "/api/system/pipelines/"
         if path == base + "connections" and method == "GET":
             return 200, [{"stream_id": s, "pipeline_ids": ids} for s, ids in self.conns.items()]
