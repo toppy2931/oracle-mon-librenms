@@ -532,7 +532,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
       d.has_locations ? siteMap(d.items) : h('p', { class: 'note warn' }, '這些位置在 LibreNMS 裡沒有座標，無法畫散佈圖（設備位置設定 → 座標）。'),
       // 沒座標的站點不在圖上；不說的話會被誤認為那些站點不存在或沒問題（上面的計數與排行都有算進去）
       d.has_locations && noCoord > 0 ? h('p', { class: 'note warn' }, '另有 ' + noCoord + ' 個站點在 LibreNMS 沒有座標，沒有畫在圖上；上面的計數與下方的排行有算進去。') : null,
-      d.unlocated > 0 ? h('p', { class: 'note warn' }, '另有 ' + d.unlocated + ' 台設備尚未指定位置，不屬於任何站點。') : null,
+      d.unlocated > 0 ? h('p', { class: 'note warn' }, '另有 ' + d.unlocated + ' 台設備沒有有效的位置（未指定，或是 Unknown 這類 SNMP 預設值），不屬於任何站點。') : null,
       h('p', { class: 'note' }, '站點異常等級看離線設備的比例：<25% 輕微、<50% 中度、≥50% 嚴重。散佈圖沒有底圖（離線環境不載入外部地圖）。'),
     ];
   }

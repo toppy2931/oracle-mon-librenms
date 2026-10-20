@@ -141,7 +141,7 @@
 
 **沒做**（沒有資料來源或要先定義，畫面不放假數字）：全域搜尋、期間選擇、核心業務服務、SLA、組態變更數、備份成功率、網路可用性、拓樸檢視、「較昨日」比較（要每日快照）。
 
-**資料來源**：站點、資產、可用率來自 LibreNMS（`devices` 對 `locations`，可用率用 `availability` 表的 24 小時與 7 日）；事件案來自 `ioc_cases`；資料涵蓋來自 Graylog。設備依 LibreNMS 的 `devices.type` 分成伺服器（`server`）、網路設備（`network`、`firewall`、`wireless`、`loadbalancer`）、其他。
+**資料來源**：站點、資產、可用率來自 LibreNMS（`devices` 對 `locations`，可用率用 `availability` 表的 24 小時與 7 日）；事件案來自 `ioc_cases`；資料涵蓋來自 Graylog。**SNMP 預設位置不算站點**：設備自己回報的 `Unknown`、`End User Premise.`、`Rack, Room, Building, City, Country [Lat, Lon]`、`Unknown (edit …)` 這類範本字串，LibreNMS 會原樣建成「位置」，但不是人設定的站點，所以視為「沒有有效位置」（`Fleet::realLocation()`，清單在 `Fleet.php`）。monitor-vm 的 14 台設備實測：6 台沒位置、8 台是這類預設值或只有一個真的「機房」，所以目前只有 1 個站點、13 台算沒有有效位置；要看到更多站點，到 LibreNMS 設備設定 → 位置 指定（要畫散佈圖還要有座標）。設備依 LibreNMS 的 `devices.type` 分成伺服器（`server`）、網路設備（`network`、`firewall`、`wireless`、`loadbalancer`）、其他。
 
 ### 站點異常等級
 

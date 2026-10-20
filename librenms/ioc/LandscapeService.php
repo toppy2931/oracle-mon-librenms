@@ -61,11 +61,11 @@ final class LandscapeService
         } elseif ($fleet->sites() === []) {
             $sites = $unknown('sites', '站點數', $fleet->total() === 0
                 ? '還沒有納管任何設備'
-                : 'LibreNMS 的設備都還沒有指定位置（設備設定 → 位置）', '尚未設定');
+                : 'LibreNMS 的設備都還沒有有效的位置（沒指定，或只有 Unknown 這類 SNMP 預設值；到設備設定 → 位置 指定）', '尚未設定');
         } else {
             $un = $fleet->unlocated();
             $sites = ['key' => 'sites', 'label' => '站點數', 'value' => count($fleet->sites()), 'state' => 'good',
-                'sub' => $un > 0 ? sprintf('另有 %d 台設備尚未指定位置', $un) : '各設備都已指定位置'];
+                'sub' => $un > 0 ? sprintf('另有 %d 台設備沒有有效位置（未指定，或是 Unknown 這類預設值）', $un) : '各設備都已指定位置'];
         }
 
         // 2) 監控資產數
@@ -94,7 +94,7 @@ final class LandscapeService
 
         // 4) 高風險站點（簡報有「較昨日」，要有每日快照才算得出來，目前沒有，所以不寫）
         if ($fleet === null || $fleet->sites() === []) {
-            $high = $unknown('high_sites', '高風險站點', $fleet === null ? $noFleet : '尚無站點資料（設備還沒有指定位置）', $fleet === null ? null : '尚未設定');
+            $high = $unknown('high_sites', '高風險站點', $fleet === null ? $noFleet : '尚無站點資料（設備還沒有有效的位置）', $fleet === null ? null : '尚未設定');
         } else {
             $c = $fleet->levelCounts();
             $high = ['key' => 'high_sites', 'label' => '高風險站點', 'value' => $c['severe'],
@@ -179,7 +179,7 @@ final class LandscapeService
         }
         $sites = $fleet->sites();
         if ($sites === []) {
-            return $this->fail($fleet->total() === 0 ? '還沒有納管任何設備' : 'LibreNMS 的設備都還沒有指定位置，沒有站點可顯示');
+            return $this->fail($fleet->total() === 0 ? '還沒有納管任何設備' : 'LibreNMS 的設備都還沒有有效的位置（沒指定，或只有 Unknown 這類預設值），沒有站點可顯示');
         }
         return ['ok' => true, 'data' => [
             'items'         => $sites,
@@ -196,7 +196,7 @@ final class LandscapeService
             return $this->fail('LibreNMS 的設備資料無法讀取');
         }
         if ($fleet->sites() === []) {
-            return $this->fail('沒有站點資料（設備還沒有指定位置）');
+            return $this->fail('沒有站點資料（設備還沒有有效的位置）');
         }
         return ['ok' => true, 'data' => $fleet->ranking(self::RANKING_LIMIT)];
     }

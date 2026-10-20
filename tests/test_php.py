@@ -222,6 +222,12 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
         self.assertIn("'siteLevel'    => Ioc\\Fleet::LEVELS", portal)
         self.assertIn("const SITE_LABEL = CFG.labels.siteLevel", portal, "站點等級名稱不要在畫面另外寫一份")
 
+    def test_snmp_default_locations_are_not_treated_as_sites(self):
+        """monitor-vm 實測：Unknown、End User Premise. 等 SNMP 預設值會被 LibreNMS 建成位置，不能當站點。"""
+        src = (ROOT / "librenms" / "ioc" / "Fleet.php").read_text(encoding="utf-8")
+        for placeholder in ("'unknown'", "'end user premise.'", "'rack, room, building, city, country [lat, lon]'", "'unknown ('"):
+            self.assertIn(placeholder, src, placeholder)
+
     def test_availability_null_is_not_turned_into_zero(self):
         """LibreNMS 的可用率欄位為 NULL 是「沒有資料」；(float) null 會變成 0% 把整體可用率拉低。"""
         src = (ROOT / "librenms" / "ioc" / "endpoint.php").read_text(encoding="utf-8")

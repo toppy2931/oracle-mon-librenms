@@ -28,6 +28,15 @@ final class Fleet
     /** LibreNMS devices.type 之中算「網路設備」的值。 */
     private const NETWORK_TYPES = ['network', 'firewall', 'wireless', 'loadbalancer'];
 
+    /**
+     * 設備自己用 SNMP 回報的預設／範本位置（不分大小寫）。LibreNMS 會原樣建成「位置」，但這些不是人設定的站點
+     * （monitor-vm 實測：Unknown、End User Premise.、Rack, Room, Building, City, Country [Lat, Lon]），
+     * 當成站點會變成一堆名字很怪的假站點，所以視為「沒有指定位置」。
+     */
+    private const PLACEHOLDER_LOCATIONS = ['unknown', 'end user premise', 'end user premise.', 'rack, room, building, city, country [lat, lon]'];
+    /** net-snmp 的預設是「Unknown (edit /etc/snmp/snmpd.local.conf)」。 */
+    private const PLACEHOLDER_PREFIXES = ['unknown ('];
+
     /** @var array<int,array<string,mixed>> */
     private array $devices = [];
     /** @var array<int,array<string,mixed>>|null */
@@ -46,7 +55,7 @@ final class Fleet
             if ($lat === 0.0 && $lng === 0.0) {         // 0,0 是「沒設定」，不是真的在幾內亞灣
                 $lat = $lng = null;
             }
-            $loc = trim((string) ($r['location'] ?? ''));
+            $loc = self::realLocation((string) ($r['location'] ?? ''));
             $this->devices[] = [
                 'name'        => (string) ($r['name'] ?? ''),
                 'aliases'     => array_values(array_filter(array_map(static fn ($a) => strtolower(trim((string) $a)), (array) ($r['aliases'] ?? [])))),
@@ -54,13 +63,29 @@ final class Fleet
                 'up'          => (int) ($r['status'] ?? 0) === 1,
                 'reason'      => (string) ($r['reason'] ?? ''),
                 'last_polled' => Time::toTaipei(isset($r['last_polled']) ? (string) $r['last_polled'] : null, 'Y-m-d H:i:s', $sourceTz),
-                'location'    => $loc === '' ? null : $loc,
+                'location'    => $loc,
                 'lat'         => $lat,
                 'lng'         => $lng,
                 'avail_1d'    => isset($r['avail_1d']) && is_numeric($r['avail_1d']) ? (float) $r['avail_1d'] : null,
                 'avail_7d'    => isset($r['avail_7d']) && is_numeric($r['avail_7d']) ? (float) $r['avail_7d'] : null,
             ];
         }
+    }
+
+    /** 有效的站點名稱；空白或 SNMP 預設值回傳 null（視為沒有指定位置）。 */
+    public static function realLocation(string $location): ?string
+    {
+        $loc = trim($location);
+        $key = strtolower($loc);
+        if ($key === '' || in_array($key, self::PLACEHOLDER_LOCATIONS, true)) {
+            return null;
+        }
+        foreach (self::PLACEHOLDER_PREFIXES as $prefix) {
+            if (strpos($key, $prefix) === 0) {
+                return null;
+            }
+        }
+        return $loc;
     }
 
     public static function group(string $type): string

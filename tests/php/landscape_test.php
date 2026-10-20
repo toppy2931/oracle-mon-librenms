@@ -66,6 +66,35 @@ test('Fleet：站點只算有指定位置的設備；沒指定的另外計數，
     assertSame(['normal' => 1, 'minor' => 0, 'moderate' => 0, 'severe' => 1], $f->levelCounts());
 });
 
+test('Fleet：SNMP 預設的位置（Unknown、End User Premise. 等）不是站點，視為沒有指定位置', function () {
+    foreach (['Unknown', 'UNKNOWN', ' unknown ', 'End User Premise.', 'end user premise', 'Rack, Room, Building, City, Country [Lat, Lon]',
+              'Unknown (edit /etc/snmp/snmpd.local.conf)', 'unknown (edit me)', ''] as $placeholder) {
+        assertSame(null, Fleet::realLocation($placeholder), "「{$placeholder}」應視為沒有指定");
+    }
+    foreach (['機房', 'Unknown Lab', 'Unknownville', '北區所', ' 機房 '] as $real) {
+        assertSame(trim($real), Fleet::realLocation($real), "「{$real}」是真的站點名稱");
+    }
+});
+
+test('Fleet：monitor-vm 實際的位置資料形狀（14 台：6 台沒位置、其餘是 SNMP 預設值與一個真的「機房」）→ 只有 1 個站點', function () {
+    $rows = [];
+    foreach ([[6, null], [4, 'Unknown'], [2, 'End User Premise.'], [1, 'Rack, Room, Building, City, Country [Lat, Lon]'], [1, '機房']] as [$n, $loc]) {
+        for ($i = 0; $i < $n; $i++) {
+            $rows[] = dev("vm-{$n}-{$i}", 'server', 1, $loc);
+        }
+    }
+    $f = new Fleet($rows);
+    assertSame(14, $f->total());
+    assertSame(13, $f->unlocated());
+    assertSame(['機房'], array_column($f->sites(), 'name'));
+    $o = (new LandscapeService(LS_NOW))->build($f, ['new' => 0, 'ack' => 0, 'in_progress' => 0, 'closed' => 0, 'open' => 0], ['high' => 0, 'medium' => 0, 'low' => 0], [], [], lsCoverage());
+    $k = lsKpi($o);
+    assertSame(1, $k['sites']['value']);
+    assertTrue(mb_strpos($k['sites']['sub'], '另有 13 台設備沒有有效位置') !== false, $k['sites']['sub']);
+    assertSame(false, $o['sites']['data']['has_locations'], '這個站點沒有座標，不畫散佈圖');
+    assertSame(13, $o['sites']['data']['unlocated']);
+});
+
 test('Fleet：沒有任何設備有位置時，沒有站點（不是一個叫「未指定」的站點）', function () {
     $f = new Fleet([dev('a'), dev('b', 'server', 0)]);
     assertSame([], $f->sites());
@@ -231,7 +260,7 @@ test('總覽：六張 KPI 的順序與內容（站點、資產、待處理事件
     $o = lsBuild(lsFleet(), $lsSummary, $lsOpen);
     assertSame(['sites', 'assets', 'cases', 'high_sites', 'availability', 'core_services'], array_column($o['kpi'], 'key'));
     $k = lsKpi($o);
-    assertSame([2, '另有 1 台設備尚未指定位置'], [$k['sites']['value'], $k['sites']['sub']]);
+    assertSame([2, '另有 1 台設備沒有有效位置（未指定，或是 Unknown 這類預設值）'], [$k['sites']['value'], $k['sites']['sub']]);
     assertSame([4, '伺服器 2 · 網路設備 1 · 其他 1 · 離線 1 台'], [$k['assets']['value'], $k['assets']['sub']]);
     assertSame([3, 'bad', '高風險 1 · 中風險 2 · 低風險 0'], [$k['cases']['value'], $k['cases']['state'], $k['cases']['sub']]);
     assertSame([1, 'bad', '中度異常 0 · 輕微異常 0'], [$k['high_sites']['value'], $k['high_sites']['state'], $k['high_sites']['sub']], '北區所 2 台離線 1 台＝嚴重');
