@@ -145,8 +145,12 @@ jt-glogarch（`jasoncheng7115/jt-glogarch`）裝在同台 monitor-vm，本 repo 
 - **必須走 HTTPS**：其 `web/app.py` SessionMiddleware 寫死 `https_only=True`（secure cookie），HTTP 下瀏覽器拒存 cookie → 登入「閃一下」跳回 login。config `web.ssl_certfile/ssl_keyfile` 指回 `server.crt/server.key` 即 HTTPS。Web UI `https://<host>:8990`，用 **Graylog 帳號**登入（驗證走 Graylog `/api/system` Basic Auth）。
 - 安裝鐵則（與作者另一專案 jt-ipam 同源，曾 `chown -R /` 毀機）：原始碼放 `/opt/jt-glogarch` 本身（install.sh 跑 `pip install /opt/jt-glogarch`）；Ubuntu 24.04 需先 `pip install --break-system-packages --ignore-installed setuptools wheel`；systemd 服務那步是互動詢問，非互動跑會跳過需手動 `cp deploy/jt-glogarch.service`。
 - 歸檔落地在獨立碟 `/data/graylog-archives`（VG `vg-archive`/`/dev/sdc`），API 模式（非 OpenSearch Direct，因 9200 有認證）。
+- **每日 export 太慢（十幾小時）先看這兩個設定，不是先懷疑磁碟或資料量**：API 模式的吞吐量是 `rate_limit.requests_per_second × export.batch_size`，而**限速器是按「請求次數」計費、與每次拿回幾筆無關**（`glogarch/ratelimit/limiter.py`）。出廠預設 `2.0 × 1000 = 2,000 筆/秒`，是主要瓶頸。`batch_size` 的**硬上限是 10000**（`glogarch/graylog/search.py` 的 `RESULT_WINDOW`，對應 OpenSearch `index.max_result_window`；程式會 clamp，設更大無效且超過會被 Graylog 回 500「Result window is too large」）。調整時 `rate_limit.adaptive: true` + `max_cpu_percent` 仍會在 Graylog CPU 過高時自動降速，另有 HealthGuard 反壓機制（heap／journal／buffer 持續惡化時暫停 export，最長 30 分鐘），所以往上調相對安全。
+  ⚠️ 若系統記錄出現大量 backpressure 暫停，瓶頸其實在 **OpenSearch 叢集本身**（heap 不足／HDD），調 glogarch 參數幫助有限，硬調高反壓門檻只是把風險轉嫁成「真的把 Graylog ingestion 拖垮」。切到 `export_mode: opensearch` 可繞開 Graylog API 限速（本機 `opensearch.hosts` 已填節點位址，但 `password` 仍是預留字串，要切得先補真密碼並用 `glogarch test-opensearch --server <名稱>` 驗證）。
 - **自己的狀態資料庫是 `/opt/jt-glogarch/jt-glogarch.db`**（SQLite，WAL 模式，同目錄下 `.db-shm`/`.db-wal`）——作業歷程、歸檔清單、通知設定、排程作業、行為稽核**都存在這裡，不是存在 `/data/graylog-archives` 或 Graylog 的 Mongo/OpenSearch**。`prepare-for-clone.sh` step 4 會一併清除（連同 `.session_secret`，避免所有 clone 共用同一把 session 簽署金鑰）。
 - ⚠️ **若只清了 Graylog 的 MongoDB、沒清 `jt-glogarch.db`**：舊 DB 裡快取的 Graylog 認證狀態會失效，造成 jt-glogarch 背景呼叫 `/api/streams`、`/api/system` 持續 401，被判定 session 失效而不斷跳回登入頁（外觀像是「點歸檔清單就被登出」）。修法是停服務、砍掉 `jt-glogarch.db*`、重啟即可自動重建全新空白 DB，不影響登入（登入本身是即時打 Graylog API 驗證，不依賴這個 DB）。
+- ⚠️ **「點歸檔清單就被登出」還有另一個更常見的成因：`config.yaml` 的 Graylog `auth_token` 失效**（token 被刪、或建立它的 Graylog 使用者被停用／改密碼）。**先查這個，不要急著砍 `jt-glogarch.db`**（砍掉會連作業歷程／歸檔索引一起清空）。判別方式：jt-glogarch「系統記錄」頁若出現 `401 Unauthorized for url '.../api/system'` 且重試 3 次皆失敗，就是 token 問題；修法是在 Graylog → System → Users → Edit Tokens 重新產生，更新 `config.yaml` 的 `servers[].auth_token` 後 `systemctl restart jt-glogarch`。
+  成因是上游一個**前端設計缺陷**：`glogarch/web/routes/api.py` 在 Graylog token 認證失敗時原樣回傳 HTTP 401，而 `web/static/js/app.js` 的 `fetchJSON()` 把**任何 401 一律當成「使用者登入過期」**，於是清 cookie 並強制跳 `/login`——把「Graylog 的 token 壞了」跟「你的登入過期了」混為一談。只有會呼叫 `/api/streams` 的頁面（歸檔清單要靠它顯示「串流」欄位）會觸發，儀表板／作業歷程／系統記錄不受影響，所以症狀看起來像「只有歸檔清單會登出」。**token 失效同時也會拖慢每日 export**（全程靠同一把 token 打 Search API，失敗會走滿重試退避）。
 
 ---
 
@@ -215,6 +219,29 @@ Row 3: 表空間使用率／效能（.panel.full 橫跨）
 - **可折疊指標說明** 用原生 `<details class="helpbox">` + `<summary>`；body 用 `<dl>` grid 排成「名稱／解釋」兩欄，最下方 `.note` 是藍邊提示框。無 JS，刷新時會收合（這是 `innerHTML` 重建的特性，目前可接受）。
 - **Tooltip ⓘ** 用 `.tip[data-tip="..."]`，`::after` 顯示 `attr(data-tip)`，純 CSS hover。換行用 `&#10;`。
 - **statusOf()** 是卡片號誌（紅/黃/綠/灰）邏輯入口。新增「會讓整張卡轉紅/黃」的指標要在這裡加判斷，**並同步在 `generateWarnings()` 加底部警示文字**（兩者用同一閾值）。
+
+---
+
+## 戰情室資料饋送：探測路徑**每一層都必須有逾時上界**（勿回退）
+
+`oracle-dashboard-data.php` 每次輪詢都**即時**連所有啟用中的 Oracle（無快取、無 cron 預聚合），呼叫鏈是：
+
+```
+nginx (fastcgi_read_timeout 預設 60s) → PHP-FPM → oracle-dashboard-data.php
+  → proc_open(sudo test-db.sh <alias>) → run.sh → java OracleStats → JDBC connect
+```
+
+原本這條鏈**從頭到尾沒有任何逾時**，且是**依序**跑過每台 DB。結果：任一台連不上（跨站專線中斷、防火牆靜默丟包、VM 關機），JDBC connect 會卡到 OS TCP 逾時（數分鐘），單台就把**整頁**拖過 nginx 60 秒上限 → 瀏覽器收到 `504 Gateway Time-out`，連正常的 DB 也一起看不到。已修（2026-08-17），三層缺一不可：
+
+| 位置 | 防護 |
+|------|------|
+| `collector/OracleStats.java` | `DriverManager.setLoginTimeout(5)`——JDBC 連線 5 秒上界 |
+| `collector/run.sh` | `exec timeout 10 java ...`——包一層 wall-clock 保險 |
+| `librenms/html/oracle-dashboard-data.php` | 先 `proc_open` **全部**啟動（平行），再逐一 `stream_get_contents` 收集；總耗時＝最慢單台，不是全部加總 |
+
+⚠️ **改這三處時不要退回舊寫法**：把收集迴圈併回啟動迴圈就變回依序、拿掉任一逾時就恢復無上界。正確行為是單台失效只讓該卡片顯示 `DOWN / 無法連線`，其餘照常。
+⚠️ **不要用「調高 nginx `fastcgi_read_timeout`」當解法**——那只是把 504 往後延。正解是讓應用層逾時**遠短於**代理層（現況 5s／10s vs nginx 60s）。
+⚠️ 平行收集**不會** deadlock，前提是子程序只吐一行小 JSON（遠小於 OS pipe buffer）。若哪天 `test-db.sh` 改成輸出大量資料，就得改成 `stream_select()` 輪詢，否則子程序會卡在寫 pipe、而我們卡在等前一支讀完。
 
 ---
 

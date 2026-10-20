@@ -13,6 +13,7 @@
 > 4. 新增 **§7ter 安裝 jt-gelflow**（即時流量視覺化，含與 Graylog 自身 GELF Input 的埠號衝突處理）
 > 5. §1.2/§4 磁碟規劃新增 `/dev/sdc`（jt-glogarch 歸檔碟）
 > 6. 新增疑難排解：**nginx `reload` 有時不會套用新設定，需改用 `restart`**
+> 7. **jt-ipam nginx 模式對外 port 改為 `8443`**（原為標準 `443`）：§7.5、§8.1/§8.2、§0 服務表同步更新；新增疑難排解：`sed` pattern 沒對到完整行內容（例如漏了 `http2 default_server` 這類 flag）會**靜默 no-op**，`nginx -t` 照樣通過，容易誤判「已改好」
 >
 > **歷史更新（v2，2026-06-14）**：
 > 1. §4.1 lv-backup 改 `-l 100%FREE`（避免 VG metadata 佔用導致 `-L 60G` 少 1 extent 失敗）
