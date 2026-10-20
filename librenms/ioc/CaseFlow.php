@@ -21,6 +21,9 @@ final class CaseFlow
         'closed'      => ['in_progress'],
     ];
 
+    /** 還沒結案的狀態（「待處理事件」的範圍）。 */
+    public const OPEN = ['new', 'ack', 'in_progress'];
+
     /** @return string[] */
     public static function allowed(string $from): array
     {

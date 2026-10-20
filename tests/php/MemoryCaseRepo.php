@@ -82,6 +82,29 @@ class MemoryCaseRepo implements CaseRepo
         return $out;
     }
 
+    public function countOpenBySeverity(): array
+    {
+        $out = [];
+        foreach ($this->cases as $c) {
+            if (in_array($c['status'], \Ioc\CaseFlow::OPEN, true)) {
+                $out[$c['severity']] = ($out[$c['severity']] ?? 0) + 1;
+            }
+        }
+        return $out;
+    }
+
+    public function createdSince(string $utc): array
+    {
+        $rows = [];
+        foreach ($this->cases as $c) {
+            if ($c['created_at'] >= $utc) {
+                $rows[] = ['created_at' => $c['created_at'], 'severity' => $c['severity']];
+            }
+        }
+        usort($rows, static fn ($a, $b) => $b['created_at'] <=> $a['created_at']);     // 由新到舊，與 PdoCaseRepo 一致
+        return array_slice($rows, 0, self::CREATED_SINCE_LIMIT);
+    }
+
     public function transaction(callable $fn)
     {
         // 模擬交易復原：失敗時把案件與歷程還原成開始前的樣子

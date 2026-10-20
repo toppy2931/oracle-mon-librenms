@@ -191,6 +191,42 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
         for name in web:
             self.assertRegex(name, r"^(oracle|ioc)-", "html/ 底下的頁面檔名要有 oracle- 或 ioc- 前綴：" + name)
 
+    def test_every_library_class_is_loaded_by_bootstrap(self):
+        """新增類別卻忘了加進 bootstrap.php 的載入清單，單元測試與網頁會在載入時才炸（Class not found）。"""
+        boot = (ROOT / "librenms" / "ioc" / "bootstrap.php").read_text(encoding="utf-8")
+        listed = set(re.findall(r"'(\w+)'", re.search(r"foreach \(\[(.*?)\] as \$f\)", boot, re.S).group(1)))
+        files = {p.stem for p in (ROOT / "librenms" / "ioc").glob("*.php")} - {"bootstrap", "endpoint"}   # endpoint 只在網頁環境載入
+        self.assertEqual(files - listed, set(), "bootstrap.php 沒有載入這些檔案")
+        self.assertEqual(listed - files, set(), "bootstrap.php 列了不存在的檔案")
+
+    def test_portal_navigation_marks_pages_without_data_as_unavailable(self):
+        """簡報有、但沒有資料來源的頁面要顯示成停用（尚未提供），不能放個能點的空白頁或假數字。"""
+        src = (ROOT / "librenms" / "html" / "ioc-portal.php").read_text(encoding="utf-8")
+        nav = re.search(r"const NAV = \[(.*?)\n  \];", src, re.S).group(1)
+        for key in ("risk", "config", "audit", "reports"):
+            self.assertRegex(nav, r"key: '%s'[^}]*off: true" % key, key)
+        for key in ("overview", "cases", "security"):
+            self.assertNotRegex(nav, r"key: '%s'[^}]*off: true" % key, key)
+            self.assertIn('id="view-%s"' % key, src, key)
+
+    def test_portal_nav_and_topbar_are_updated_in_place(self):
+        """頂列每秒更新、導覽每次切頁都更新：整個重建會讓鍵盤焦點掉光，按不到鈴鐺與導覽按鈕。"""
+        src = (ROOT / "librenms" / "html" / "ioc-portal.php").read_text(encoding="utf-8")
+        for name in ("renderNav", "renderTopbar"):
+            body = re.search(r"function %s\(\) \{(.*?)\n  \}\n" % name, src, re.S).group(1)
+            self.assertNotIn("replaceChildren", body, name + " 不能整個重建節點，只能就地更新文字與屬性")
+        self.assertIn("buildNav(); buildTopbar();", src, "導覽與頂列要在啟動時建立一次")
+
+    def test_portal_site_level_names_come_from_the_server(self):
+        portal = (ROOT / "librenms" / "html" / "ioc-portal.php").read_text(encoding="utf-8")
+        self.assertIn("'siteLevel'    => Ioc\\Fleet::LEVELS", portal)
+        self.assertIn("const SITE_LABEL = CFG.labels.siteLevel", portal, "站點等級名稱不要在畫面另外寫一份")
+
+    def test_availability_null_is_not_turned_into_zero(self):
+        """LibreNMS 的可用率欄位為 NULL 是「沒有資料」；(float) null 會變成 0% 把整體可用率拉低。"""
+        src = (ROOT / "librenms" / "ioc" / "endpoint.php").read_text(encoding="utf-8")
+        self.assertRegex(src, r"availability_perc === null\)\s*\{\s*continue;")
+
     def test_case_status_labels_cover_the_flow(self):
         labels = (ROOT / "librenms" / "ioc" / "Labels.php").read_text(encoding="utf-8")
         flow = (ROOT / "librenms" / "ioc" / "CaseFlow.php").read_text(encoding="utf-8")

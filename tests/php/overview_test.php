@@ -179,6 +179,7 @@ test('登入類來源一個都沒接入時，可疑登入事件是「無法判�
     assertSame(null, $k['suspicious']['value']);
     assertSame('unknown', $k['suspicious']['state']);
     assertTrue(mb_strpos($k['suspicious']['sub'], '尚未接入任何登入類來源') !== false, $k['suspicious']['sub']);
+    assertSame('尚未接入', $k['suspicious']['na'], '大字寫「尚未接入」，不是「無法取得」（那是讀取失敗）');
     assertSame(['Windows 伺服器／網域', 'Linux 主機', '網路設備'], $o['login_sources']['missing']);
     assertSame(true, $o['login_sources']['all_missing']);
     assertSame('1/4', $k['sources']['value']);

@@ -114,6 +114,32 @@ final class PdoCaseRepo implements CaseRepo
         return $out;
     }
 
+    public function countOpenBySeverity(): array
+    {
+        $marks = [];
+        $params = [];
+        foreach (CaseFlow::OPEN as $i => $s) {
+            $marks[] = ':s' . $i;
+            $params['s' . $i] = $s;
+        }
+        $st = $this->pdo->prepare('SELECT severity, COUNT(*) AS n FROM ioc_cases WHERE status IN (' . implode(', ', $marks) . ') GROUP BY severity');
+        $st->execute($params);
+        $out = [];
+        foreach ($st->fetchAll(\PDO::FETCH_ASSOC) as $r) {
+            $out[$r['severity']] = (int) $r['n'];
+        }
+        return $out;
+    }
+
+    public function createdSince(string $utc): array
+    {
+        // 有筆數上限（趨勢圖只需要日期與嚴重性，案件量再大也不能讓一次畫面載入讀爆）。
+        // 由新到舊排序再截：超過上限時被捨棄的是最舊的，不是最近幾天（呼叫端靠筆數判斷是否截斷）
+        $st = $this->pdo->prepare('SELECT created_at, severity FROM ioc_cases WHERE created_at >= :since ORDER BY created_at DESC LIMIT ' . (int) self::CREATED_SINCE_LIMIT);
+        $st->execute(['since' => $utc]);
+        return $st->fetchAll(\PDO::FETCH_ASSOC);
+    }
+
     public function transaction(callable $fn)
     {
         if ($this->depth > 0) {          // 已在交易內就直接執行，由最外層負責 commit／rollback
