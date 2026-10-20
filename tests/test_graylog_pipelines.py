@@ -40,11 +40,28 @@ class RuleGenerationTests(unittest.TestCase):
     def test_pipeline_source_references_all_its_rules(self):
         for title, rules in gp.pipelines().items():
             src = gp.pipeline_source(title, rules)
-            self.assertTrue(src.startswith('pipeline "%s"\nstage 0 match either' % title))
+            self.assertTrue(src.startswith('pipeline "%s"\nstage %d match either' % (title, gp.stage_of(title))))
             self.assertTrue(src.endswith("\nend"))
             for rtitle, _ in rules:
                 self.assertIn('  rule "%s"' % rtitle, src)
-            self.assertEqual(src.count("stage "), 1, "只能有 stage 0，見檔頭設計取捨")
+            self.assertEqual(src.count("stage "), 1, "每條 pipeline 只能有一個 stage，見檔頭設計取捨")
+
+    def test_firewall_runs_after_fortigate_normalize_others_at_stage_0(self):
+        """既有 fortigate_normalize 在 stage 0、1 產生 srcip/dstip/action，防火牆規則必須排在它們之後。"""
+        fw = gp.PIPELINE_PREFIX + "Firewall"
+        self.assertGreaterEqual(gp.stage_of(fw), 2)
+        for title in gp.pipelines():
+            if title != fw:
+                self.assertEqual(gp.stage_of(title), 0, title)
+
+    def test_firewall_prefers_normalized_fields_and_falls_back_to_cef_raw(self):
+        base = dict(gp.firewall_rules())["ioc-fw-base"]
+        self.assertIn("to_string($message.srcip, to_string($message.src,", base)
+        self.assertIn("to_string($message.dstip, to_string($message.dst,", base)
+        deny = dict(gp.firewall_rules())["ioc-fw-deny"]
+        self.assertIn("to_string($message.action, to_string($message.act,", deny)
+        for word in ("deny", "drop", "block", "reject"):   # blocked、dropped 等 UTM 動作也要命中
+            self.assertIn('"%s"' % word, deny)
 
     def test_windows_event_id_and_user_use_both_shipper_field_names(self):
         src = dict(gp.windows_rules())["ioc-win-4625"]
@@ -137,6 +154,80 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertIn("APPLY: changes=0", out)
         self.assertEqual(self.gl.mutations(), [])
+
+    # ── 防火牆日誌在自訂 stream（移出 Default Stream）的情境 ──
+    FW_STREAM = "6a33ef93a68ab16ef006f414"
+    FW_TITLE = gp.PIPELINE_PREFIX + "Firewall"
+
+    def fw_id(self):
+        return next(i for i, p in self.gl.pipes.items() if p["title"] == self.FW_TITLE)
+
+    def test_firewall_also_connected_to_named_stream_others_only_default(self):
+        env = dict(self.env, GRAYLOG_FIREWALL_STREAMS="FortiGate Syslog")
+        code, out, _ = run(["apply"], env)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.gl.conns[self.FW_STREAM], [self.fw_id()])
+        self.assertEqual(len(self.gl.conns[STREAM]), self.n_pipes)
+        self.assertIn("APPLY: changes=%d" % (self.n_rules + 2 * self.n_pipes + 1), out)
+
+    def test_stream_can_be_given_by_id_and_default_is_not_duplicated(self):
+        env = dict(self.env, GRAYLOG_FIREWALL_STREAMS="%s, Default Stream" % self.FW_STREAM)
+        code, out, _ = run(["apply"], env)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.gl.conns[self.FW_STREAM], [self.fw_id()])
+        self.assertEqual(self.gl.conns[STREAM].count(self.fw_id()), 1)
+
+    def test_second_apply_with_extra_stream_is_idempotent(self):
+        env = dict(self.env, GRAYLOG_FIREWALL_STREAMS="FortiGate Syslog")
+        run(["apply"], env)
+        self.gl.requests.clear()
+        code, out, _ = run(["apply"], env)
+        self.assertEqual(code, 0)
+        self.assertIn("APPLY: changes=0", out)
+        self.assertEqual(self.gl.mutations(), [])
+
+    def test_unknown_stream_name_fails_before_any_change_and_lists_known_streams(self):
+        env = dict(self.env, GRAYLOG_FIREWALL_STREAMS="FortiGate Sylog")   # 打錯字
+        code, _, err = run(["apply"], env)
+        self.assertEqual(code, 1)
+        self.assertIn("找不到 stream", err)
+        self.assertIn("FortiGate Syslog", err)
+        self.assertEqual(self.gl.mutations(), [])
+
+    def test_upgrade_from_stage_0_default_only_to_stage_2_plus_fortigate_stream(self):
+        """真實環境的升級路徑：第一版已套用（防火牆 stage 0、只連 Default），改設定後重跑。"""
+        run(["apply"], self.env)
+        fid = self.fw_id()
+        self.gl.pipes[fid]["source"] = self.gl.pipes[fid]["source"].replace("stage 2", "stage 0")
+        self.gl.requests.clear()
+        code, out, _ = run(["apply"], dict(self.env, GRAYLOG_FIREWALL_STREAMS="FortiGate Syslog"))
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.gl.mutations(), [("PUT", "/api/system/pipelines/pipeline/" + fid),
+                                               ("POST", "/api/system/pipelines/connections/to_pipeline")])
+        self.assertIn("stage 2 match either", self.gl.pipes[fid]["source"])
+        self.assertIn(fid, self.gl.conns[STREAM])           # 原本連的 Default Stream 沒被拿掉
+        self.assertIn(fid, self.gl.conns[self.FW_STREAM])
+
+    def test_manually_added_connections_are_never_removed(self):
+        run(["apply"], self.env)
+        self.gl.conns[self.FW_STREAM] = [self.fw_id()]       # 有人手動多連了一個 stream
+        self.gl.requests.clear()
+        code, out, _ = run(["apply"], self.env)               # 設定檔沒提到它
+        self.assertEqual(code, 0)
+        self.assertEqual(self.gl.mutations(), [])
+        self.assertEqual(self.gl.conns[self.FW_STREAM], [self.fw_id()])
+
+    def test_unexpected_streams_response_fails_closed(self):
+        orig = self.gl.route
+        self.gl.route = lambda m, p, b: (200, []) if p == "/api/streams" else orig(m, p, b)
+        code, _, err = run(["apply"], dict(self.env, GRAYLOG_FIREWALL_STREAMS="FortiGate Syslog"))
+        self.assertEqual(code, 1)
+        self.assertIn("非預期的回應格式", err)
+        self.assertEqual(self.gl.mutations(), [])
+
+    def test_no_streams_lookup_when_not_configured(self):
+        run(["plan"], self.env)
+        self.assertNotIn("/api/streams", [p for _, p, _ in self.gl.requests])
 
     def test_plan_is_read_only(self):
         code, out, _ = run(["plan"], self.env)

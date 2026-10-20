@@ -7,16 +7,17 @@
 
 | 項目 | 狀態 | 說明 |
 |---|---|---|
-| 欄位標準化 pipeline | ✅ 已寫、本機測過邏輯、**未對真實 Graylog 驗證** | `system/graylog-pipelines.py`（32 條規則 / 4 條 pipeline），驗證清單見 §4 |
-| 套用與回滾工具 | ✅ | `apply`（冪等）／`plan`（唯讀）／`remove`（只刪本工具建立的） |
-| 樣本日誌與重播 | ✅ | `tools/replay-sample-logs.py`、`tests/fixtures/sample-logs.jsonl`（14 筆，每筆標預期欄位） |
+| 欄位標準化 pipeline | ✅ 已在 monitor-vm 套用並用重播資料驗證；⏳ **防火牆規則對真實 FortiGate 流量尚待驗證** | `system/graylog-pipelines.py`（32 條規則 / 4 條 pipeline），驗證結果見 §4 |
+| 套用與回滾工具 | ✅ | `apply`（冪等）／`plan`（唯讀）／`remove`（只刪本工具建立的）；防火牆可另連到指定 stream |
+| 樣本日誌與重播 | ✅ | `tools/replay-sample-logs.py`、`tests/fixtures/sample-logs.jsonl`（15 筆，每筆標預期欄位） |
+| 既有 Graylog 設定紀錄 | ✅ | [existing-graylog-config.md](existing-graylog-config.md)：monitor-vm 上 FortiGate 的 pipeline、規則、stream 設定（原本 repo 裡沒有） |
 | 上線前自檢 | ✅ | `system/ioc-preflight.sh`（唯讀）：出廠密碼、HTTP/HTTPS、設定檔權限、pipeline 是否已套用 |
 | 自動部署 | ✅ | `install.sh`／`update.sh` 在 `graylog-api.conf` 存在時自動 `apply`，不存在就略過 |
 | 規格疑義、附表 A、清冊 | 📝 草稿（§6～§8） | 要機關回覆或填列 |
 | 全面 HTTPS | ⏸ 待實機與決定 | §9 |
 | Graylog 唯讀 Token | ⏸ 待實機驗證權限 | §9 |
 | 出廠密碼更換 | ⏸ 偵測已做，更換由你執行 | §9 |
-| Graylog 其他設定匯出（Input／extractor／GeoIP） | ⏸ 待實機 | §9 |
+| Graylog 其他設定匯出（Input／GeoIP／Lookup Table／Output） | ⏸ 待實機（FortiGate 的 pipeline／stream 已記錄） | §9 |
 
 跑測試（不需要 Graylog）：
 
@@ -64,7 +65,7 @@ pipeline 把來源日誌寫入下列欄位，**原始欄位不動**。中文入�
 |---|---|---|
 | Windows 事件 | Winlogbeat（`winlog_*`）與 NXLog（`EventID`、`TargetUserName`…）兩種欄位名 | 20 個事件 ID，清單在 `WIN_EVENTS` |
 | Linux | sshd 登入失敗／成功、sudo | 以 rsyslog 進 Graylog 的 `message` 文字比對 |
-| 防火牆 | 沿用既有 FortiGate CEF extractor 的 `src` `dst` `act` | 其他 CEF 設備若也有這三欄也會套用 |
+| 防火牆 | 讀既有 pipeline `fortigate_normalize` 整理過的 `srcip` `dstip` `action`，找不到再退回 CEF 原始的 `src` `dst` `act` | 防火牆 pipeline 排 **stage 2**（要在 `fortigate_normalize` 的 stage 0、1 之後）。FortiGate 訊息在自訂 stream，要設 `GRAYLOG_FIREWALL_STREAMS`（§3）。`act` 不是 deny／allow 類（例如 `close`）的訊息只有 `log_type`、`src_ip`、`dst_ip`、`host_name`，**沒有 `event_action`**。實測 1 小時 15 萬筆：阻擋類 61%、允許類 30%、其他 9%（連線結束與統計，刻意不歸類） |
 | 網路設備 | Cisco IOS 風格的登入失敗／成功、連接埠上下線 | **其他廠牌（Extreme、Junos、…）要有真實日誌樣本才能寫** |
 | PaloAlto、AIX、JBoss／Tomcat | 未做 | 同樣要先拿到樣本 |
 
@@ -86,6 +87,9 @@ sudo install -m 600 /dev/null /etc/oracle-mon/graylog-api.conf
 GRAYLOG_URL=http://127.0.0.1:9000
 GRAYLOG_USER=admin
 GRAYLOG_PASS=（admin 密碼）
+# 防火牆日誌所在的 stream（標題或 ID，逗號分隔）。monitor-vm 的 FortiGate 訊息被路由到這個 stream
+# 並移出 Default Stream，不設的話防火牆規則看不到真實流量。找不到這個 stream 時工具會報錯並列出現有的
+GRAYLOG_FIREWALL_STREAMS=FortiGate Syslog
 # HTTPS 用自簽或內部 CA 時指定 PEM；工具沒有「關閉憑證驗證」的選項（IS-043）
 # GRAYLOG_CA_FILE=/etc/graylog/server/server.crt
 ```
@@ -110,19 +114,23 @@ python3 /opt/oracle-mon-librenms/system/graylog-pipelines.py remove
 
 ## 4. 實機驗證清單（我在本機驗證不到的假設）
 
-本機測的是工具邏輯（對一個假的 Graylog API），以下這些**只有在真實 Graylog 7.1 上才能確認**。
+本機測的是工具邏輯（對一個假的 Graylog API），這些假設**只有在真實 Graylog 7.1 上才能確認**。
 第一次套用請先在測試環境做，不要直接在正式 Graylog 上試。
 
-| # | 假設 | 怎麼確認 | 不成立時 |
+最後一欄是 2026-10-20 在 monitor-vm（Graylog 7.1）的實測結果。
+
+| # | 假設 | 怎麼確認 | 實測結果 |
 |---|---|---|---|
-| 1 | pipeline／規則／連線的 API 路徑與 body 格式（`/api/system/pipelines/rule`、`/pipeline`、`/connections/to_pipeline`） | `apply` 回傳 400／404 時工具會印出 Graylog 的錯誤訊息 | 在 Graylog 的 API Browser 查實際格式，改 `system/graylog-pipelines.py` 的 `P_RULE` 等常數與 body |
-| 2 | 規則語法（`to_string(欄位, 預設值)` 巢狀、`set_fields(grok(...))`、`!(...)`） | `apply` 建立規則時 Graylog 會解析，語法錯誤回 400；也可在 System → Pipelines → Manage rules 看 | 照錯誤訊息改產生規則的函式 |
-| 3 | Windows 欄位名稱 | 搜尋 `_exists_:winlog_event_id` 與 `_exists_:EventID`，看實際是哪一個 | 把實際欄位名加進 `windows_rules()` 裡的 `coalesce(...)` |
-| 4 | extractor 先於 pipeline 執行（防火牆規則要用 extractor 產生的 `src`） | System → Configurations → Message Processors：Message Filter Chain 要在 Pipeline Processor 之前（預設如此，既有 GeoIP pipeline 也依賴同樣順序） | 調整順序 |
-| 5 | 流量都留在 Default Stream | Input 精靈會把訊息導到自訂 stream，pipeline 就不會處理（CLAUDE.md「Graylog Input 精靈的陷阱」） | 改 `GRAYLOG_STREAM_ID` 指向實際 stream，或移除精靈建立的路由規則 |
-| 6 | 空字串欄位不會被儲存（取不到值時 `set_field` 等於沒設） | 重播樣本後，第 2、5 筆的 `src_ip` 應該不存在 | 規則改成先判斷再設 |
-| 7 | 新欄位不與既有欄位型別衝突 | 套用前搜尋 `_exists_:severity`、`_exists_:user_name`、`_exists_:src_ip`；套用後看 System → Indices 的 index failures | 改欄位名或加 index set 自訂欄位型別 |
-| 8 | Graylog 的 grok 預設 pattern（`USERNAME`、`IP`、`WORD`、`DATA`）可用 | 重播後 Linux、網路設備的 `user_name`、`src_ip` 有值 | 在 System → Grok Patterns 補 |
+| 1 | pipeline／規則／連線的 API 路徑與 body 格式 | `apply` 回傳 400／404 時工具會印出 Graylog 的錯誤訊息 | ✅ 建立規則、pipeline、連到 stream 都成功；列表 API 回傳格式正確。⏳ `GET /connections` 的格式尚未證實（冪等判斷用）：再跑一次 `plan` 應為 `changes=0` |
+| 2 | 規則語法（巢狀 `to_string`、`set_fields(grok(...))`、`!(...)`） | `apply` 建立規則時 Graylog 會解析；重播後看欄位 | ✅ 重播結果與預期相符（畫面可見的 12／14 筆全部正確，其餘 2 筆待確認） |
+| 3 | Windows 欄位名稱 | 搜尋 `_exists_:winlog_event_id` 與 `_exists_:EventID` | ⏳ 這台**沒有**真實的 Windows 事件（兩者都是未知欄位）。Winlogbeat 與 NXLog 兩種格式都只用重播驗證過 |
+| 4 | 防火牆規則需要的欄位在它執行時已經存在 | 查既有 pipeline 的 stage（[existing-graylog-config.md](existing-graylog-config.md)） | ⚠️ 這台的 FortiGate 欄位是 pipeline `fortigate_normalize`（stage 0、1）產生，**不是 extractor**。同一 stream 的 pipeline 依 stage 編號一起往下跑，所以防火牆 pipeline 排 stage 2。⏳ 對真實流量的效果待驗證 |
+| 5 | 流量都留在 Default Stream | 看訊息詳情的「Routed into streams」 | ❌ **不成立**：FortiGate 訊息只在 `FortiGate Syslog` stream，且該 stream 移出了 Default Stream。已加 `GRAYLOG_FIREWALL_STREAMS`。GELF、Linux、網路設備、Windows 仍走 Default Stream |
+| 6 | 空字串欄位不會被儲存（取不到值時 `set_field` 等於沒設） | 缺帳號欄位的 Windows 事件 | ⏳ 樣本未涵蓋。本機登入 `-` 沒有 `src_ip` 已驗證，但那是 `when` 條件排除，不是這個行為 |
+| 7 | 新欄位不與既有欄位型別衝突 | 搜尋 `_exists_:severity` 等 | ✅ `severity`、`user_name`、`src_ip`、`EventID`、`winlog_event_id` 都是未知欄位，沒有衝突。✅ 重播後四條 IOC pipeline 的 `Processing Errors` 仍是 0（total 0）：來源欄位不存在時 `to_string(欄位, "")` 不會產生處理錯誤 |
+| 8 | grok 預設 pattern（`USERNAME`、`IP`、`WORD`、`DATA`）可用 | 重播後 Linux、網路設備的 `user_name`、`src_ip` 有值 | ✅ |
+| 9 | `act` 為 `close`、`timeout` 等的訊息如何處理 | FortiGate Syslog stream 的 `action` 分布（`/api/search/aggregate`） | ✅ 1 小時 151,578 筆：阻擋類 60.9%（`deny`、`blocked`）、允許類 29.9%（`pass`、`accept`、`passthrough`）、其他 9.2%（`close`、`client-rst`、`server-rst`、`timeout`、`dns`、`ip-conn`、統計類）。其他是連線結束與統計，非安全事件，**刻意不歸類**。詳見 [existing-graylog-config.md](existing-graylog-config.md) |
+| 10 | Phase 1 要用的 Graylog 搜尋彙整 API（`POST /api/search/aggregate`） | 用相對時間、指定 stream 和 `_exists_` 查詢取欄位分布 | ✅ 回傳 `schema`＋`datarows`＋`metadata`。查詢用 `_exists_:欄位`；在 Graylog 介面搜尋框單打 `*` 會被 7.1 擋下（`'*' or '?' not allowed as first character`），程式裡不要用 |
 
 驗證流程：
 
@@ -131,7 +139,8 @@ python3 tools/replay-sample-logs.py --target <測試用 Graylog>:12201 --proto u
 ```
 
 到 Graylog 搜尋 `ioc_demo:true`，逐筆對照印出的預期欄位。**重播工具沒有預設目標**，避免誤打正式環境。
-用 TCP 的 GELF Input 時加 `--proto tcp`。文件裡兩處對 GELF Input 的描述不同（UDP 12201、TCP 12201），以實際為準。
+monitor-vm 的 GELF Input 是 **UDP 12201**（`ss -lntu | grep 12201` 只有 udp，且同一個埠會出現多行，是 Graylog 的多接收執行緒）。
+若 Input 是 TCP 就加 `--proto tcp`。重播的 GELF 訊息會經過 Default Stream 的 pipeline，**不會**經過 `FortiGate Syslog` stream。
 
 ## 5. 上線前自檢
 
@@ -222,5 +231,5 @@ Flow 磁碟 ≈ 每日 Flow 筆數 × 每筆索引大小 × 保存天數 × (1 +
 | 全面 HTTPS（LibreNMS 80、Graylog 9000 → TLS） | 會改 nginx 與 Graylog 的連線方式，選單、jt-glogarch、LibreNMS 的 Graylog 整合都會受影響；憑證依機關政策（IS-042） | 決定用機關 CA 還是自簽；給一台測試 VM。`graylog-pipelines.py` 已支援 `GRAYLOG_CA_FILE`，切 HTTPS 時只要改設定檔 |
 | Graylog 唯讀 Token（給 Phase 1 入口用） | Graylog 的「Reader」角色對 stream 與搜尋 API 的實際權限要實機確認；建錯會變成權限過大或查不到資料 | Phase 1 開始時在測試 VM 上建立並驗證 |
 | 出廠密碼更換 | 改 `server.conf` 的 `root_password_sha2` 並重啟 Graylog，影響 jt-glogarch 與 LibreNMS 的整合帳密 | 由你執行；`ioc-preflight.sh` 會偵測是否還在用出廠密碼 |
-| Graylog 其他設定匯出（Input、extractor、GeoIP、Output） | 這些只存在樣板機，repo 裡沒有；要從 Graylog 介面（System → Content Packs → Create）匯出 | 在樣板機匯出後放進 `graylog/content-packs/`，我再接進 `install.sh` |
+| Graylog 其他設定匯出（Input、GeoIP、Lookup Table、Output） | 這些只存在實機，repo 裡沒有；FortiGate 的 pipeline、規則、stream 已記錄在 [existing-graylog-config.md](existing-graylog-config.md)，其餘要從 Graylog 介面（System → Content Packs → Create）匯出 | 匯出後放進 `graylog/content-packs/`，我再接進 `install.sh` |
 | 其他廠牌網路設備與 PaloAlto 的日誌規則 | 沒有真實日誌樣本，格式猜不準 | 提供各廠牌的日誌樣本（遮掉敏感資訊） |
