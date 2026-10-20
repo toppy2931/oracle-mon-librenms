@@ -1,11 +1,14 @@
 <?php
 /**
- * 事件案資料層的自我測試：在真正的 MariaDB 上走一遍建立、狀態流程、歷程、交易復原與中文／emoji 讀寫。
+ * 入口資料層的自我測試：在真正的 MariaDB 上走一遍事件案（建立、狀態流程、歷程、交易復原、中文／emoji 讀寫）
+ * 與設定（風險等級門檻的儲存、覆寫、異動紀錄、權限）。
  * 本機的單元測試用的是記憶體版資料存取，驗證不到 SQL；這支補上那一塊，要在 LibreNMS 主機上跑。
  *
  *   sudo -u librenms php system/ioc-db-selftest.php
  *
- * 只會碰自己建立的資料（標題以「[IOC 自我測試]」開頭），結束時一定清掉，不會動到正式的事件案。
+ * 事件案只會碰自己建立的資料（標題以「[IOC 自我測試]」開頭），結束時一定清掉，不會動到正式的事件案。
+ * 設定的檢查全部在一個永遠 rollBack 的交易裡，正式的風險等級門檻與異動紀錄不會被改到，
+ * 網頁（別的連線）也看不到測試用的值；最後一項會確認回復後的內容跟測試前一樣。
  * 環境變數（測試用）：LIBRENMS_DIR、IOC_LIB_DIR（可指向 repo 內的 librenms/ioc）
  */
 $librenms = getenv('LIBRENMS_DIR') ?: '/opt/librenms';
@@ -18,13 +21,19 @@ $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
 require "$lib/bootstrap.php";
 
 use Ioc\Access;
+use Ioc\AccessDenied;
 use Ioc\CaseService;
 use Ioc\InvalidTransition;
 use Ioc\PdoCaseRepo;
+use Ioc\PdoSettingsRepo;
+use Ioc\SettingsService;
+use Ioc\ValidationError;
 
 $pdo  = Illuminate\Support\Facades\DB::connection()->getPdo();
 $repo = new PdoCaseRepo($pdo);
 $svc  = new CaseService($repo);
+$settingsRepo = new PdoSettingsRepo($pdo);
+$settings     = new SettingsService($settingsRepo);
 $H    = Access::HANDLER;
 $tag  = '[IOC 自我測試]';
 $key  = 'selftest-' . bin2hex(random_bytes(4));
@@ -107,6 +116,55 @@ try {
         } catch (RuntimeException $e) {
         }
         $assert($repo->findByDedupKey($k) === null, '交易沒有復原');
+    });
+    // 設定的檢查全部在「一個永遠回復的交易」裡跑：不論測試成敗，或程式中途被砍（SSH 斷線、kill），
+    // 正式的風險等級門檻與異動紀錄都不會被動到，網頁（別的連線）也看不到測試用的值。
+    // PdoSettingsRepo::transaction() 會加入這個外層交易，所以 saveRisk() 照常運作。
+    $settingsBefore = null;
+    $check('設定：資料表可讀，並記下測試前的狀態', function () use ($settingsRepo, &$settingsBefore) {
+        $settingsBefore = ['rows' => $settingsRepo->all(), 'history' => count($settingsRepo->recentHistory(1000000))];
+    });
+    $pdo->beginTransaction();
+    try {
+        $check('設定：儲存風險等級門檻、讀回、覆寫與異動紀錄（驗證 upsert 與 LIMIT 的 SQL）', function () use ($settings, $H, $assert) {
+            $r = $settings->saveRisk(['risk_low' => '93', 'risk_medium' => '71'], 'selftest', $H);
+            $assert($r['low'] === 93 && $r['medium'] === 71 && $r['custom'] === true && $r['invalid'] === false, '儲存後讀回的值不對');
+            $assert($r['updated_by'] === 'selftest' && preg_match('/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/', (string) $r['updated_at']) === 1, '最後修改的人或時間不對');
+            $assert($settings->riskThresholds($H) === ['low' => 93, 'medium' => 71], 'riskThresholds 與儲存的不一致');
+            $settings->saveRisk(['risk_low' => '94', 'risk_medium' => '71'], 'selftest', $H);   // 已有資料列：走 ON DUPLICATE KEY UPDATE
+            $assert($settings->riskThresholds($H) === ['low' => 94, 'medium' => 71], '覆寫沒有生效');
+            $h = $settings->riskSettings($H)['history'];
+            $assert(count($h) >= 1 && $h[0]['actor'] === 'selftest' && $h[0]['from'] === '93' && $h[0]['to'] === '94', '最新一筆異動紀錄不對（由新到舊）');
+        });
+        $check('設定：沒有變動就不寫、不合法的值被擋下且資料不變', function () use ($settings, $settingsRepo, $H, $assert) {
+            $before = count($settingsRepo->recentHistory(1000000));
+            $settings->saveRisk(['risk_low' => '94', 'risk_medium' => '71'], 'selftest', $H);
+            $assert(count($settingsRepo->recentHistory(1000000)) === $before, '值沒變卻多了一筆紀錄');
+            try {
+                $settings->saveRisk(['risk_low' => '60', 'risk_medium' => '70'], 'selftest', $H);   // 中等門檻不能大於低風險門檻
+                throw new RuntimeException('應該被拒絕');
+            } catch (ValidationError $e) {
+            }
+            $assert($settings->riskThresholds($H) === ['low' => 94, 'medium' => 71], '被拒絕的儲存不能改到資料');
+        });
+        $check('設定：檢視者只能讀不能改', function () use ($settings, $assert) {
+            $assert($settings->riskThresholds(Access::VIEWER) === ['low' => 94, 'medium' => 71], '檢視者應能讀到目前的門檻');
+            try {
+                $settings->saveRisk(['risk_low' => '90', 'risk_medium' => '70'], 'viewer', Access::VIEWER);
+                throw new RuntimeException('檢視者不應該能儲存');
+            } catch (AccessDenied $e) {
+            }
+            $assert($settings->riskThresholds(Access::VIEWER) === ['low' => 94, 'medium' => 71], '被拒絕的儲存不能改到資料');
+        });
+    } finally {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+    }
+    $check('設定：測試結束後設定值與異動紀錄跟測試前完全一樣（交易已回復）', function () use ($settingsRepo, &$settingsBefore, $assert) {
+        $assert($settingsBefore !== null, '測試前的狀態沒有記下來（上面的資料表檢查失敗）');
+        $assert($settingsRepo->all() === $settingsBefore['rows'], '設定值沒有復原');
+        $assert(count($settingsRepo->recentHistory(1000000)) === $settingsBefore['history'], '異動紀錄沒有復原');
     });
 } finally {
     // 只清自己的資料：歷程先刪（有外鍵），再刪案件

@@ -19,12 +19,17 @@ use Ioc\GraylogUnavailable;
 use Ioc\LandscapeService;
 use Ioc\OverviewService;
 use Ioc\PdoCaseRepo;
+use Ioc\PdoSettingsRepo;
+use Ioc\SettingsService;
 use Ioc\UnavailableLogSource;
 
 const IOC_READER_CONF = '/etc/oracle-mon/graylog-reader.conf';
-const IOC_OVERVIEW_CACHE = 'ioc:overview:v2:';     // 後面接 live 或 demo；總覽的伺服器端快取（20 秒）。內容形狀改了就要升版號
+const IOC_OVERVIEW_CACHE = 'ioc:overview:v3:';     // 後面接 live 或 demo；總覽的伺服器端快取（20 秒）。內容形狀改了就要升版號
 
-/** 事件案有異動就讓總覽快取失效，否則 KPI「待處理事件」會比（即時查詢的）分頁角標落後最多 20 秒。 */
+/**
+ * 事件案或影響總覽內容的設定（例如風險等級門檻）有異動就讓總覽快取失效，
+ * 否則 KPI「待處理事件」會比（即時查詢的）分頁角標落後最多 20 秒，改了門檻的畫面也還是舊等級。
+ */
 function ioc_overview_cache_forget(): void
 {
     foreach (['live', 'demo'] as $k) {
@@ -105,6 +110,11 @@ function ioc_handle(\Throwable $e): void
 function ioc_service(): CaseService
 {
     return new CaseService(new PdoCaseRepo(DB::connection()->getPdo()));
+}
+
+function ioc_settings(): SettingsService
+{
+    return new SettingsService(new PdoSettingsRepo(DB::connection()->getPdo()));
 }
 
 /**
@@ -196,7 +206,13 @@ function ioc_overview(bool $demo, string $level): array
         error_log('[ioc] cases: ' . $e->getMessage());
         $cases = $open = $latest = $trend = null;              // 例如資料表還沒建立：事件案相關的區塊整組標「無法取得」
     }
+    try {
+        $thresholds = ioc_settings()->riskThresholds($level);
+    } catch (\Throwable $e) {
+        error_log('[ioc] risk thresholds: ' . $e->getMessage());
+        $thresholds = null;                       // 資料表還沒建立或值壞了：風險分數只顯示分數、不判定等級
+    }
     $overview = (new OverviewService($logs, $demo))->build($fleet === null ? null : $fleet->legacy(), $cases);
-    $overview['landscape'] = (new LandscapeService())->build($fleet, $cases, $open, $latest, $trend, $overview['coverage']);
+    $overview['landscape'] = (new LandscapeService())->build($fleet, $cases, $open, $latest, $trend, $overview['coverage'], $thresholds);
     return $overview;
 }

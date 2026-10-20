@@ -337,7 +337,7 @@ FortiGate CEF 格式的 `key=value` 內容用 **6 個獨立 Grok pattern Extract
 
 ## 中文入口：維運總覽與事件案（智慧維運中心 Phase 1）
 
-`/ioc-portal.php`（`ioc-data.php`、`ioc-cases.php`）。設計、權限矩陣、各區塊資料來源、VM 驗證步驟見 [docs/ioc/phase1.md](docs/ioc/phase1.md)；提案簡報要求的畫面項目（外框、總覽、事件詳情、弱點、組態、稽核）與各項的資料來源、整合順序見 [docs/ioc/gui-from-proposal-deck.md](docs/ioc/gui-from-proposal-deck.md)。**這一塊不走上面的「PHP → sudo shell」信任鏈**：它只讀（Graylog、LibreNMS 設備）與寫自己的事件案資料表，沒有特權操作。
+`/ioc-portal.php`（`ioc-data.php`、`ioc-cases.php`、`ioc-settings.php`）。設計、權限矩陣、各區塊資料來源、VM 驗證步驟見 [docs/ioc/phase1.md](docs/ioc/phase1.md)；提案簡報要求的畫面項目（外框、總覽、事件詳情、弱點、組態、稽核）與各項的資料來源、整合順序見 [docs/ioc/gui-from-proposal-deck.md](docs/ioc/gui-from-proposal-deck.md)。**這一塊不走上面的「PHP → sudo shell」信任鏈**：它只讀（Graylog、LibreNMS 設備）與寫自己的資料表（事件案、設定），沒有特權操作。
 
 - **邏輯與 LibreNMS 分開**：`librenms/ioc/*.php` 是不依賴 LibreNMS 的純函式庫（裝在 `includes/ioc/`，不在 `html/`，瀏覽器要不到）；只有 `endpoint.php` 與頁面接 LibreNMS（`Auth`、`csrf_token`、資料庫）。新的規則一律寫在函式庫並補 `tests/php/` 的測試；`endpoint.php` 只管登入、角色、CSRF、錯誤回應。
 - **權限在後端**：`admin`＝處理者、`global-read`＝檢視者，`CaseService` 每個方法都先檢查（IS-013）。頁面隱藏按鈕不算權限控管。新增 API 動作時，`tests/test_php.py` 會檢查每支端點都先呼叫 `ioc_begin()`。
@@ -348,14 +348,15 @@ FortiGate CEF 格式的 `key=value` 內容用 **6 個獨立 Grok pattern Extract
 - **Graylog 分組查詢缺值時，欄位值是字串 `(Empty Value)`**（monitor-vm 畫面實測：「alice · (Empty Value)」）。`GraylogClient::rows()` 把分組欄位的這個字串轉成 `null`，入口顯示成空字串；不處理的話畫面會出現假的來源位址，從那一列「建立事件案」還會把它帶進 `subject_ip`（驗證不過）與查詢條件。
 - **「沒有事件」不等於「沒事」**：Windows、Linux、網路設備都沒接入時（正式模式目前只有防火牆有資料），「可疑登入事件」是「無法判斷」而不是綠色的 0，「誰在什麼設備上做了什麼」與「可疑登入的帳號」的空白訊息也會說明哪些來源沒接入。`OverviewService::build()` 的 `login_sources`（`missing`、`all_missing`）就是給畫面用的；新增會產生登入事件的來源類型要同步加進 `LOGIN_SOURCES`。
 - **Graylog 慢或卡住時不能讓頁面 504**：`GraylogClient` 一次畫面載入共用 25 秒的總預算（單次 15 秒），用完後的查詢直接回報「逾時」；沒有這個上限，5 個區塊各等 15 秒會超過 nginx 的 60 秒（同 8f0ce05 修過的 Oracle 探測）。新增區塊要走同一個 `LogSource`，不要另外開連線。
-- **事件案異動要清總覽快取**：總覽有 20 秒伺服器端快取（含事件案件數）；會改件數的動作（建立、狀態變更）要呼叫 `ioc_overview_cache_forget()`，否則 KPI 會落後分頁角標。
+- **事件案與設定異動要清總覽快取**：總覽有 20 秒伺服器端快取（含事件案件數與算好的風險等級）；會改件數的動作（建立、狀態變更）與儲存設定都要呼叫 `ioc_overview_cache_forget()`，否則 KPI 會落後分頁角標、改了門檻的畫面還是舊等級（測試會擋）。
+- **風險等級門檻是使用者可調的設定**（`SettingsService`＋`ioc-settings.php`，入口左側「設定」頁）：預設 85／65（`RiskScore::DEFAULT_THRESHOLDS`，唯一來源），存在 `ioc_settings`，每次變動記 `ioc_settings_history`。**畫面上的說明文字不能寫死門檻數字**，要用伺服器回的 `risk.data.thresholds`（測試會擋）；`RiskScore::compute()` 的門檻參數**沒有預設值**，`LandscapeService::build()` 的也是——門檻讀不到（資料表沒建、值被手動改壞）要傳 `null`，畫面只顯示分數、標「無法判定等級」，**不能套預設值冒充**（不然管理者設了 95 卻顯示低風險）。只有 admin 能存（`SettingsService::saveRisk` 先 `requireHandler`），檢視者看得到但唯讀。要加別的設定就在 `SettingsService` 加讀寫與驗證，同樣先檢查權限、儲存後清快取。
 - **CSS 陷阱**：元素設了 `display:…` 就會蓋掉瀏覽器內建的 `[hidden]{display:none}`，`hidden` 屬性失效；頁面已加全域 `[hidden]{display:none!important}`。LibreNMS 資料表的時間（例如 `devices.last_polled`）是主機本地時間，不是 UTC，轉台北時間要用 `Time::toTaipei($v, 'Y-m-d H:i:s', date_default_timezone_get())`。
 - 之後要加欄位：在 `Schema::statements()` 最後面另加 `ALTER TABLE … ADD COLUMN IF NOT EXISTS`（只改 `CREATE TABLE` 對已部署的主機沒有效果），並同步 `PdoCaseRepo` 的欄位白名單。
-- **總覽的站點、資產、風險分數**（`Fleet`、`RiskScore`、`LandscapeService`，版面參照提案簡報）：「站點」＝LibreNMS 設備的「位置」（Location），沒有指定位置的設備另外計數、不屬於任何站點；**設備自己用 SNMP 回報的預設位置（`Unknown`、`End User Premise.`、`Rack, Room, Building, City, Country [Lat, Lon]`、`Unknown (edit …)`）LibreNMS 也會建成位置，但不是人設定的站點，`Fleet::realLocation()` 視為沒有指定**（monitor-vm 實測：14 台只有 1 個真的站點「機房」）；設備資料由 `endpoint.php` 的 `ioc_fleet()` 讀（`devices` 對 `locations`、`availability` 表），讀不到整個回 null，畫面標「無法取得」。風險分數是**提案版**（權重與扣分都是 `RiskScore` 的常數，測試把數字釘住，要調就一起改測試）；某分項沒資料就不納入、權重重新分配，全都沒有是「無法計算」。簡報有、但沒有資料來源的項目（弱點、組態、稽核…）導覽顯示成停用「尚未提供」，**不要放能點進去的空白頁或假數字**。整體說明與還沒做的項目見 [docs/ioc/gui-from-proposal-deck.md](docs/ioc/gui-from-proposal-deck.md) 第 6 節。
+- **總覽的站點、資產、風險分數**（`Fleet`、`RiskScore`、`LandscapeService`，版面參照提案簡報）：「站點」＝LibreNMS 設備的「位置」（Location），沒有指定位置的設備另外計數、不屬於任何站點；**設備自己用 SNMP 回報的預設位置（`Unknown`、`End User Premise.`、`Rack, Room, Building, City, Country [Lat, Lon]`、`Unknown (edit …)`）LibreNMS 也會建成位置，但不是人設定的站點，`Fleet::realLocation()` 視為沒有指定**（monitor-vm 實測：14 台只有 1 個真的站點「機房」）；設備資料由 `endpoint.php` 的 `ioc_fleet()` 讀（`devices` 對 `locations`、`availability` 表），讀不到整個回 null，畫面標「無法取得」。風險分數是**提案版**（權重與扣分是 `RiskScore` 的常數，測試把數字釘住，要調就一起改測試；**等級門檻不是常數，是設定頁可調的設定**，見下一條）；某分項沒資料就不納入、權重重新分配，全都沒有是「無法計算」。簡報有、但沒有資料來源的項目（弱點、組態、稽核…）導覽顯示成停用「尚未提供」，**不要放能點進去的空白頁或假數字**。整體說明與還沒做的項目見 [docs/ioc/gui-from-proposal-deck.md](docs/ioc/gui-from-proposal-deck.md) 第 6 節。
 - **新增 `librenms/ioc/` 的類別要同步加進 `bootstrap.php` 的載入清單**（測試會擋）；改了 `ioc-data.php` 回傳的形狀要升 `IOC_OVERVIEW_CACHE` 的版號，否則更新後 20 秒內舊快取會讓畫面缺欄位。畫面的 KPI 卡片沒有值時，大字用 `na`（例如「尚未定義」「尚未接入」）說明原因，沒有 `na` 才是「無法取得」（讀取失敗）。
 - **PHP 陷阱：變數後面緊接全形標點（`"$x，"`、`"$x」"`）會讓全形字元被當成變數名稱的一部分**，變數變成未定義、訊息變空。要寫 `{$x}`。`tests/php/run.php` 把任何 PHP 警告當成失敗，就是為了抓這種問題。既有的 `oracle-db-add.php:40` 也有（尚未修）。
-- **資料表**：`ioc_cases`、`ioc_case_history`（`librenms/ioc/Schema.php`，`CREATE TABLE IF NOT EXISTS`，`install.sh`／`update.sh` 自動建立）。時間存 UTC，顯示才轉台北。歷程只增不改不刪。`uninstall.sh` 不會刪它們。
-- **本機驗證**：這台 Windows 沒有 PHP，用 WSL 的 PHP 做語法檢查與不碰資料庫的邏輯測試（`tests/test_php.py` 會自動找 `php` 或 WSL 的 `php`）；**不要在 WSL 裡的 LibreNMS 與資料庫做任何寫入**。LibreNMS 的登入／CSRF／資料庫與事件案 SQL 要到 VM 驗證（`system/ioc-db-selftest.php`）。
+- **資料表**：`ioc_cases`、`ioc_case_history`、`ioc_settings`、`ioc_settings_history`（`librenms/ioc/Schema.php`，`CREATE TABLE IF NOT EXISTS`，`install.sh`／`update.sh` 自動建立；新增資料表要同步加進 `system/ioc-db-setup.php` 的 `$tables`，測試會擋）。時間存 UTC，顯示才轉台北。兩張歷程表只增不改不刪（測試會擋函式庫裡出現 UPDATE／DELETE）。`uninstall.sh` 不會刪它們。
+- **本機驗證**：這台 Windows 沒有 PHP，用 WSL 的 PHP 做語法檢查與不碰資料庫的邏輯測試（`tests/test_php.py` 會自動找 `php` 或 WSL 的 `php`）；**不要在 WSL 裡的 LibreNMS 與資料庫做任何寫入**。LibreNMS 的登入／CSRF／資料庫與事件案、設定的 SQL 要到 VM 驗證（`system/ioc-db-selftest.php`，13 項；設定那幾項在永遠 rollBack 的交易裡跑，`PdoSettingsRepo::transaction()` 會加入外層交易，別改回直接寫正式資料）。
 - 畫面可用暫時的測試台驗證（真的頁面＋真的函式庫＋假資料）：用 `php -S` 載入真的 `ioc-portal.php` 的 HTML，把最前面的登入與設定那段換成測試台的版本，再用瀏覽器操作；這種方式抓到過 `replaceChildren(null)` 會插入文字「null」的錯誤。測試台不進 repo。
 
 ---
@@ -376,4 +377,4 @@ FortiGate CEF 格式的 `key=value` 內容用 **6 個獨立 Grok pattern Extract
 | `oracle-firewall.php` | D | 管理網段 list/add/remove + 列出 ufw 實際允許來源(rules) | `manage-mgmt-cidrs.sh` |
 | `oracle-nasbackup.php` | E | NAS 掛載/同步 status/save/test/sync/unmount | `manage-nas-backup.sh` |
 | `oracle-custom-map.php` | F | Custom Map 自動刷新秒數 get/set/clear（寫 `config.php`） | `set-custom-map-refresh.sh` |
-| `ioc-portal.php` + `ioc-data.php` + `ioc-cases.php` | — | 中文入口：維運總覽、事件案（admin 處理、global-read 唯讀；不走 sudo） | — |
+| `ioc-portal.php` + `ioc-data.php` + `ioc-cases.php` + `ioc-settings.php` | — | 中文入口：維運總覽、事件案、設定（風險等級門檻）（admin 處理與修改、global-read 唯讀；不走 sudo） | — |

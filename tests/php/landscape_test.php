@@ -87,7 +87,7 @@ test('Fleet：monitor-vm 實際的位置資料形狀（14 台：6 台沒位置�
     assertSame(14, $f->total());
     assertSame(13, $f->unlocated());
     assertSame(['機房'], array_column($f->sites(), 'name'));
-    $o = (new LandscapeService(LS_NOW))->build($f, ['new' => 0, 'ack' => 0, 'in_progress' => 0, 'closed' => 0, 'open' => 0], ['high' => 0, 'medium' => 0, 'low' => 0], [], [], lsCoverage());
+    $o = (new LandscapeService(LS_NOW))->build($f, ['new' => 0, 'ack' => 0, 'in_progress' => 0, 'closed' => 0, 'open' => 0], ['high' => 0, 'medium' => 0, 'low' => 0], [], [], lsCoverage(), RiskScore::DEFAULT_THRESHOLDS);
     $k = lsKpi($o);
     assertSame(1, $k['sites']['value']);
     assertTrue(mb_strpos($k['sites']['sub'], '另有 13 台設備沒有有效位置') !== false, $k['sites']['sub']);
@@ -151,19 +151,22 @@ test('Fleet：座標 0,0 當成沒設定；數字字串可用', function () {
 // ── RiskScore ───────────────────────────────────────────────────────
 
 test('風險分數：一切正常是 100 分、低風險', function () {
-    $r = RiskScore::compute(['total' => 14, 'up' => 14], ['high' => 0, 'medium' => 0, 'low' => 0], ['present' => 4, 'ok' => 4]);
+    $r = RiskScore::compute(['total' => 14, 'up' => 14], ['high' => 0, 'medium' => 0, 'low' => 0], ['present' => 4, 'ok' => 4], RiskScore::DEFAULT_THRESHOLDS);
     assertSame([100, 'low', '低風險', []], [$r['score'], $r['level'], $r['level_label'], $r['missing']]);
     assertSame(['devices' => 40, 'cases' => 35, 'sources' => 25], array_map(fn ($p) => $p['weight'], $r['parts']));
 });
 
 test('風險分數：monitor-vm 目前的情況（12/14 設備、沒有未結案件、1 類來源正常）是 94 分', function () {
-    $r = RiskScore::compute(['total' => 14, 'up' => 12], ['high' => 0, 'medium' => 0, 'low' => 0], ['present' => 1, 'ok' => 1]);
+    $r = RiskScore::compute(['total' => 14, 'up' => 12], ['high' => 0, 'medium' => 0, 'low' => 0], ['present' => 1, 'ok' => 1], RiskScore::DEFAULT_THRESHOLDS);
     assertSame(94, $r['score'], '(40×85.7 + 35×100 + 25×100) ÷ 100');
     assertSame(86, $r['parts']['devices']['score']);
+    assertSame('low', $r['level'], '預設門檻 85：94 分是低風險');
+    assertSame('medium', RiskScore::compute(['total' => 14, 'up' => 12], ['high' => 0, 'medium' => 0, 'low' => 0], ['present' => 1, 'ok' => 1], ['low' => 95, 'medium' => 80])['level'],
+        '使用者把低風險門檻調到 95：同一個 94 分變成中等風險');
 });
 
 test('風險分數：未結案件依嚴重性扣分（高 15、中 6、低 2），扣到 0 為止', function () {
-    $score = fn (array $open) => RiskScore::compute(null, $open, null)['parts']['cases']['score'];
+    $score = fn (array $open) => RiskScore::compute(null, $open, null, RiskScore::DEFAULT_THRESHOLDS)['parts']['cases']['score'];
     assertSame(100, $score(['high' => 0, 'medium' => 0, 'low' => 0]));
     assertSame(64, $score(['high' => 2, 'medium' => 1, 'low' => 0]), '100 − 30 − 6');
     assertSame(98, $score(['low' => 1]), '缺的鍵當 0');
@@ -171,24 +174,45 @@ test('風險分數：未結案件依嚴重性扣分（高 15、中 6、低 2）�
 });
 
 test('風險分數：某個分項資料取不到就不納入，其餘分項重新分配權重，並列出缺哪些', function () {
-    $r = RiskScore::compute(null, ['high' => 0, 'medium' => 0, 'low' => 0], ['present' => 2, 'ok' => 1]);
+    $r = RiskScore::compute(null, ['high' => 0, 'medium' => 0, 'low' => 0], ['present' => 2, 'ok' => 1], RiskScore::DEFAULT_THRESHOLDS);
     assertSame(['設備與服務'], $r['missing']);
     assertSame(null, $r['parts']['devices']['score']);
     assertSame(79, $r['score'], '(35×100 + 25×50) ÷ 60＝79.2');
 });
 
 test('風險分數：沒有設備、沒有來源不是 100 分；全部都沒有就是「無法計算」', function () {
-    $r = RiskScore::compute(['total' => 0, 'up' => 0], null, ['present' => 0, 'ok' => 0]);
+    $r = RiskScore::compute(['total' => 0, 'up' => 0], null, ['present' => 0, 'ok' => 0], RiskScore::DEFAULT_THRESHOLDS);
     assertSame([null, null, null], [$r['score'], $r['level'], $r['level_label']]);
     assertSame(['設備與服務', '事件處置', '資料來源'], $r['missing']);
 });
 
-test('風險分數：等級門檻 85／65', function () {
-    $lv = fn (int $ok) => RiskScore::compute(null, null, ['present' => 100, 'ok' => $ok])['level'];
+test('風險分數：預設的等級門檻是 85／65', function () {
+    assertSame(['low' => 85, 'medium' => 65], RiskScore::DEFAULT_THRESHOLDS);
+    $lv = fn (int $ok) => RiskScore::compute(null, null, ['present' => 100, 'ok' => $ok], RiskScore::DEFAULT_THRESHOLDS)['level'];
     assertSame('low', $lv(85));
     assertSame('medium', $lv(84));
     assertSame('medium', $lv(65));
     assertSame('high', $lv(64));
+});
+
+test('風險分數：等級門檻可以自訂，剛好在門檻上算較好的那一級', function () {
+    $lv = fn (int $ok, array $t) => RiskScore::compute(null, null, ['present' => 100, 'ok' => $ok], $t)['level'];
+    $t = ['low' => 95, 'medium' => 80];
+    assertSame('low', $lv(95, $t));
+    assertSame('medium', $lv(94, $t));
+    assertSame('medium', $lv(80, $t));
+    assertSame('high', $lv(79, $t));
+    assertSame('low', $lv(100, ['low' => 100, 'medium' => 1]), '低風險門檻 100：只有滿分才是低風險');
+    assertSame('medium', $lv(99, ['low' => 100, 'medium' => 1]));
+    assertSame('high', $lv(0, ['low' => 100, 'medium' => 1]), '0 分低於中等門檻 1：高風險');
+    assertSame('high', RiskScore::level(10, ['low' => 50, 'medium' => 20]));
+});
+
+test('風險分數：門檻讀不到時只給分數、不判定等級（不能套預設值冒充），算出的門檻會帶回去給畫面', function () {
+    $r = RiskScore::compute(null, null, ['present' => 100, 'ok' => 90], null);
+    assertSame([90, null, null, null], [$r['score'], $r['level'], $r['level_label'], $r['thresholds']]);
+    $t = ['low' => 92, 'medium' => 70];
+    assertSame($t, RiskScore::compute(null, null, ['present' => 100, 'ok' => 90], $t)['thresholds']);
 });
 
 // ── CaseService 新方法 ──────────────────────────────────────────────
@@ -248,9 +272,9 @@ function lsKpi(array $overview): array
     return array_column($overview['kpi'], null, 'key');
 }
 
-function lsBuild(?Fleet $fleet, ?array $summary = null, ?array $open = null, ?array $latest = [], ?array $trend = [], ?array $coverage = null): array
+function lsBuild(?Fleet $fleet, ?array $summary = null, ?array $open = null, ?array $latest = [], ?array $trend = [], ?array $coverage = null, ?array $thresholds = RiskScore::DEFAULT_THRESHOLDS): array
 {
-    return (new LandscapeService(LS_NOW))->build($fleet, $summary, $open, $latest, $trend, $coverage ?? lsCoverage());
+    return (new LandscapeService(LS_NOW))->build($fleet, $summary, $open, $latest, $trend, $coverage ?? lsCoverage(), $thresholds);
 }
 
 $lsSummary = ['new' => 2, 'ack' => 1, 'in_progress' => 0, 'closed' => 5, 'open' => 3];
@@ -406,6 +430,26 @@ test('總覽：風險儀表帶出分項與缺的項目；三項都沒有資料�
     assertSame(100, $d['parts']['sources']['score'], '只算有資料的來源：防火牆正常');
     $none = lsBuild(null, null, null, null, null, ['ok' => false, 'error' => 'x']);
     assertSame(false, $none['risk']['ok']);
+});
+
+test('總覽：風險等級用使用者設的門檻，並把門檻帶給畫面（畫面上的說明文字不能另外寫死）', function () use ($lsSummary, $lsOpen) {
+    $mk = fn (array $t) => lsBuild(lsFleet(), $lsSummary, $lsOpen, [], [], null, $t)['risk']['data'];
+    $default = $mk(['low' => 85, 'medium' => 65]);
+    assertSame(['low' => 85, 'medium' => 65], $default['thresholds']);
+    assertSame('medium', $default['level'], '分數 ' . $default['score'] . ' 介於 65 與 85 之間');
+    $strict = $mk(['low' => 50, 'medium' => 30]);
+    assertSame(['low', '低風險', ['low' => 50, 'medium' => 30]], [$strict['level'], $strict['level_label'], $strict['thresholds']]);
+    assertSame($default['score'], $strict['score'], '改門檻只影響等級，不影響分數');
+    assertSame(false, isset($default['warning']), '門檻讀得到就沒有警告');
+});
+
+test('總覽：風險等級門檻讀不到時，仍顯示分數但不判定等級，並明講原因', function () use ($lsSummary, $lsOpen) {
+    $o = lsBuild(lsFleet(), $lsSummary, $lsOpen, [], [], null, null);
+    assertSame(true, $o['risk']['ok'], '分數還是算得出來');
+    $d = $o['risk']['data'];
+    assertSame([null, null, null], [$d['level'], $d['level_label'], $d['thresholds']]);
+    assertTrue(is_int($d['score']), '分數照常');
+    assertTrue(mb_strpos($d['warning'], '門檻') !== false && mb_strpos($d['warning'], '不判定') !== false, $d['warning']);
 });
 
 test('總覽：近 30 日趨勢：台北時間分日、依嚴重性分線，範圍外與不認得的嚴重性不算', function () {

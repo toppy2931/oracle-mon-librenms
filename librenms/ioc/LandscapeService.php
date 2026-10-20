@@ -31,13 +31,15 @@ final class LandscapeService
      * @param array<int,array<string,mixed>>|null $latestCases 已經過 CaseView::row 的最新事件案；null＝讀取失敗
      * @param array<int,array{created_at:string,severity:string}>|null $trendRows CaseService::createdWithin()；null＝讀取失敗
      * @param array{ok:bool,data?:mixed,error?:string} $coverage OverviewService 算出來的資料涵蓋區塊
+     * @param array{low:int,medium:int}|null $riskThresholds SettingsService::riskThresholds()；null＝讀取失敗（只顯示分數、不判定等級）。
+     *        刻意沒有預設值：呼叫端漏傳就會是語法錯誤，不會悄悄套用預設門檻
      * @return array<string,mixed>
      */
-    public function build(?Fleet $fleet, ?array $caseSummary, ?array $openBySeverity, ?array $latestCases, ?array $trendRows, array $coverage): array
+    public function build(?Fleet $fleet, ?array $caseSummary, ?array $openBySeverity, ?array $latestCases, ?array $trendRows, array $coverage, ?array $riskThresholds): array
     {
         return [
             'kpi'          => $this->kpi($fleet, $caseSummary, $openBySeverity),
-            'risk'         => $this->risk($fleet, $openBySeverity, $coverage),
+            'risk'         => $this->risk($fleet, $openBySeverity, $coverage, $riskThresholds),
             'trend'        => $trendRows === null ? $this->fail('事件案資料無法讀取') : ['ok' => true, 'data' => $this->trend($trendRows)],
             'sites'        => $this->sites($fleet),
             'ranking'      => $this->ranking($fleet),
@@ -123,12 +125,16 @@ final class LandscapeService
     // ── 風險儀表 ────────────────────────────────────────────────────────
 
     /** @return array<string,mixed> */
-    private function risk(?Fleet $fleet, ?array $openBySeverity, array $coverage): array
+    private function risk(?Fleet $fleet, ?array $openBySeverity, array $coverage, ?array $riskThresholds): array
     {
         $devices = $fleet === null ? null : ['total' => $fleet->total(), 'up' => $fleet->up()];
-        $r = RiskScore::compute($devices, $openBySeverity, OverviewService::sourceCounts($coverage));
+        $r = RiskScore::compute($devices, $openBySeverity, OverviewService::sourceCounts($coverage), $riskThresholds);
         if ($r['score'] === null) {
             return $this->fail('設備、事件案與資料來源都沒有可用的資料，無法計算');
+        }
+        if ($riskThresholds === null) {
+            // 分數算得出來，但等級要看使用者設的門檻；讀不到就不能判定，也不能拿預設值冒充
+            $r['warning'] = '風險等級門檻的設定讀取不到，所以只顯示分數、不判定等級';
         }
         return ['ok' => true, 'data' => $r];
     }

@@ -115,7 +115,7 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
     def test_operator_columns_hold_any_librenms_username(self):
         """LibreNMS 的 users.username 最長 255；欄位太短會讓長帳號永遠寫不進事件案（500）。"""
         schema = (ROOT / "librenms" / "ioc" / "Schema.php").read_text(encoding="utf-8")
-        for col in ("assignee", "created_by", "actor"):
+        for col in ("assignee", "created_by", "actor", "updated_by"):
             self.assertRegex(schema, r"\n\s+%s VARCHAR\(255\)" % col, col)
 
     def test_uninstall_removes_every_ioc_page_and_the_library(self):
@@ -205,7 +205,7 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
         nav = re.search(r"const NAV = \[(.*?)\n  \];", src, re.S).group(1)
         for key in ("risk", "config", "audit", "reports"):
             self.assertRegex(nav, r"key: '%s'[^}]*off: true" % key, key)
-        for key in ("overview", "cases", "security"):
+        for key in ("overview", "cases", "security", "settings"):
             self.assertNotRegex(nav, r"key: '%s'[^}]*off: true" % key, key)
             self.assertIn('id="view-%s"' % key, src, key)
 
@@ -232,6 +232,42 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
         """LibreNMS 的可用率欄位為 NULL 是「沒有資料」；(float) null 會變成 0% 把整體可用率拉低。"""
         src = (ROOT / "librenms" / "ioc" / "endpoint.php").read_text(encoding="utf-8")
         self.assertRegex(src, r"availability_perc === null\)\s*\{\s*continue;")
+
+    def test_settings_api_is_post_only_and_a_save_clears_the_overview_cache(self):
+        """風險等級是算好存在總覽快取裡的：存了新門檻卻不清快取，畫面最多 20 秒還是舊等級。"""
+        src = (ROOT / "librenms" / "html" / "ioc-settings.php").read_text(encoding="utf-8")
+        self.assertIn("ioc_begin(true)", src, "設定 API 只接受 POST")
+        block = re.search(r"case 'save':(.*?)(?=case '|default:)", src, re.S).group(1)
+        self.assertIn("ioc_overview_cache_forget()", block)
+        self.assertIn("ioc_pick($in, ['risk_low', 'risk_medium'])", block, "只收白名單內的欄位")
+
+    def test_overview_does_not_fall_back_to_default_thresholds_when_settings_are_unreadable(self):
+        """門檻讀不到時套預設值，畫面上的等級就可能跟管理者設定的不一致（例如設了 95 卻顯示低風險）。"""
+        src = (ROOT / "librenms" / "ioc" / "endpoint.php").read_text(encoding="utf-8")
+        self.assertRegex(src, r"(?s)riskThresholds\(\$level\);\s*\} catch \(\\Throwable \$e\) \{.*?\$thresholds = null;", "讀不到要傳 null，由 RiskScore 只給分數不判等級")
+        self.assertNotRegex(src, r"DEFAULT_THRESHOLDS", "endpoint 不能自己套預設門檻；預設值只在 SettingsService／RiskScore")
+
+    def test_every_table_in_the_schema_is_created_by_the_setup_script(self):
+        """Schema 新增資料表卻忘了加進 ioc-db-setup.php 的清單：安裝時不會驗證它有沒有建立成功。"""
+        schema = (ROOT / "librenms" / "ioc" / "Schema.php").read_text(encoding="utf-8")
+        setup = (ROOT / "system" / "ioc-db-setup.php").read_text(encoding="utf-8")
+        tables = set(re.findall(r"CREATE TABLE IF NOT EXISTS (\w+)", schema))
+        listed = set(re.findall(r"'(ioc_\w+)'", re.search(r"\$tables = \[(.*?)\];", setup, re.S).group(1)))
+        self.assertGreaterEqual(len(tables), 4)
+        self.assertEqual(tables, listed)
+
+    def test_history_tables_have_no_update_or_delete_path_in_the_library(self):
+        """歷程只增不改不刪（IS-026）；程式裡一旦出現 UPDATE／DELETE 就等於留了竄改的路徑。"""
+        for f in sorted((ROOT / "librenms" / "ioc").glob("*.php")):
+            src = f.read_text(encoding="utf-8")
+            self.assertNotRegex(src, r"(UPDATE|DELETE\s+FROM)\s+ioc_(case|settings)_history", f.name)
+
+    def test_portal_risk_thresholds_are_not_hardcoded_in_the_page(self):
+        """門檻是使用者可調的：畫面上的說明若寫死 85／65，調過之後就會說謊。"""
+        src = (ROOT / "librenms" / "html" / "ioc-portal.php").read_text(encoding="utf-8")
+        self.assertNotRegex(src, r"[≥>=]\s*(85|65)\b", "畫面不能寫死等級門檻，要用伺服器回傳的 thresholds")
+        self.assertIn("d.thresholds.low", src)
+        self.assertIn("'riskLevel'    => Ioc\\RiskScore::LEVEL_LABEL", src)
 
     def test_case_status_labels_cover_the_flow(self):
         labels = (ROOT / "librenms" / "ioc" / "Labels.php").read_text(encoding="utf-8")

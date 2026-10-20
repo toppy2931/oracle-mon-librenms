@@ -25,8 +25,9 @@ rm -f "$LIBRENMS_DIR"/html/oracle-admin.php \
       "$LIBRENMS_DIR"/html/oracle-dashboard-data.php
 rm -f "$LIBRENMS_DIR"/html/ioc-portal.php \
       "$LIBRENMS_DIR"/html/ioc-data.php \
-      "$LIBRENMS_DIR"/html/ioc-cases.php
-rm -rf "$LIBRENMS_DIR"/includes/ioc      # IOC 入口函式庫（事件案資料表 ioc_cases／ioc_case_history 與讀取用的 Graylog 帳號會保留，見文末）
+      "$LIBRENMS_DIR"/html/ioc-cases.php \
+      "$LIBRENMS_DIR"/html/ioc-settings.php
+rm -rf "$LIBRENMS_DIR"/includes/ioc      # IOC 入口函式庫（事件案與設定的資料表 ioc_* 與讀取用的 Graylog 帳號會保留，見文末）
 rm -f "$LIBRENMS_DIR"/includes/html/graphs/application/oracle-l1hweb_*.inc.php
 rm -f "$LIBRENMS_DIR"/includes/polling/applications/oracle-l1hweb.inc.php
 rm -f "$LIBRENMS_DIR"/includes/html/pages/device/apps/oracle-l1hweb.inc.php
@@ -57,4 +58,4 @@ else
 fi
 
 say "完成。注意：本腳本不會刪除 RRD 歷史資料與 LibreNMS 告警規則。"
-say "IOC 入口的事件案資料（ioc_cases／ioc_case_history）與 Graylog 唯讀帳號 ioc-reader 也不會刪；要移除請見 docs/ioc/phase1.md「回滾」。"
+say "IOC 入口的資料（事件案 ioc_cases／ioc_case_history、設定 ioc_settings／ioc_settings_history）與 Graylog 唯讀帳號 ioc-reader 也不會刪；要移除請見 docs/ioc/phase1.md「回滾」。"
