@@ -362,6 +362,26 @@ FortiGate CEF 格式的 `key=value` 內容用 **6 個獨立 Grok pattern Extract
 
 ---
 
+## 中文入口：維運總覽與事件案（智慧維運中心 Phase 1）
+
+`/ioc-portal.php`（`ioc-data.php`、`ioc-cases.php`）。設計、權限矩陣、各區塊資料來源、VM 驗證步驟見 [docs/ioc/phase1.md](docs/ioc/phase1.md)。**這一塊不走上面的「PHP → sudo shell」信任鏈**：它只讀（Graylog、LibreNMS 設備）與寫自己的事件案資料表，沒有特權操作。
+
+- **邏輯與 LibreNMS 分開**：`librenms/ioc/*.php` 是不依賴 LibreNMS 的純函式庫（裝在 `includes/ioc/`，不在 `html/`，瀏覽器要不到）；只有 `endpoint.php` 與頁面接 LibreNMS（`Auth`、`csrf_token`、資料庫）。新的規則一律寫在函式庫並補 `tests/php/` 的測試；`endpoint.php` 只管登入、角色、CSRF、錯誤回應。
+- **權限在後端**：`admin`＝處理者、`global-read`＝檢視者，`CaseService` 每個方法都先檢查（IS-013）。頁面隱藏按鈕不算權限控管。新增 API 動作時，`tests/test_php.py` 會檢查每支端點都先呼叫 `ioc_begin()`。
+- **鐵則：資料取不到就顯示「無法取得」，絕不能變成 0 或正常**（OPS-006、EVT-007、RPT-007）。各區塊各自成敗；`OverviewService::guard()` 只攔 `GraylogUnavailable`，其他例外是 bug，要往上拋。
+- **畫面一律用 DOM＋`textContent`，不用 `innerHTML`**：日誌內容來自外部，放進畫面就是 XSS。`tests/test_php.py` 會擋。內嵌在 `<script>` 的 JSON 要用 `JSON_HEX_TAG|AMP|APOS|QUOT`。
+- **Graylog 用專用唯讀帳號**：`system/graylog-reader.py create` 建立 `ioc-reader` 並把 Token 寫到 `/etc/oracle-mon/graylog-reader.conf`（root:librenms 640）。入口不碰 admin 密碼。Graylog 的搜尋彙整 API **一定要有 `group_by`**（只有 `metrics` 會回 400）；要算總數就 group 一個一定存在的欄位再加總。重跑 `create` 若只是 stream 清單變了，會**沿用原 Token** 只更新設定檔（舊 Token 不會自動作廢，每次換新就會留下沒人記得的有效憑證）。`GRAYLOG_URL` 只有本機位址可以用 http，其他一定要 https（Token 在每個請求的標頭裡）。
+- **Graylog 慢或卡住時不能讓頁面 504**：`GraylogClient` 一次畫面載入共用 25 秒的總預算（單次 15 秒），用完後的查詢直接回報「逾時」；沒有這個上限，5 個區塊各等 15 秒會超過 nginx 的 60 秒（同 8f0ce05 修過的 Oracle 探測）。新增區塊要走同一個 `LogSource`，不要另外開連線。
+- **事件案異動要清總覽快取**：總覽有 20 秒伺服器端快取（含事件案件數）；會改件數的動作（建立、狀態變更）要呼叫 `ioc_overview_cache_forget()`，否則 KPI 會落後分頁角標。
+- **CSS 陷阱**：元素設了 `display:…` 就會蓋掉瀏覽器內建的 `[hidden]{display:none}`，`hidden` 屬性失效；頁面已加全域 `[hidden]{display:none!important}`。LibreNMS 資料表的時間（例如 `devices.last_polled`）是主機本地時間，不是 UTC，轉台北時間要用 `Time::toTaipei($v, 'Y-m-d H:i:s', date_default_timezone_get())`。
+- 之後要加欄位：在 `Schema::statements()` 最後面另加 `ALTER TABLE … ADD COLUMN IF NOT EXISTS`（只改 `CREATE TABLE` 對已部署的主機沒有效果），並同步 `PdoCaseRepo` 的欄位白名單。
+- **PHP 陷阱：變數後面緊接全形標點（`"$x，"`、`"$x」"`）會讓全形字元被當成變數名稱的一部分**，變數變成未定義、訊息變空。要寫 `{$x}`。`tests/php/run.php` 把任何 PHP 警告當成失敗，就是為了抓這種問題。既有的 `oracle-db-add.php:40` 也有（尚未修）。
+- **資料表**：`ioc_cases`、`ioc_case_history`（`librenms/ioc/Schema.php`，`CREATE TABLE IF NOT EXISTS`，`install.sh`／`update.sh` 自動建立）。時間存 UTC，顯示才轉台北。歷程只增不改不刪。`uninstall.sh` 不會刪它們。
+- **本機驗證**：這台 Windows 沒有 PHP，用 WSL 的 PHP 做語法檢查與不碰資料庫的邏輯測試（`tests/test_php.py` 會自動找 `php` 或 WSL 的 `php`）；**不要在 WSL 裡的 LibreNMS 與資料庫做任何寫入**。LibreNMS 的登入／CSRF／資料庫與事件案 SQL 要到 VM 驗證（`system/ioc-db-selftest.php`）。
+- 畫面可用暫時的測試台驗證（真的頁面＋真的函式庫＋假資料）：用 `php -S` 載入真的 `ioc-portal.php` 的 HTML，把最前面的登入與設定那段換成測試台的版本，再用瀏覽器操作；這種方式抓到過 `replaceChildren(null)` 會插入文字「null」的錯誤。測試台不進 repo。
+
+---
+
 ## Web 端點清單（`/opt/librenms/html/`）
 
 主 GUI `oracle-admin.php` 由六個區塊組成（**順序固定 A→B→C→D→E→F**）：**A** Oracle 連線設定、**B** monitor-vm IP 異動、**C** 多 DB 管理、**D** 防火牆管理網段、**E** NAS 備份、**F** Custom Map 自動刷新秒數。每個區塊對應一支 AJAX endpoint 與一支 admin shell：
@@ -378,3 +398,4 @@ FortiGate CEF 格式的 `key=value` 內容用 **6 個獨立 Grok pattern Extract
 | `oracle-firewall.php` | D | 管理網段 list/add/remove + 列出 ufw 實際允許來源(rules) | `manage-mgmt-cidrs.sh` |
 | `oracle-nasbackup.php` | E | NAS 掛載/同步 status/save/test/sync/unmount | `manage-nas-backup.sh` |
 | `oracle-custom-map.php` | F | Custom Map 自動刷新秒數 get/set/clear（寫 `config.php`） | `set-custom-map-refresh.sh` |
+| `ioc-portal.php` + `ioc-data.php` + `ioc-cases.php` | — | 中文入口：維運總覽、事件案（admin 處理、global-read 唯讀；不走 sudo） | — |

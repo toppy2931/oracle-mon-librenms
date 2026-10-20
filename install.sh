@@ -78,6 +78,26 @@ install -m 644 -o "$LIBRENMS_USER" -g "$LIBRENMS_USER" "$HERE/librenms/polling/o
 install -m 644 -o "$LIBRENMS_USER" -g "$LIBRENMS_USER" "$HERE/librenms/pages/device_apps/oracle-l1hweb.inc.php" "$PAGE_DEV/oracle-l1hweb.inc.php"
 install -m 644 -o "$LIBRENMS_USER" -g "$LIBRENMS_USER" "$HERE/librenms/pages/apps/oracle-l1hweb.inc.php" "$PAGE_APP/oracle-l1hweb.inc.php"
 
+# ── 2.4) IOC 入口：函式庫與事件案資料表（冪等）─────────────────
+# 函式庫放 includes/ioc/（不在 html/ 底下，瀏覽器無法直接要求）；資料表只有 CREATE TABLE IF NOT EXISTS
+say "部署 IOC 入口函式庫"
+IOC_LIB_DST="$LIBRENMS_DIR/includes/ioc"
+mkdir -p "$IOC_LIB_DST"
+for f in "$HERE"/librenms/ioc/*.php; do
+    [ -e "$f" ] && install -m 644 -o "$LIBRENMS_USER" -g "$LIBRENMS_USER" "$f" "$IOC_LIB_DST/$(basename "$f")"
+done
+if command -v php >/dev/null; then
+    say "建立事件案資料表（冪等）"
+    IOC_TMP="$(mktemp --suffix=.php /tmp/oraclemon_ioc_db.XXXXXX)"
+    cp "$HERE/system/ioc-db-setup.php" "$IOC_TMP"
+    chown "$LIBRENMS_USER":"$LIBRENMS_USER" "$IOC_TMP"
+    # sudo 預設會清掉環境變數，LIBRENMS_DIR 要用 env 明確帶過去，否則自訂安裝路徑時腳本會去找預設的 /opt/librenms
+    sudo -u "$LIBRENMS_USER" env LIBRENMS_DIR="$LIBRENMS_DIR" php "$IOC_TMP" || warn "事件案資料表未建立（LibreNMS 資料庫是否可連線？可稍後手動：sudo -u $LIBRENMS_USER env LIBRENMS_DIR=$LIBRENMS_DIR php $HERE/system/ioc-db-setup.php）"
+    rm -f "$IOC_TMP"
+else
+    warn "找不到 php，略過事件案資料表"
+fi
+
 # ── 2.5) Bootstrap 5 CSS（oracle-admin.php 用，本地化避免外部 CDN 依賴）─
 BS_CSS="$LIBRENMS_DIR/html/css/oracle-admin/bootstrap-5.3.2.min.css"
 if [ -f "$BS_CSS" ]; then

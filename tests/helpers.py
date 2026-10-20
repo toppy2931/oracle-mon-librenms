@@ -29,6 +29,9 @@ class FakeGraylog:
         self.requests = []                                 # (method, path, body)
         self.header_violations = []                        # 缺 X-Requested-By 的請求（Graylog 會拒絕）
         self.overrides = {}                                # (method, path) -> (code, body[, headers])
+        self.users = {}                                    # username -> {roles, permissions, tokens{id: token}}
+        self.token_auth = {}                               # Authorization 標頭 -> username（Token 登入）
+        self.principal = None                              # 目前這個請求是誰（admin 或使用者名稱）
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -52,7 +55,8 @@ class FakeGraylog:
                 n = int(self.headers.get("Content-Length") or 0)
                 body = json.loads(self.rfile.read(n)) if n else None
                 fake.requests.append((method, self.path, body))
-                if self.headers.get("Authorization") != fake.expect_auth:
+                fake.principal = fake.who(self.headers.get("Authorization"))
+                if fake.principal is None:
                     return self._send(401, {"type": "ApiError", "message": "unauthorized"})
                 if not self.headers.get("X-Requested-By"):
                     fake.header_violations.append((method, self.path))
@@ -80,7 +84,71 @@ class FakeGraylog:
     def mutations(self):
         return [(m, p) for m, p, _ in self.requests if m != "GET"]
 
+    def who(self, header):
+        """admin 的 Basic 帳密，或某個使用者的 Token（帳號放 Token、密碼固定 token）。"""
+        if header == self.expect_auth:
+            return "admin"
+        return self.token_auth.get(header)
+
+    def _users_route(self, method, path, body):
+        if path == "/api/users" and method == "POST":
+            missing = [k for k in ("username", "email", "first_name", "last_name", "password", "roles") if not body.get(k)]
+            if missing:
+                return 400, {"message": "missing %s" % missing}
+            name = body["username"]
+            self.users[name] = {"username": name, "roles": list(body["roles"]), "tokens": {},
+                                "permissions": ["users:edit:" + name] + list(body.get("permissions", []))}  # Graylog 會自己加預設權限
+            return 201, {"user_id": uuid.uuid4().hex}
+        parts = path[len("/api/users/"):].split("/")
+        name = parts[0]
+        if name not in self.users:
+            return 404, {"message": "no such user"}
+        user = self.users[name]
+        if len(parts) == 1:
+            if method == "GET":
+                return 200, {k: v for k, v in user.items() if k != "tokens"}
+            if method == "PUT":
+                user["roles"] = list(body.get("roles", user["roles"]))
+                user["permissions"] = list(body.get("permissions", user["permissions"]))
+                return 204, None
+            if method == "DELETE":
+                for token in user["tokens"].values():
+                    self.token_auth.pop(self._token_header(token), None)
+                del self.users[name]
+                return 204, None
+        elif len(parts) == 3 and parts[1] == "tokens":
+            if method == "POST":
+                token, tid = uuid.uuid4().hex, uuid.uuid4().hex[:12]
+                user["tokens"][tid] = token
+                self.token_auth[self._token_header(token)] = name
+                return 200, {"id": tid, "name": parts[2], "token": token}
+            if method == "DELETE":
+                token = user["tokens"].pop(parts[2], None)
+                if token:
+                    self.token_auth.pop(self._token_header(token), None)
+                return 204, None
+        return 404, {"message": "no route %s %s" % (method, path)}
+
+    @staticmethod
+    def _token_header(token):
+        return "Basic " + base64.b64encode(("%s:token" % token).encode()).decode()
+
     def route(self, method, path, body):
+        if path == "/api/search/aggregate" and method == "POST":
+            if not body.get("group_by"):                    # 真的 Graylog：搜尋彙整一定要有 group_by
+                return 400, {"message": "must not be empty", "path": "ScriptingApiResource.executeQuery.arg0.groupings"}
+            if self.principal != "admin":
+                perms = self.users.get(self.principal, {}).get("permissions", [])
+                for s in body.get("streams", []):
+                    if "streams:read:%s" % s not in perms:
+                        return 403, {"message": "Not authorized to access resource id <%s>" % s}
+            return 200, {"schema": [{"column_type": "grouping", "type": "string", "field": "source", "name": "grouping: source"},
+                                    {"column_type": "metric", "type": "numeric", "function": "count", "name": "metric: count()"}],
+                         "datarows": [["web01", 3]], "metadata": {}}
+        if path == "/api/users" or path.startswith("/api/users/"):
+            if self.principal != "admin":
+                return 403, {"message": "forbidden"}
+            return self._users_route(method, path, body)
         if path == "/api/streams" and method == "GET":
             return 200, {"total": len(self.streams),
                          "streams": [{"id": i, "title": t, "rules": []} for i, t in self.streams.items()]}

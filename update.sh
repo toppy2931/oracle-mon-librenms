@@ -46,6 +46,20 @@ install -m 644 -o "$LIBRENMS_USER" -g "$LIBRENMS_USER" "$HERE/librenms/polling/o
 install -m 644 -o "$LIBRENMS_USER" -g "$LIBRENMS_USER" "$HERE/librenms/pages/device_apps/oracle-l1hweb.inc.php" "$PAGE_DEV/oracle-l1hweb.inc.php"
 install -m 644 -o "$LIBRENMS_USER" -g "$LIBRENMS_USER" "$HERE/librenms/pages/apps/oracle-l1hweb.inc.php" "$PAGE_APP/oracle-l1hweb.inc.php"
 
+say "更新 IOC 入口函式庫與事件案資料表（冪等）"
+IOC_LIB_DST="$LIBRENMS_DIR/includes/ioc"
+mkdir -p "$IOC_LIB_DST"
+for f in "$HERE"/librenms/ioc/*.php; do
+    [ -e "$f" ] && install -m 644 -o "$LIBRENMS_USER" -g "$LIBRENMS_USER" "$f" "$IOC_LIB_DST/$(basename "$f")"
+done
+if command -v php >/dev/null; then
+    IOC_TMP="$(mktemp --suffix=.php /tmp/oraclemon_ioc_db.XXXXXX)"
+    cp "$HERE/system/ioc-db-setup.php" "$IOC_TMP"
+    chown "$LIBRENMS_USER":"$LIBRENMS_USER" "$IOC_TMP"
+    sudo -u "$LIBRENMS_USER" env LIBRENMS_DIR="$LIBRENMS_DIR" php "$IOC_TMP" || say "事件案資料表未建立（可稍後手動執行 system/ioc-db-setup.php）"
+    rm -f "$IOC_TMP"
+fi
+
 if command -v python3 >/dev/null; then
     say "修補 LibreNMS 齒輪選單"
     python3 "$HERE/system/menu-patch.py" "$LIBRENMS_DIR/resources/views/layouts/menu.blade.php" || say "選單未自動修補，請見 README 手動加入"
