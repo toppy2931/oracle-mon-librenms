@@ -13,7 +13,7 @@ if (!defined('IOC_LIB_LOADED')) {
     define('IOC_LIB_LOADED', true);
     foreach ([
         'Errors', 'Labels', 'Access', 'Time', 'CaseFlow', 'CaseRepo', 'CaseService', 'PdoCaseRepo', 'Schema',
-        'LogSource', 'GraylogClient', 'UnavailableLogSource', 'OverviewService', 'CaseView',
+        'LogSource', 'WindowedLogSource', 'GraylogClient', 'UnavailableLogSource', 'OverviewService', 'CaseCatalog', 'CaseView', 'EvidenceService',
         'Fleet', 'RiskScore', 'LandscapeService',
         'SettingsRepo', 'PdoSettingsRepo', 'SettingsService',
     ] as $f) {

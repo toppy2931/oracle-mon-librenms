@@ -26,7 +26,8 @@ final class CaseView
      */
     public static function row(array $c): array
     {
-        $s = static fn ($v): string => $v === null ? '' : (string) $v;
+        $s   = static fn ($v): string => $v === null ? '' : (string) $v;
+        $cat = CaseCatalog::get(isset($c['category']) ? (string) $c['category'] : null);
         return [
             'id'             => (int) $c['id'],
             'title'          => $s($c['title'] ?? ''),
@@ -38,6 +39,12 @@ final class CaseView
             'subject_user'   => $s($c['subject_user'] ?? ''),
             'subject_ip'     => $s($c['subject_ip'] ?? ''),
             'subject_host'   => $s($c['subject_host'] ?? ''),
+            'category'       => $cat['key'],
+            'category_label' => $cat['label'],
+            'target_host'    => $s($c['target_host'] ?? ''),
+            'related_host'   => $s($c['related_host'] ?? ''),
+            'impact_scope'   => $s($c['impact_scope'] ?? ''),
+            'tags'           => self::tags($c['tags'] ?? null),
             'evidence_query' => $s($c['evidence_query'] ?? ''),
             'source'         => $s($c['source'] ?? ''),
             'source_label'   => self::SOURCE[$s($c['source'] ?? '')] ?? $s($c['source'] ?? ''),
@@ -49,6 +56,42 @@ final class CaseView
             'updated_at'     => Time::toTaipei($c['updated_at'] ?? null),
             'closed_at'      => ($c['closed_at'] ?? null) === null ? '' : Time::toTaipei((string) $c['closed_at']),
         ];
+    }
+
+    /**
+     * 詳情頁用：row() 再加上依事件類型查到的攻擊技術與建議處置，以及已持續時間
+     * （建立到現在；已結案的算到結案）。攻擊技術與建議處置不存在案件裡，來自 CaseCatalog。
+     *
+     * @param array<string,mixed> $c
+     * @return array<string,mixed>
+     */
+    public static function detail(array $c, ?int $now = null): array
+    {
+        $row     = self::row($c);
+        $cat     = CaseCatalog::get(isset($c['category']) ? (string) $c['category'] : null);
+        $created = Time::parse(isset($c['created_at']) ? (string) $c['created_at'] : null);
+        $ended   = ($c['closed_at'] ?? null) !== null;     // 有結案時間就是已結案；時間壞掉也不能當成還在計時
+        $closed  = $ended ? Time::parse((string) $c['closed_at']) : null;
+        $end     = $closed ?? ($now ?? time());
+        $row['attack']         = $cat['attack'];
+        $row['steps']          = $cat['steps'];
+        $row['duration_label'] = ($created === null || ($ended && $closed === null)) ? '—' : Time::humanDuration($end - $created);
+        $row['duration_ended'] = $ended;
+        return $row;
+    }
+
+    /**
+     * 標籤欄位（以逗號串起來的字串）→ 陣列；空值是空陣列。
+     *
+     * @param mixed $v
+     * @return string[]
+     */
+    private static function tags($v): array
+    {
+        if ($v === null || $v === '') {
+            return [];
+        }
+        return array_values(array_filter(array_map('trim', explode(',', (string) $v)), static fn ($t) => $t !== ''));
     }
 
     /**

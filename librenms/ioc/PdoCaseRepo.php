@@ -13,6 +13,7 @@ final class PdoCaseRepo implements CaseRepo
         'title', 'summary', 'status', 'severity', 'subject_user', 'subject_ip', 'subject_host',
         'evidence_query', 'source', 'dedup_key', 'assignee', 'resolution', 'created_by',
         'created_at', 'updated_at', 'closed_at',
+        'category', 'target_host', 'related_host', 'impact_scope', 'tags',      // 事件詳情改版新增（Schema 的 ALTER）
     ];
     private const HISTORY_COLUMNS = ['ts', 'actor', 'action', 'from_status', 'to_status', 'resolution', 'note'];
 

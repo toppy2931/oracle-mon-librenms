@@ -13,7 +13,7 @@ namespace Ioc;
  *  - 錯誤訊息不含網址與 Token（IS-047）
  *  - 連線 5 秒、整體 15 秒的逾時上界；失敗不重試，避免無限制負載（INT-067、INT-068）
  */
-final class GraylogClient implements LogSource
+final class GraylogClient implements WindowedLogSource
 {
     /** 分組欄位缺值時 Graylog 放的字串。 */
     private const EMPTY_VALUE = '(Empty Value)';
@@ -100,12 +100,53 @@ final class GraylogClient implements LogSource
 
     public function aggregate(string $query, int $rangeSeconds, array $groupBy, array $metrics, int $limit = 100): array
     {
+        return $this->runAggregate($query, ['type' => 'relative', 'range' => $rangeSeconds], $groupBy, $metrics, $limit);
+    }
+
+    public function aggregateBetween(string $query, string $fromIso, string $toIso, array $groupBy, array $metrics, int $limit = 100): array
+    {
+        return $this->runAggregate($query, $this->absolute($fromIso, $toIso), $groupBy, $metrics, $limit);
+    }
+
+    public function messages(string $query, int $rangeSeconds, array $fields, int $size): array
+    {
+        return $this->runMessages($query, ['type' => 'relative', 'range' => $rangeSeconds], $fields, $size);
+    }
+
+    public function messagesBetween(string $query, string $fromIso, string $toIso, array $fields, int $size): array
+    {
+        return $this->runMessages($query, $this->absolute($fromIso, $toIso), $fields, $size);
+    }
+
+    /**
+     * 絕對時間範圍。只收嚴格的 UTC ISO 8601（呼叫端都是用 gmdate 產生的）：
+     * 其他格式一律是程式的錯，不是 Graylog 的問題，所以丟 InvalidArgumentException，不要讓它變成一個含糊的 400。
+     *
+     * @return array{type:string,from:string,to:string}
+     */
+    private function absolute(string $fromIso, string $toIso): array
+    {
+        $iso = '/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d{1,3})?Z$/D';     // D：$ 不能放過結尾的換行
+        if (!preg_match($iso, $fromIso) || !preg_match($iso, $toIso)) {
+            throw new \InvalidArgumentException('時間範圍要是 UTC 的 ISO 8601（例如 2026-10-20T14:00:00.000Z）');
+        }
+        return ['type' => 'absolute', 'from' => $fromIso, 'to' => $toIso];
+    }
+
+    /**
+     * @param array<string,mixed> $timerange
+     * @param string[] $groupBy
+     * @param string[] $metrics
+     * @return array<int,array<string,mixed>>
+     */
+    private function runAggregate(string $query, array $timerange, array $groupBy, array $metrics, int $limit): array
+    {
         if ($groupBy === []) {
             throw new \InvalidArgumentException('Graylog 的彙整查詢一定要有 group_by');
         }
         $body = [
             'query'     => $query,
-            'timerange' => ['type' => 'relative', 'range' => $rangeSeconds],
+            'timerange' => $timerange,
             'group_by'  => array_map(static fn ($f) => ['field' => $f, 'limit' => $limit], $groupBy),
             'metrics'   => array_map(static function ($m) {
                 [$fn, $field] = array_pad(explode(':', $m, 2), 2, null);
@@ -118,11 +159,16 @@ final class GraylogClient implements LogSource
         return $this->rows($this->post('/api/search/aggregate', $body));
     }
 
-    public function messages(string $query, int $rangeSeconds, array $fields, int $size): array
+    /**
+     * @param array<string,mixed> $timerange
+     * @param string[] $fields
+     * @return array<int,array<string,mixed>>
+     */
+    private function runMessages(string $query, array $timerange, array $fields, int $size): array
     {
         $body = [
             'query'      => $query,
-            'timerange'  => ['type' => 'relative', 'range' => $rangeSeconds],
+            'timerange'  => $timerange,
             'fields'     => $fields,
             'size'       => $size,
             'sort'       => 'timestamp',

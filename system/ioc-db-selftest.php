@@ -66,6 +66,14 @@ try {
         $r = $svc->create(['title' => "$tag again", 'dedup_key' => $key], 'selftest', $H);
         $assert($r['created'] === false && $r['id'] === $id, '應回傳既有案件');
     });
+    $check('事件詳情的新欄位（類型、目的／關聯主機、影響範圍、標籤）寫入並讀回，含中文與 emoji（驗證 ALTER 補的欄位）', function () use ($svc, $H, $tag, $assert, $repo) {
+        $r = $svc->create(['title' => "$tag 詳情欄位", 'severity' => 'medium', 'category' => 'privilege_change', 'target_host' => 'DC01', 'related_host' => 'FS02',
+                           'impact_scope' => '財產科共用資料夾 😀', 'tags' => '權限, 內網'], 'selftest', $H);
+        $c = $repo->getCase($r['id']);
+        $assert([$c['category'], $c['target_host'], $c['related_host'], $c['impact_scope'], $c['tags']] === ['privilege_change', 'DC01', 'FS02', '財產科共用資料夾 😀', '權限,內網'], '新欄位讀回來不一致');
+        $d = Ioc\CaseView::detail($svc->get($r['id'], $H)['case']);
+        $assert($d['category_label'] === '權限或群組異動' && $d['attack']['id'] === 'T1098' && $d['tags'] === ['權限', '內網'] && count($d['steps']) >= 3, '詳情的顯示轉換不對');
+    });
     $check('狀態流程：確認 → 處理中 → 結案 → 重新開啟', function () use ($svc, $H, &$id, $assert, $repo) {
         $svc->transition($id, 'ack', 'selftest', $H);
         $svc->transition($id, 'in_progress', 'selftest', $H, null, '開始查');

@@ -19,7 +19,7 @@
 瀏覽器 ──► /ioc-portal.php（頁面：登入＋角色檢查）
    │         │ fetch（X-CSRF-Token）
    │         ├─► /ioc-data.php   總覽資料（GET，快取 20 秒）
-   │         ├─► /ioc-cases.php  事件案 API（POST）
+   │         ├─► /ioc-cases.php  事件案 API（POST；含 evidence：事件詳情的證據時間軸，唯讀查 Graylog）
    │         └─► /ioc-settings.php  設定 API（POST；目前只有風險等級門檻）
    │                │
    │      includes/ioc/endpoint.php   登入、角色、CSRF、錯誤不洩漏內部資訊
@@ -84,6 +84,7 @@
 - 重複建立：自動建案（之後的關聯規則）用 `dedup_key` 去重，同一把鍵只會有一件，競爭時由唯一索引擋下
 - 時間：資料庫存 UTC，顯示才轉台北時間（INT-072）
 - `evidence_query`：記下能在 Graylog 重現這件事的查詢條件，用來追溯原始日誌（EVT-006）。目前不複製日誌內容，原始 Evidence 留在 Graylog（ARC-043）
+- **事件詳情**（2026-10-20 改版，設計與各項資料來源見 [gui-from-proposal-deck.md](gui-from-proposal-deck.md) 第 7 節）：事件案多了事件類型、目的主機、關聯主機、影響範圍、標籤五個欄位；詳情頁依類型顯示 MITRE ATT&CK 技術與內建的建議處置（`CaseCatalog`，不存進案件），並用 `evidence_query` 向 Graylog 取事件建立前 24 小時到建立後 1 小時內的最新 30 筆日誌當證據時間軸（`EvidenceService`，唯讀、取不到明講原因）。檢視者也看得到證據，建立與處理仍只有 admin
 
 ## 5. 總覽
 
@@ -112,7 +113,7 @@
 
 | 項目 | 狀態 |
 |---|---|
-| 規則與邏輯（權限、狀態流程、驗證、歷程、總覽的缺值處理、顯示轉換、風險等級門檻的設定） | ✅ 117 項 PHP 單元測試（用 WSL 的 PHP 8.3，不碰任何資料庫） |
+| 規則與邏輯（權限、狀態流程、驗證、歷程、總覽的缺值處理、顯示轉換、風險等級門檻的設定） | ✅ 140 項 PHP 單元測試（用 WSL 的 PHP 8.3，不碰任何資料庫；含事件類型目錄、新欄位驗證、證據時間軸、Graylog 絕對時間範圍） |
 | Graylog 用戶端 | ✅ 對 PHP 內建伺服器做的假 Graylog：請求內容、每種失敗、逾時、整次載入的總時間預算（25 秒，避免 5 個區塊各等 15 秒而 504）、不跟隨重導向、http 只能連本機、錯誤訊息不洩漏網址與 Token |
 | 唯讀帳號工具 | ✅ 13 項測試（對假的 Graylog；清單變動沿用同一個 Token、群組設不起來會警告） |
 | 畫面 | ✅ 用暫時的測試台（真的頁面＋真的函式庫＋假資料）在瀏覽器實際操作：建立、確認、結案被擋、檢視者唯讀、Graylog 連不上、手機寬度；惡意字串只當純文字顯示 |
@@ -136,7 +137,7 @@ cd /opt/oracle-mon-librenms && git pull && sudo ./update.sh
 sudo -u librenms php /opt/oracle-mon-librenms/system/ioc-db-selftest.php
 ```
 
-預期 13 項 PASS，最後印「全部通過（測試資料已清除）」。其中 5 項是設定（門檻）：全部在一個永遠 rollBack 的交易裡跑，正式的風險等級門檻與異動紀錄不會被改到（網頁看不到測試值，程式中途被砍也不會留下），最後一項確認回復後與測試前一樣。
+預期 14 項 PASS，最後印「全部通過（測試資料已清除）」。其中 1 項驗證事件案新欄位（`ALTER` 補的欄位）能寫入並讀回，5 項是設定（門檻）：全部在一個永遠 rollBack 的交易裡跑，正式的風險等級門檻與異動紀錄不會被改到（網頁看不到測試值，程式中途被砍也不會留下），最後一項確認回復後與測試前一樣。
 
 **2. 唯讀帳號**（需要 `/etc/oracle-mon/graylog-api.conf` 有 admin 帳密與 `GRAYLOG_FIREWALL_STREAMS`）：
 
@@ -157,6 +158,7 @@ python3 /opt/oracle-mon-librenms/system/graylog-reader.py status
 檢查：
 - 總覽的 5 張 KPI 與各表格都有值；「資料來源連線」裡 Windows 是「待接入」
 - 建立一件事件案（可從「需注意帳號」按「建立事件案」帶入），依序改成已確認、結案（不選處理結果會被擋）
+- 事件詳情（第二批）：從「資安」頁的「可疑登入的帳號」按「建立事件案」（會預選事件類型「可疑登入」並帶入查詢條件），建立後點開，應看到摘要列、攻擊技術 T1110、**證據時間軸有 Graylog 的日誌**（舊到新）、關聯指標（各來源筆數，弱點是「尚未接入」）、建議處置；沒填查詢條件的案件，時間軸寫「沒有填 Graylog 查詢條件」；暫時把 `/etc/oracle-mon/graylog-reader.conf` 改名後重新點開，時間軸應寫「無法取得：尚未設定 Graylog 唯讀帳號」，其餘區塊照常；`global-read` 看得到證據，沒有任何處理按鈕
 - 用 `global-read` 角色的帳號登入：看得到總覽與事件案，沒有任何處理按鈕；直接打 API 回 403
 - 暫時把 `/etc/oracle-mon/graylog-reader.conf` 改名：日誌相關區塊顯示「尚未設定 Graylog 唯讀帳號」，設備與事件案照常（看完改回來）
 - 左側「設定」頁：admin 能改風險等級門檻（儲存前會預覽等級、中等風險不能大於低風險），儲存後到「總覽」確認風險等級與說明文字用新門檻、「異動紀錄」多一筆；`global-read` 看得到但輸入框是停用的，直接打 `/ioc-settings.php` 的 `save` 回 403。看完把門檻改回原值
@@ -169,7 +171,7 @@ python3 /opt/oracle-mon-librenms/system/graylog-reader.py status
 這一批的變更屬於高風險（認證授權＋新資料表），所以回滾步驟寫在這裡。依序做，每一步都可以單獨停下：
 
 ```bash
-# 1. 移除頁面、函式庫與選單（事件案資料表與 Graylog 帳號不會動）
+# 1. 移除頁面、函式庫與選單（事件案資料表——包含第二批 ALTER 補的 5 個欄位，它們是可空欄位，留著不影響舊程式——與 Graylog 帳號不會動）
 cd /opt/oracle-mon-librenms && sudo ./uninstall.sh
 
 # 2. 移除 Graylog 唯讀帳號與 Token（刪帳號 Token 就失效），同時移除 /etc/oracle-mon/graylog-reader.conf

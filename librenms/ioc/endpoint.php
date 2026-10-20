@@ -13,6 +13,7 @@ use Illuminate\Support\Facades\DB;
 use Ioc\Access;
 use Ioc\CaseService;
 use Ioc\CaseView;
+use Ioc\EvidenceService;
 use Ioc\Fleet;
 use Ioc\GraylogClient;
 use Ioc\GraylogUnavailable;
@@ -115,6 +116,23 @@ function ioc_service(): CaseService
 function ioc_settings(): SettingsService
 {
     return new SettingsService(new PdoSettingsRepo(DB::connection()->getPdo()));
+}
+
+/**
+ * 事件詳情的證據時間軸與關聯指標（唯讀查 Graylog）。Graylog 還沒設定好時，EvidenceService 一樣回 ok=false 與原因，
+ * 畫面顯示「無法取得」，不是空的時間軸。$case 是資料庫的事件案列（要先通過 CaseService::get 的檢視權限）。
+ *
+ * @param array<string,mixed> $case
+ * @return array<string,mixed>
+ */
+function ioc_evidence(array $case, bool $demo): array
+{
+    try {
+        $logs = GraylogClient::fromConf(IOC_READER_CONF);
+    } catch (GraylogUnavailable $e) {
+        $logs = new UnavailableLogSource($e->getMessage());
+    }
+    return (new EvidenceService($logs, $demo))->build($case);
 }
 
 /**

@@ -135,6 +135,36 @@ test('Graylog：messages 送出的請求內容，與回傳列的鍵名', functio
     assertSame('Descending', $r['body']['sort_order']);
 });
 
+test('Graylog：指定絕對時間範圍的查詢（事件的證據用）送出 absolute timerange，其餘欄位與相對時間的查詢一致', function () {
+    $from = '2026-10-19T05:00:00.000Z';
+    $to   = '2026-10-20T06:00:00Z';
+    $rows = client(['s1'])->messagesBetween('x:y', $from, $to, ['timestamp', 'user_name'], 30);
+    assertSame(2, count($rows));
+    $r = lastRequest();
+    assertSame('/api/search/messages', $r['path']);
+    assertSame(['type' => 'absolute', 'from' => $from, 'to' => $to], $r['body']['timerange']);
+    assertSame([30, ['timestamp', 'user_name'], 'Descending', ['s1']], [$r['body']['size'], $r['body']['fields'], $r['body']['sort_order'], $r['body']['streams']]);
+
+    $agg = client()->aggregateBetween('x:y', $from, $to, ['log_type'], ['count'], 20);
+    assertSame('deny', $agg[0]['action'], '回傳列的轉換與相對時間的查詢共用同一段');
+    $r = lastRequest();
+    assertSame('/api/search/aggregate', $r['path']);
+    assertSame(['type' => 'absolute', 'from' => $from, 'to' => $to], $r['body']['timerange']);
+    assertSame([['field' => 'log_type', 'limit' => 20]], $r['body']['group_by']);
+
+    client()->aggregate('x', 60, ['a'], ['count']);
+    assertSame(['type' => 'relative', 'range' => 60], lastRequest()['body']['timerange'], '原本的相對時間查詢不受影響');
+    assertThrows(InvalidArgumentException::class, fn () => client()->aggregateBetween('x', $from, $to, [], ['count']), 'group_by');
+});
+
+test('Graylog：絕對時間範圍只收嚴格的 UTC ISO 8601，其他格式在送出前就被拒絕（不會變成含糊的 400）', function () {
+    $ok = '2026-10-20T06:00:00.000Z';
+    foreach (['2026-10-20 06:00:00', '2026-10-20T06:00:00+08:00', '2026-10-20T06:00:00', 'yesterday', '', "2026-10-20T06:00:00Z\n", '2026-10-20T06:00:00.1234Z', ' 2026-10-20T06:00:00Z'] as $bad) {
+        assertThrows(InvalidArgumentException::class, fn () => client()->messagesBetween('x', $bad, $ok, ['timestamp'], 1), 'UTC');
+        assertThrows(InvalidArgumentException::class, fn () => client()->aggregateBetween('x', $ok, $bad, ['a'], ['count']), 'UTC');
+    }
+});
+
 test('Graylog：每一種失敗都變成「無法取得」，訊息說得出原因，而且不外洩網址與 Token', function () {
     $cases = [
         'HTML'     => 'Graylog 回應格式不符',
