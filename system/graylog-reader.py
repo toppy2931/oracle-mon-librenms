@@ -84,10 +84,35 @@ def ensure_user(gl, streams, say=print):
     if not missing_roles and not missing_perms:
         say("[帳號] %s：無變更" % READER_USER)
         return False
-    gl.call("PUT", "/api/users/%s" % READER_USER,
-            {"roles": have_roles + missing_roles, "permissions": have_perms + missing_perms})
+    _put_user(gl, user, {"roles": have_roles + missing_roles, "permissions": have_perms + missing_perms})
+    after = gl.call("GET", "/api/users/%s" % READER_USER)       # 回 204 不代表生效，再讀一次確認
+    if READER_ROLE not in after.get("roles", []) or [p for p in perms if p not in after.get("permissions", [])]:
+        raise RuntimeError("Graylog 接受了修改，但 %s 的角色或 stream 權限沒有生效；請到 Graylog 的 System → Users 檢查" % READER_USER)
     say("[帳號] %s：已補權限（%d 個 stream）" % (READER_USER, len(missing_perms)))
     return True
+
+
+def _put_user(gl, user, body):
+    """修改使用者。monitor-vm（Graylog 7.1）實測這個路徑吃 userId（24 碼）；先用 id，不行再用帳號名稱。"""
+    last = None
+    for ident in (user.get("id"), READER_USER):
+        if not ident:
+            continue
+        try:
+            gl.call("PUT", "/api/users/%s" % ident, body)
+            return
+        except gp.ApiError as e:
+            if e.status not in (400, 404, 500):
+                raise
+            last = e
+    raise last or RuntimeError("Graylog 沒有回傳 %s 的 id，無法修改" % READER_USER)
+
+
+def reader_id(gl):
+    """Token 的 API 路徑吃 userId，不是帳號名稱（用名稱會得到 HTTP 500 "hexString has 24 characters"）。"""
+    user = gl.call("GET", "/api/users/%s" % READER_USER)
+    uid = user.get("id") if isinstance(user, dict) else None
+    return uid if isinstance(uid, str) and uid else None
 
 
 def verify(url, token, streams, ca_file=None):
@@ -159,8 +184,12 @@ def create(gl, conf, say=print):
                 say("警告：" + warning)
         return 0
 
+    uid = reader_id(gl)
+    if not uid:
+        say("Graylog 沒有回傳 %s 的 id，無法建立 Token" % READER_USER)
+        return 1
     name = "ioc-portal-%s" % time.strftime("%Y%m%d%H%M%S")
-    created = gl.call("POST", "/api/users/%s/tokens/%s" % (READER_USER, name))
+    created = gl.call("POST", "/api/users/%s/tokens/%s" % (uid, name))      # 路徑是 userId，不是帳號名稱
     token = created.get("token") if isinstance(created, dict) else None
     if not token:
         say("Graylog 沒有回傳 Token，無法繼續")
@@ -168,7 +197,7 @@ def create(gl, conf, say=print):
     problem = verify(url, token, streams, ca)
     if problem:
         try:                                    # 驗證不過的 Token 不留著
-            gl.call("DELETE", "/api/users/%s/tokens/%s" % (READER_USER, created.get("id", name)))
+            gl.call("DELETE", "/api/users/%s/tokens/%s" % (uid, created.get("id", name)))
         except gp.ApiError:
             pass
         say("[Token] 驗證失敗，未寫設定檔：%s" % problem)
@@ -199,14 +228,28 @@ def status(gl, say=print):
     return 0
 
 
+def _user_exists(gl):
+    try:
+        gl.call("GET", "/api/users/%s" % READER_USER)
+        return True
+    except gp.ApiError as e:
+        if e.status != 404:
+            raise
+        return False
+
+
 def remove(gl, say=print):
     try:
         gl.call("DELETE", "/api/users/%s" % READER_USER)
-        say("[帳號] %s：已刪除" % READER_USER)
     except gp.ApiError as e:
         if e.status != 404:
             raise
         say("[帳號] %s：本來就不存在" % READER_USER)
+    else:
+        if _user_exists(gl):                    # 回成功不代表真的刪了：帳號還在 Token 就還有效，不能報成功
+            say("[帳號] %s：刪除沒有生效，請到 Graylog 的 System → Users 手動刪除；設定檔先保留" % READER_USER)
+            return 1
+        say("[帳號] %s：已刪除" % READER_USER)
     path = reader_conf_path()
     if os.path.isfile(path):
         os.remove(path)
@@ -237,6 +280,9 @@ def main(argv=None):
         return remove(gl)
     except gp.ApiError as e:
         print("Graylog API 錯誤：%s" % e, file=sys.stderr)
+        return 1
+    except RuntimeError as e:
+        print(e, file=sys.stderr)
         return 1
 
 
