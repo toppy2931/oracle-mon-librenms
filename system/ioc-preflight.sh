@@ -29,7 +29,8 @@ fail(){ printf '[FAIL] %s\n' "$*"; FAILS=$((FAILS+1)); }
 
 conf_get(){
     [ -f "$CONF" ] || return 0
-    grep -E "^$1=" "$CONF" | tail -1 | cut -d= -f2- | sed "s/^[\"']//; s/[\"']\$//"
+    # 與 graylog-pipelines.py 的 parse_conf 同一規則：只拿掉「成對」的外層引號
+    grep -E "^$1=" "$CONF" | tail -1 | cut -d= -f2- | sed -E "s/^(['\"])(.+)\1\$/\2/"
 }
 
 URL="${GRAYLOG_URL:-$(conf_get GRAYLOG_URL)}"; URL="${URL:-http://127.0.0.1:9000}"

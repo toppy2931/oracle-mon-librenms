@@ -145,7 +145,9 @@ def windows_rules():
 LINUX_EVENTS = [
     ("linux-ssh-failed", 'contains(%s, "Failed password for")' % MSG, "login_failed", "low",
      "Failed password for (?:invalid user )?%{USERNAME:user_name} from %{IP:src_ip}"),
-    ("linux-ssh-invalid-user", 'contains(%s, "Invalid user")' % MSG, "login_failed", "low",
+    # 帳號不存在時 sshd 會記兩行：「Invalid user X」與「Failed password for invalid user X」。
+    # 用不同的 action，入口才不會把同一次嘗試算成兩次登入失敗
+    ("linux-ssh-invalid-user", 'contains(%s, "Invalid user")' % MSG, "invalid_user", "low",
      "Invalid user %{USERNAME:user_name} from %{IP:src_ip}"),
     ("linux-ssh-accepted",
      'contains(%s, "Accepted password for") || contains(%s, "Accepted publickey for")' % (MSG, MSG),
@@ -265,11 +267,19 @@ class ApiError(Exception):
         self.status = status
 
 
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """不跟隨重導向。urllib 預設會連 Authorization 一起轉送（可能送到別台主機），
+    而且會把 POST／PUT 改成不帶內容的 GET，讓寫入悄悄變成讀取。"""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+
 class Graylog:
     def __init__(self, url, user, password, ca_file=None):
         self.url = url.rstrip("/")
         self.auth = "Basic " + base64.b64encode(("%s:%s" % (user, password)).encode()).decode()
-        handlers = [urllib.request.ProxyHandler({})]  # 本機 API，不經 proxy
+        handlers = [urllib.request.ProxyHandler({}), _NoRedirect()]  # 本機 API，不經 proxy、不跟隨重導向
         if self.url.startswith("https"):
             handlers.append(urllib.request.HTTPSHandler(context=ssl.create_default_context(cafile=ca_file)))
         self.opener = urllib.request.build_opener(*handlers)
@@ -286,10 +296,16 @@ class Graylog:
             with self.opener.open(req, timeout=30) as r:
                 raw = r.read()
         except urllib.error.HTTPError as e:
+            if 300 <= e.code < 400:
+                raise ApiError(e.code, "Graylog 回應重新導向到 %s；請把 GRAYLOG_URL 改成最終網址（例如 https）"
+                               % e.headers.get("Location", "?"))
             raise ApiError(e.code, e.read().decode("utf-8", "replace"))
-        except urllib.error.URLError as e:
-            raise ApiError(0, "連不上 %s（%s）" % (self.url, e.reason))
-        return json.loads(raw) if raw else None
+        except OSError as e:  # 含 URLError、逾時
+            raise ApiError(0, "連不上 %s（%s）" % (self.url, getattr(e, "reason", e)))
+        try:
+            return json.loads(raw) if raw else None
+        except ValueError:
+            raise ApiError(200, "回應不是 JSON（%s %s）：%s" % (method, path, raw[:120].decode("utf-8", "replace")))
 
     def list(self, path):
         data = self.call("GET", path)
@@ -304,13 +320,11 @@ P_CONN = "/api/system/pipelines/connections"
 
 
 def connected_map(gl):
-    """{pipeline id: {已連的 stream id}}。查不到就當作都沒連：之後的連線動作本身是冪等的。"""
-    try:
-        data = gl.call("GET", P_CONN)
-    except ApiError:
-        return {}
+    """{pipeline id: {已連的 stream id}}。查不到就失敗：to_pipeline 是整組取代，
+    不知道現況就送出，會把別人手動連的 stream 拿掉。"""
+    data = gl.call("GET", P_CONN)
     if not isinstance(data, list):
-        return {}
+        raise ApiError(200, "非預期的回應格式（%s）；Graylog API 版本是否不同？" % P_CONN)
     out = {}
     for c in data:
         for pid in c.get("pipeline_ids", []):
@@ -356,6 +370,7 @@ def sync(gl, targets, dry_run, say=print):
     """targets: {pipeline 標題: [要連的 stream ID]}"""
     changes = 0
     wanted = pipelines()
+    connected = connected_map(gl)  # 先讀：任何一步讀不到現況，都要在改動任何東西之前就停下
 
     existing_rules = {r["title"]: r for r in gl.list(P_RULE)}
     for title, source in (r for rules in wanted.values() for r in rules):
@@ -395,7 +410,6 @@ def sync(gl, targets, dry_run, say=print):
             else:
                 say("[Pipeline] %s：無變更" % title)
 
-    connected = connected_map(gl)
     for title in wanted:
         pid = pipe_ids.get(title)
         have = connected.get(pid, set()) if pid is not None else set()
@@ -422,7 +436,12 @@ def remove(gl, say=print):
     for p in gl.list(P_PIPE):
         if owned(p, PIPELINE_PREFIX):
             say("[Pipeline] %s：解除連線並刪除" % p["title"])
-            gl.call("POST", P_CONN + "/to_pipeline", {"pipeline_id": p["id"], "stream_ids": []})
+            try:
+                gl.call("POST", P_CONN + "/to_pipeline", {"pipeline_id": p["id"], "stream_ids": []})
+            except ApiError as e:
+                # 這個呼叫尚未在真實 Graylog 驗證過（空清單可能被拒）。不能因此卡住回滾：
+                # 照樣刪 pipeline，連線由 Graylog 在刪除時處理；殘留的話到 System → Pipelines 看
+                say("  警告：解除連線失敗（%s），仍繼續刪除" % e)
             gl.call("DELETE", "%s/%s" % (P_PIPE, p["id"]))
             n += 1
     for r in gl.list(P_RULE):
@@ -443,7 +462,10 @@ def parse_conf(path):
                 line = line.strip()
                 if line and not line.startswith("#") and "=" in line:
                     k, v = line.split("=", 1)
-                    conf[k.strip()] = v.strip().strip('"').strip("'")
+                    v = v.strip()
+                    if len(v) >= 2 and v[0] == v[-1] and v[0] in "\"'":  # 只拿掉「成對」的外層引號
+                        v = v[1:-1]
+                    conf[k.strip()] = v
     except FileNotFoundError:
         pass
     return conf

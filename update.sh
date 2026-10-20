@@ -61,11 +61,13 @@ if command -v python3 >/dev/null; then
 fi
 
 GRAYLOG_API_CONF="${GRAYLOG_API_CONF:-/etc/oracle-mon/graylog-api.conf}"
-if [ -f "$GRAYLOG_API_CONF" ] && command -v python3 >/dev/null; then
+if [ ! -f "$GRAYLOG_API_CONF" ]; then
+    say "未設定 $GRAYLOG_API_CONF，略過 Graylog IOC pipeline"
+elif ! command -v python3 >/dev/null; then
+    say "已有 $GRAYLOG_API_CONF 但找不到 python3，略過 Graylog IOC pipeline"
+else
     say "套用 Graylog IOC 欄位標準化 pipeline（冪等）"
     python3 "$HERE/system/graylog-pipelines.py" apply || say "Graylog pipeline 未套用（可稍後手動執行 system/graylog-pipelines.py apply）"
-else
-    say "未設定 $GRAYLOG_API_CONF，略過 Graylog IOC pipeline"
 fi
 
 say "更新 sudoers（新增指令需重新套用）"

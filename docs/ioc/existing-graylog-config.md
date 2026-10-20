@@ -137,6 +137,10 @@ end
 
 以 `POST /api/search/aggregate`（`group_by` 欄位、`count`）取得。
 
+**分布會隨時間大幅變動，下表只是那一小時的快照**：這一小時含 13:06 前後的一次阻擋突發（Graylog 直方圖可見，每 10 秒約 2,000 筆）。
+套用 IOC pipeline 後平穩的 3 分鐘（13:3x）是 `fw_allow` 3,982、`fw_deny` 2,206（阻擋 36%、允許 64%），
+另有約 21% 的防火牆訊息（7,794 筆中的 1,606 筆）沒有 `event_action`。
+
 `action`：
 
 | 分類 | 值（筆數） | 合計 | 占比 | IOC 的 `event_action` |
@@ -156,6 +160,13 @@ end
   很可能是 `fortigate_normalize` 用的 `key_value()` 以空白切欄位，多個字的值（例如 `Admin login failed`）只剩第一個字。
   之後要偵測 FortiGate 管理者登入失敗等事件，要比對 `message` 全文，不要依賴 `logdesc`。
 - 查詢請用 `_exists_:欄位`。Graylog 7.1 的搜尋框單打 `*` 會報 `'*' or '?' not allowed as first character in WildcardQuery`。
+- **阻擋事件裡有不少廣播雜訊**：例如 `10.60.0.140 → 255.255.255.255`，是區網的 UDP 廣播被 `traffic:local` 擋下。
+  既有的 `fortigate-extract-flow-fields` 為 jt-gelflow 特別排除了 `255.255.255.255` 與 `0.0.0.0`；
+  入口在算「需注意來源」時也應排除廣播與多播，否則會被雜訊洗版。
+- **這個 stream 裡不只一台設備**：`host_name` 有 `Land-Lab-FortiGate-71G`（約 82%）與 `LAND-SSLVPN`（約 18%，是否為另一台 FortiGate 待確認）。
+  入口依設備分組時用 `host_name`。
+- **搜尋彙整 API 一定要帶 `group_by`**，只有 `metrics` 會回 `400 groupings must not be empty`。要算總數，就 group 一個一定存在的欄位再加總。
+- **阻擋事件會有突發**：單一尖峰每 10 秒約 2,000 筆。入口的「待處理事件」、「可疑登入」之類的 KPI 不能直接拿 `fw_deny` 筆數當數字。
 
 ## 值得注意
 
