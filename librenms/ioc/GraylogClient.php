@@ -15,6 +15,9 @@ namespace Ioc;
  */
 final class GraylogClient implements LogSource
 {
+    /** 分組欄位缺值時 Graylog 放的字串。 */
+    private const EMPTY_VALUE = '(Empty Value)';
+
     private string $base;
     private string $auth;
     private ?string $caFile;
@@ -210,18 +213,25 @@ final class GraylogClient implements LogSource
     private function rows(array $data): array
     {
         $keys = [];
+        $grouping = [];
         foreach ($data['schema'] as $i => $col) {
             if (($col['column_type'] ?? '') === 'metric') {
                 $fn = (string) ($col['function'] ?? 'metric');
                 $keys[$i] = (isset($col['field']) && $col['field'] !== '') ? $fn . '_' . $col['field'] : $fn;
             } else {
                 $keys[$i] = (string) ($col['field'] ?? $col['name'] ?? $i);
+                $grouping[$i] = ($col['column_type'] ?? '') === 'grouping';
             }
         }
         $out = [];
         foreach ($data['datarows'] as $row) {
             $assoc = [];
             foreach ($row as $i => $v) {
+                // 分組欄位缺值時，Graylog 回的是字串 "(Empty Value)"（monitor-vm 實測）。那是「沒有值」，
+                // 不能當成真的值：否則畫面會顯示「來源位址：(Empty Value)」，建立事件案時還會帶進去
+                if ($v === self::EMPTY_VALUE && !empty($grouping[$i])) {
+                    $v = null;
+                }
                 $assoc[$keys[$i] ?? (string) $i] = $v;
             }
             $out[] = $assoc;

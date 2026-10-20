@@ -55,6 +55,17 @@ switch ($body['query'] ?? '') {
     case 'BADSCHEMA':
         echo json_encode(['foo' => 1]);
         return;
+    case 'EMPTYVALUE':      // 分組欄位缺值時，真的 Graylog 在該欄放字串 "(Empty Value)"（monitor-vm 畫面實測）
+        echo json_encode([
+            'schema' => [
+                ['column_type' => 'grouping', 'type' => 'string', 'field' => 'user_name', 'name' => 'grouping: user_name'],
+                ['column_type' => 'grouping', 'type' => 'string', 'field' => 'src_ip', 'name' => 'grouping: src_ip'],
+                ['column_type' => 'metric', 'type' => 'numeric', 'function' => 'count', 'name' => 'metric: count()'],
+            ],
+            'datarows' => [['alice', '(Empty Value)', 1], ['bob', '10.0.0.1', 2], ['(Empty Value)', '(Empty Value)', 3]],
+            'metadata' => [],
+        ]);
+        return;
 }
 
 if ($path === '/api/search/messages') {
