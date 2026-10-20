@@ -84,6 +84,14 @@ CREATE TABLE IF NOT EXISTS ioc_settings_history (
   KEY idx_ioc_settings_history_ts (ts)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 SQL,
+            // ── 以下是「事件詳情改版」新增的事件案欄位（2026-10-20）。已部署的主機資料表已存在，所以用 ALTER 補；
+            // 全新安裝則是建好表之後立刻補上。PdoCaseRepo::CASE_COLUMNS 要同步（測試會檢查）。
+            // category 是事件類型代碼（CaseCatalog），攻擊技術與建議處置依它顯示、不存進案件；tags 是逗號分隔的標籤。
+            'ALTER TABLE ioc_cases ADD COLUMN IF NOT EXISTS category VARCHAR(32) NULL',
+            'ALTER TABLE ioc_cases ADD COLUMN IF NOT EXISTS target_host VARCHAR(128) NULL',
+            'ALTER TABLE ioc_cases ADD COLUMN IF NOT EXISTS related_host VARCHAR(128) NULL',
+            'ALTER TABLE ioc_cases ADD COLUMN IF NOT EXISTS impact_scope VARCHAR(200) NULL',
+            'ALTER TABLE ioc_cases ADD COLUMN IF NOT EXISTS tags VARCHAR(200) NULL',
         ];
     }
 }

@@ -19,6 +19,22 @@ final class Time
         }
     }
 
+    /** 經過的秒數 → 「2 天 3 小時」「4 小時 5 分」「12 分鐘」「不到 1 分鐘」（負數當成 0）。 */
+    public static function humanDuration(int $seconds): string
+    {
+        $s = max(0, $seconds);
+        if ($s < 60) {
+            return '不到 1 分鐘';
+        }
+        $d = intdiv($s, 86400);
+        $h = intdiv($s % 86400, 3600);
+        $m = intdiv($s % 3600, 60);
+        if ($d > 0) {
+            return $d . ' 天 ' . $h . ' 小時';
+        }
+        return $h > 0 ? $h . ' 小時 ' . $m . ' 分' : $m . ' 分鐘';
+    }
+
     /**
      * ISO 字串或 'Y-m-d H:i:s' → 台北時間；解析不了回傳 '—'。
      * $sourceTz 是沒帶時區的來源字串所屬時區：預設 UTC；LibreNMS 資料表（例如 devices.last_polled）

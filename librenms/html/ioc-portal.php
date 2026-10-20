@@ -36,6 +36,7 @@ $config = json_encode([
     'labels' => [
         'caseStatus'   => Ioc\Labels::CASE_STATUS,
         'caseSeverity' => Ioc\Labels::CASE_SEVERITY,
+        'caseCategory' => Ioc\CaseCatalog::labels(),
         'resolution'   => Ioc\Labels::RESOLUTION,
         'siteLevel'    => Ioc\Fleet::LEVELS,
         'riskLevel'    => Ioc\RiskScore::LEVEL_LABEL,
@@ -129,7 +130,19 @@ tr.click:focus-visible,.btn:focus-visible,.nav button:focus-visible,.bell:focus-
 select,input,textarea{font:inherit;font-size:13px;color:#dfeafa;background:#0c1a2b;border:1px solid var(--line);border-radius:8px;padding:6px 9px;max-width:100%}
 textarea{width:100%;min-height:70px}
 label{display:block;font-size:12px;color:var(--muted);margin:10px 0 3px}
-.split{display:grid;grid-template-columns:minmax(0,1.3fr) minmax(0,1fr);gap:14px}
+.split{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1.5fr);gap:14px}
+.sumrow{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:8px;margin:10px 0}
+.sumrow>div{padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#0a1728;min-width:0}
+.sumrow .k{display:block;font-size:11px;color:var(--muted)}
+.sumrow .v{display:block;font-size:13px;word-break:break-word}
+.sec-h{margin:18px 0 6px;font-size:13px;padding-top:10px;border-top:1px solid var(--line)}
+.pill{display:inline-block;margin:2px 6px 2px 0;padding:1px 9px;border:1px solid #2a4060;border-radius:999px;font-size:11px;color:#c8d6e7}
+.steps{margin:4px 0 0;padding-left:20px;font-size:13px}
+.steps li{margin:4px 0}
+.idx{display:grid;grid-template-columns:repeat(auto-fill,minmax(120px,1fr));gap:8px}
+.idx>div{padding:6px 8px;border:1px solid var(--line);border-radius:10px;background:#0a1728;font-size:11px;color:var(--muted);min-width:0}
+.idx b{display:block;font-size:18px;color:#fff}
+.idx .na{color:var(--gray)}
 .kv{display:grid;grid-template-columns:7em 1fr;gap:4px 10px;font-size:13px}
 .kv dt{color:var(--muted)}.kv dd{margin:0;word-break:break-word}
 code{background:#0a1423;border:1px solid var(--line);border-radius:6px;padding:2px 6px;font-size:12px;word-break:break-all}
@@ -162,7 +175,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
 @media(max-width:1280px){.kpis6{grid-template-columns:repeat(3,minmax(0,1fr))}.three{grid-template-columns:1fr}}
 @media(max-width:1180px){.two,.even,.split{grid-template-columns:1fr}}
 @media(max-width:900px){.app{flex-direction:column}.side{position:static;width:auto;height:auto;padding:10px}.nav{flex-direction:row;overflow-x:auto}.nav button{white-space:nowrap;width:auto}.nav .sep{display:none}.main{padding:10px}}
-@media(max-width:720px){.kpis6,.kpis2{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:720px){.kpis6,.kpis2{grid-template-columns:repeat(2,minmax(0,1fr))}.sumrow{grid-template-columns:repeat(2,minmax(0,1fr))}}
 </style>
 </head>
 <body>
@@ -427,7 +440,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
         h('div', null, h('div', { class: 't' }, a.user + (a.src_ip ? ' · ' + a.src_ip : '')), h('div', { class: 'd' }, '24 小時內 ' + fmt(a.count) + ' 次可疑事件')),
         h('div', { class: 'row' }, levelBadge({ high: '高', medium: '中', low: '低' }[a.level]),
           createButton({ title: '可疑登入：' + a.user + (a.src_ip ? '（' + a.src_ip + '）' : ''), severity: LEVEL_TO_SEVERITY[a.level],
-            subject_user: a.user, subject_ip: a.src_ip,
+            category: 'suspicious_login', subject_user: a.user, subject_ip: a.src_ip,
             evidence_query: [luceneQ('user_name', a.user), a.src_ip ? luceneQ('src_ip', a.src_ip) : null].filter(Boolean).join(' AND ') })))));
       if (accounts.data.capped) blocks.push(h('p', { class: 'note warn' }, '資料量超過查詢上限，實際筆數可能更多。'));
     }
@@ -438,7 +451,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
       if (!d.internal.length) blocks.push(h('p', { class: 'note' }, '沒有內部來源被阻擋。'));
       d.internal.forEach((s) => blocks.push(h('div', { class: 'row' },
         h('div', null, h('div', { class: 't' }, s.src_ip), h('div', { class: 'd' }, '被阻擋 ' + fmt(s.count) + ' 次')),
-        createButton({ title: '防火牆持續阻擋內部來源 ' + s.src_ip, severity: 'medium', subject_ip: s.src_ip,
+        createButton({ title: '防火牆持續阻擋內部來源 ' + s.src_ip, severity: 'medium', category: 'fw_internal_block', subject_ip: s.src_ip,
           evidence_query: 'event_action:fw_deny AND ' + luceneQ('src_ip', s.src_ip) }))));
       blocks.push(h('p', { class: 'note' }, '外部來源共 ' + fmt(d.external_events) + ' 筆阻擋（網際網路的掃描雜訊，已彙總、不逐一列出）；廣播與多播已排除。'));
       if (d.capped) blocks.push(h('p', { class: 'note warn' }, '來源數超過查詢上限，數字可能不只這些。'));
@@ -690,9 +703,14 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     const f = {
       title: h('input', { type: 'text', maxlength: 200, value: pre.title || '', style: 'width:100%' }),
       severity: h('select', null, Object.entries(CFG.labels.caseSeverity).map(([v, t]) => h('option', { value: v, selected: v === (pre.severity || 'medium') }, t))),
+      category: h('select', null, Object.entries(CFG.labels.caseCategory).map(([v, t]) => h('option', { value: v, selected: v === (pre.category || 'other') }, t))),
       subject_user: h('input', { type: 'text', maxlength: 128, value: pre.subject_user || '' }),
       subject_ip: h('input', { type: 'text', maxlength: 45, value: pre.subject_ip || '' }),
       subject_host: h('input', { type: 'text', maxlength: 128, value: pre.subject_host || '' }),
+      target_host: h('input', { type: 'text', maxlength: 128, value: pre.target_host || '' }),
+      related_host: h('input', { type: 'text', maxlength: 128, value: pre.related_host || '' }),
+      impact_scope: h('input', { type: 'text', maxlength: 200, value: pre.impact_scope || '', style: 'width:100%' }),
+      tags: h('input', { type: 'text', maxlength: 200, value: pre.tags || '', placeholder: '用逗號分隔，最多 5 個，每個 20 字內', style: 'width:100%' }),
       summary: h('textarea', { maxlength: 2000 }, pre.summary || ''),
       evidence_query: h('textarea', { maxlength: 1000 }, pre.evidence_query || ''),
     };
@@ -712,30 +730,92 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
       }
     } },
       h('h3', { style: 'margin:0 0 6px' }, '建立事件案'),
-      field('標題', f.title), field('等級', f.severity), field('帳號', f.subject_user), field('來源位址', f.subject_ip), field('設備', f.subject_host),
-      field('說明', f.summary), field('Graylog 查詢條件（在 Graylog 搜尋這串就能看到原始日誌）', f.evidence_query),
+      field('標題', f.title), field('事件類型（決定詳情頁的攻擊技術與建議處置）', f.category), field('等級', f.severity),
+      field('帳號', f.subject_user), field('來源位址', f.subject_ip), field('設備（來源主機）', f.subject_host),
+      field('目的主機', f.target_host), field('關聯主機', f.related_host), field('影響範圍', f.impact_scope), field('標籤', f.tags),
+      field('說明', f.summary), field('Graylog 查詢條件（在 Graylog 搜尋這串就能看到原始日誌；詳情頁的證據時間軸也靠它）', f.evidence_query),
       h('div', { class: 'toolbar', style: 'margin-top:12px' }, submit,
         h('button', { class: 'btn', type: 'button', onclick: () => { state.form = null; renderRight(); } }, '取消')), msg);
     return form;
   }
 
+  // ── 事件詳情（簡報第 7 張）：主控台、摘要列、事件概要、證據時間軸、關聯指標、建議處置、處理、歷程 ──
+  const secTitle = (t) => h('h3', { class: 'sec-h' }, t);
+
+  /** 證據時間軸；取不到要明講原因，不能變成空的時間軸（沒填查詢條件是另一種說法，不是「無法取得」）。 */
+  function renderTimeline(r) {
+    if (!r.ok) return [r.reason === 'no_query' ? h('p', { class: 'note warn' }, r.error) : unavailable(r.error)];
+    const d = r.data;
+    const out = [h('p', { class: 'note', style: 'margin-top:0' }, '查詢範圍：' + d.window.from + ' ～ ' + d.window.to + '（事件建立時間的前後），由舊到新。')];
+    if (!d.items.length) {
+      out.push(h('p', { class: 'note' }, '這段時間沒有符合查詢條件的日誌。可能是對應的來源尚未接入，或事件發生得很久、日誌已超過 Graylog 的保存期限；不代表沒有事件。'));
+      return out;
+    }
+    out.push(h('ul', { class: 'tl' }, d.items.map((x) => h('li', null,
+      h('div', { class: 'when' }, x.time + '　' + x.type + (x.level ? '　需注意程度：' + x.level : '')),
+      h('div', null, x.action),
+      x.detail ? h('div', { class: 'd', style: 'color:var(--muted)' }, x.detail) : null))));
+    if (d.truncated) out.push(h('p', { class: 'note warn' }, '只列最新 ' + d.items.length + ' 筆，這段時間實際共 ' + fmt(d.total) + ' 筆。'));
+    return out;
+  }
+
+  function renderIndicators(r) {
+    if (!r.ok) return [h('p', { class: 'note' }, r.reason === 'no_query' ? '沒有查詢條件，無法統計。' : '無法取得（原因見上方證據時間軸）。')];
+    return [h('div', { class: 'idx' }, r.data.indicators.map((i) => h('div', null,
+      h('b', { class: i.value === null ? 'na' : null }, i.value === null ? (i.na || '無法取得') : fmt(i.value)), i.label)))];
+  }
+
+  let evidenceSeq = 0;   // 連續點不同案件時，只採用最後一次的回應
+  async function loadEvidence(id, timelineBox, indicatorBox) {
+    const seq = ++evidenceSeq;
+    timelineBox.replaceChildren(h('p', { class: 'note' }, '載入證據中…'));
+    let r;
+    try {
+      r = (await api('/ioc-cases.php', { action: 'evidence', id, demo: CFG.demo })).evidence;
+    } catch (e) {
+      r = { ok: false, reason: 'unavailable', error: e.message };
+    }
+    if (seq !== evidenceSeq || !document.contains(timelineBox)) return;
+    timelineBox.replaceChildren(...renderTimeline(r));
+    indicatorBox.replaceChildren(...renderIndicators(r));
+  }
+
   function renderDetail(d) {
     const c = d.case;
+    const cell = (k, v) => h('div', null, h('span', { class: 'k' }, k), h('span', { class: 'v' }, v));
+    const timelineBox = h('div', null);
+    const indicatorBox = h('div', null);
     const parts = [
-      h('h3', { style: 'margin:0 0 8px' }, '#' + c.id + '　' + c.title),
+      h('div', { class: 'toolbar', style: 'margin-bottom:4px' }, levelBadge(c.severity_label), statusBadge(c),
+        h('span', { class: 'note', style: 'margin:0' }, '事件編號 #' + c.id + '　建立 ' + c.created_at)),
+      h('h3', { style: 'margin:0 0 4px' }, c.title),
+      h('div', { class: 'sumrow' },
+        cell('偵測時間', c.created_at), cell('來源', subject(c)), cell('目的主機', c.target_host || '—'), cell('關聯主機', c.related_host || '—'),
+        cell(c.duration_ended ? '持續時間（至結案）' : '已持續時間', c.duration_label)),
+      secTitle('事件概要'),
       h('dl', { class: 'kv' },
+        h('dt', null, '事件類型'), h('dd', null, c.category_label),
+        h('dt', null, '攻擊技術'), h('dd', null, c.attack ? c.attack.id + '　' + c.attack.name : '—（這個類型沒有對應的攻擊技術）'),
+        h('dt', null, '影響等級'), h('dd', null, levelBadge(c.severity_label)),
+        h('dt', null, '影響範圍'), h('dd', null, c.impact_scope || '—'),
+        h('dt', null, '事件標籤'), h('dd', null, c.tags.length ? c.tags.map((t) => h('span', { class: 'pill' }, t)) : '—'),
         h('dt', null, '狀態'), h('dd', null, statusBadge(c), c.resolution_label ? '　處理結果：' + c.resolution_label : ''),
-        h('dt', null, '等級'), h('dd', null, levelBadge(c.severity_label)),
-        h('dt', null, '對象'), h('dd', null, subject(c)),
         h('dt', null, '負責人'), h('dd', null, c.assignee || '—'),
         h('dt', null, '建立'), h('dd', null, c.created_at + '　' + c.created_by + '（' + c.source_label + '）'),
         h('dt', null, '最後更新'), h('dd', null, c.updated_at),
         c.closed_at ? [h('dt', null, '結案'), h('dd', null, c.closed_at)] : null,
         c.summary ? [h('dt', null, '說明'), h('dd', null, c.summary)] : null,
         c.evidence_query ? [h('dt', null, '查詢條件'), h('dd', null, h('code', null, c.evidence_query))] : null),
+      secTitle('證據時間軸'), timelineBox,
+      secTitle('關聯指標'), indicatorBox,
+      secTitle('建議處置'),
+      h('ol', { class: 'steps' }, c.steps.map((s) => h('li', null, s))),
+      h('p', { class: 'note' }, '這是依「' + c.category_label + '」這個事件類型的內建範本，不是針對這一件事的即時分析，請依單位的處理流程調整。'),
     ];
     if (CAN_HANDLE) parts.push(renderActions(c, d.transitions));
-    parts.push(h('h3', { style: 'margin:16px 0 6px' }, '處理歷程'),
+    // 證據要另外查 Graylog（可能很慢或失敗）：詳情先顯示，證據載入後再填進去；等這一輪畫面掛上去才開始載入
+    queueMicrotask(() => loadEvidence(c.id, timelineBox, indicatorBox));
+    parts.push(h('h3', { class: 'sec-h' }, '處理歷程'),
       h('ul', { class: 'tl' }, d.history.map((x) => h('li', null,
         h('div', { class: 'when' }, x.time + '　' + x.actor),
         h('div', null, x.action === 'status_changed' ? x.from_label + ' → ' + x.to_label + (x.resolution_label ? '（' + x.resolution_label + '）' : '') : x.action_label),

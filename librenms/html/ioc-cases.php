@@ -4,7 +4,8 @@
  *
  *   summary                               各狀態件數（檢視者可）
  *   list    {status,limit,offset}         列表（檢視者可）
- *   get     {id}                          單一事件案與歷程（檢視者可）
+ *   get     {id}                          單一事件案與歷程（檢視者可）；含攻擊技術、建議處置、已持續時間
+ *   evidence {id,demo}                    證據時間軸與關聯指標（唯讀查 Graylog；檢視者可）
  *   create  {case:{title,severity,…}}     建立（僅 admin）
  *   transition {id,to,resolution,note}    變更狀態（僅 admin）
  *   comment {id,note}                     留言（僅 admin）
@@ -46,13 +47,17 @@ try {
         case 'get':
             $r = $svc->get((int) ($in['id'] ?? 0), $level);
             ioc_json([
-                'case'        => CaseView::row($r['case']),
+                'case'        => CaseView::detail($r['case']),
                 'history'     => array_map([CaseView::class, 'history'], $r['history']),
                 'transitions' => CaseView::transitions($r['allowed']),
             ]);
+        case 'evidence':
+            // 證據時間軸與關聯指標：只讀；檢視者也能看（get 會先檢查檢視權限）。demo 只決定查範例資料還是正式資料
+            $r = $svc->get((int) ($in['id'] ?? 0), $level);
+            ioc_json(['evidence' => ioc_evidence($r['case'], ($in['demo'] ?? false) === true)]);
         case 'create':
             // 欄位白名單；dedup_key 只給自動建立用，不接受瀏覽器傳入
-            $fields = ioc_pick($in['case'] ?? null, ['title', 'severity', 'subject_user', 'subject_ip', 'subject_host', 'summary', 'evidence_query']);
+            $fields = ioc_pick($in['case'] ?? null, ['title', 'severity', 'category', 'subject_user', 'subject_ip', 'subject_host', 'target_host', 'related_host', 'impact_scope', 'tags', 'summary', 'evidence_query']);
             $r = $svc->create($fields, $actor, $level);
             ioc_overview_cache_forget();          // 總覽快取裡有事件案件數
             ioc_json($r, $r['created'] ? 201 : 200);

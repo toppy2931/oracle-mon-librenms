@@ -95,6 +95,8 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
                 m = re.match(r"\s+([a-z_]+) (?:INT|BIGINT|VARCHAR|TEXT|DATETIME)", line)
                 if m:
                     cols.add(m.group(1))
+            # 後來用 ALTER TABLE … ADD COLUMN IF NOT EXISTS 補的欄位（已部署的主機靠它）也算這張表的欄位
+            cols |= set(re.findall(r"ALTER TABLE %s ADD COLUMN IF NOT EXISTS (\w+) " % name, schema))
             return cols
 
         def whitelist(const):
@@ -232,6 +234,26 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
         """LibreNMS 的可用率欄位為 NULL 是「沒有資料」；(float) null 會變成 0% 把整體可用率拉低。"""
         src = (ROOT / "librenms" / "ioc" / "endpoint.php").read_text(encoding="utf-8")
         self.assertRegex(src, r"availability_perc === null\)\s*\{\s*continue;")
+
+    def test_evidence_action_checks_view_permission_before_it_queries_graylog(self):
+        """證據時間軸會拿事件案存的查詢條件去問 Graylog：沒有檢視權限的人不能觸發這個查詢。"""
+        src = (ROOT / "librenms" / "html" / "ioc-cases.php").read_text(encoding="utf-8")
+        block = re.search(r"case 'evidence':(.*?)case 'create':", src, re.S).group(1)
+        self.assertIn("$svc->get(", block)
+        self.assertLess(block.index("$svc->get("), block.index("ioc_evidence("), "要先通過 CaseService::get 的權限檢查才能查 Graylog")
+        self.assertIn("=== true", block, "demo 旗標只收真正的 true，不收字串")
+
+    def test_case_create_whitelist_has_every_user_editable_case_column(self):
+        """事件案新增的欄位若沒進建立的白名單，畫面送了也會被丟掉（能存但沒入口可填）。"""
+        src = (ROOT / "librenms" / "html" / "ioc-cases.php").read_text(encoding="utf-8")
+        block = re.search(r"case 'create':(.*?)case 'transition':", src, re.S).group(1)
+        for col in ("category", "target_host", "related_host", "impact_scope", "tags"):
+            self.assertIn("'%s'" % col, block, col)
+
+    def test_evidence_queries_always_exclude_or_select_demo_data(self):
+        """入口與報表必須排除範例資料（IS-054～056）；證據查詢也一樣。"""
+        src = (ROOT / "librenms" / "ioc" / "EvidenceService.php").read_text(encoding="utf-8")
+        self.assertRegex(src, r"ioc_demo:true' : 'NOT ioc_demo:true'")
 
     def test_settings_api_is_post_only_and_a_save_clears_the_overview_cache(self):
         """風險等級是算好存在總覽快取裡的：存了新門檻卻不清快取，畫面最多 20 秒還是舊等級。"""
