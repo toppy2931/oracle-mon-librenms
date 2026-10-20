@@ -163,9 +163,12 @@ test('Graylog：不跟隨重導向（不會連到另一個位址）', function (
 });
 
 test('Graylog：逾時有上界，回報逾時', function () {
+    // 伺服器睡 8 秒、逾時設 1 秒：逾時有生效就在 1 秒左右回來（機器再忙也遠小於 6 秒）；
+    // 沒生效就會等到伺服器睡醒（8 秒），而且錯誤訊息會變成「回應格式不符」，assertThrows 先擋下
     $t = microtime(true);
     assertThrows(GraylogUnavailable::class, fn () => client([], 1)->aggregate('SLOW', 60, ['a'], ['count']), '逾時');
-    assertTrue(microtime(true) - $t < 2.8, '逾時要在設定的秒數內回來，實際花了 ' . round(microtime(true) - $t, 1) . ' 秒');
+    $elapsed = microtime(true) - $t;
+    assertTrue($elapsed < 6.0, '逾時應該不等伺服器睡醒（8 秒），實際花了 ' . round($elapsed, 1) . ' 秒');
 });
 
 test('Graylog：連不上時回報連線失敗，不洩漏位址', function () {
@@ -177,15 +180,18 @@ test('Graylog：連不上時回報連線失敗，不洩漏位址', function () {
     assertTrue(mb_strpos($e->getMessage(), '127.0.0.1') === false);
 });
 
-// 放在最後：假伺服器（php -S）一次只處理一個請求，SLOW 會讓它忙 3 秒，不要拖慢前面的測試
+// 放在最後：假伺服器（php -S）一次只處理一個請求，SLOW 會讓它忙 8 秒，不要拖慢前面的測試
 test('Graylog：整次載入共用時間預算，用完後的查詢直接回報逾時，不再各等一輪', function () {
-    $c = new GraylogClient(fakeGraylog()['url'], 'tok123', [], null, 5, 1);   // 單次最多 5 秒，但總預算只有 1 秒
+    // 單次逾時 20 秒、總預算只有 1 秒、伺服器睡 8 秒。預算有生效：第一次約 1 秒就回來，第二次根本不連線；
+    // 沒生效：第一次會等到伺服器睡醒（錯誤訊息變成「回應格式不符」，assertThrows 先擋下），第二次會再等
+    $c = new GraylogClient(fakeGraylog()['url'], 'tok123', [], null, 20, 1);
     $t = microtime(true);
     assertThrows(GraylogUnavailable::class, fn () => $c->aggregate('SLOW', 60, ['a'], ['count']), '逾時');
     $first = microtime(true) - $t;
-    assertTrue($first < 1.8, '第一次應在預算內回來，實際花了 ' . round($first, 1) . ' 秒');
+    assertTrue($first < 6.0, '第一次應在預算內回來，不等伺服器睡醒（8 秒），實際花了 ' . round($first, 1) . ' 秒');
 
     $t = microtime(true);
     assertThrows(GraylogUnavailable::class, fn () => $c->aggregate('x', 60, ['a'], ['count']), '逾時');
-    assertTrue(microtime(true) - $t < 0.3, '預算用完後不應該再連線等待');
+    $second = microtime(true) - $t;
+    assertTrue($second < 3.0, '預算用完後不應該再連線等待，實際花了 ' . round($second, 1) . ' 秒');
 });
