@@ -50,7 +50,9 @@ switch ($body['query'] ?? '') {
         header('Location: http://127.0.0.1:1/elsewhere', true, 302);
         return;
     case 'SLOW':
-        sleep(3);
+        // 睡得比任何合理的「機器忙而延遲」都久：逾時有沒有生效，看的是「有沒有等到伺服器睡醒」，
+        // 不是跟一個很緊的秒數比（機器忙時 1 秒逾時偶爾會被拖到 3 秒，緊的門檻會偶發失敗）
+        sleep(8);
         return;
     case 'BADSCHEMA':
         echo json_encode(['foo' => 1]);
