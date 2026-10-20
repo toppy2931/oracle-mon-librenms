@@ -355,7 +355,7 @@ FortiGate CEF 格式的 `key=value` 內容用 **6 個獨立 Grok pattern Extract
 - 設計取捨：每條 pipeline 只有一個 stage（stage 不滿足 match 條件時後面的 stage 不會跑，fallback 鏈會悄悄斷掉）；規則互相獨立、條件互斥，不依賴同一 stage 內的執行順序；條件全寫在 `when`（同上方 GeoIP 的語法坑）。來源欄位名稱因 shipper 而異，用 `coalesce()` 列候選欄位。
 - **防火牆 pipeline 是 stage 2，且要連到 FortiGate 的自訂 stream**：同一 stream 上的 pipeline 依 stage 編號跨 pipeline 一起往下跑，`srcip`／`dstip`／`action` 由既有的 `fortigate_normalize` 在 stage 0 產生，所以排在它之後；FortiGate 訊息又不在 Default Stream，所以設定檔要有 `GRAYLOG_FIREWALL_STREAMS=FortiGate Syslog`（標題或 ID，找不到會報錯不會默默略過）。**Windows pipeline 不可連到那個 stream**（它把 `source_ip` 當候選欄位，而 `fortigate-extract-flow-fields` 會產生同名欄位）。連線只增不減，不會拿掉別人手動連的 stream。
 - **新增 `event_action` 代碼要同步補 `docs/ioc/phase0.md` 的中文對照表**，測試會擋。
-- **驗證狀態**（2026-10-20，monitor-vm）：API 與規則語法已驗證，Windows／Linux／網路設備／防火牆用重播資料驗證過；**防火牆規則對真實 FortiGate 流量、缺帳號欄位的 Windows 事件尚待驗證**。結果與待辦見 phase0.md §4。這台沒有真實 Windows 事件。
+- **驗證狀態**（2026-10-20，monitor-vm）：API 與規則語法已驗證，Windows／Linux／網路設備／防火牆用重播資料驗證過；防火牆規則也已用真實 FortiGate 流量驗證（stage 2、讀 `srcip`／`dstip`／`action` 都正常）；**缺帳號欄位的 Windows 事件尚待驗證**。結果與待辦見 phase0.md §4。這台沒有真實 Windows 事件。
 - 測試：`python3 -m unittest discover -s tests`。Windows 上 `subprocess` 找 `bash` 會優先挑到 System32 的 WSL 啟動器（環境變數傳不進去、輸出被轉碼），`tests/test_phase0_tools.py` 的 `find_bash()` 已排除。
 - `tools/replay-sample-logs.py` 沒有預設目標，避免誤打正式環境；送出的每筆都帶 `ioc_demo=true`，入口與報表必須排除（規格 IS-054～056）。
 - `system/ioc-preflight.sh` 是上線前唯讀自檢（出廠密碼、HTTP/HTTPS、設定檔權限、pipeline 是否已套用）。

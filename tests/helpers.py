@@ -28,17 +28,23 @@ class FakeGraylog:
         self.streams = {"000000000000000000000001": "Default Stream", "6a33ef93a68ab16ef006f414": "FortiGate Syslog"}
         self.requests = []                                 # (method, path, body)
         self.header_violations = []                        # 缺 X-Requested-By 的請求（Graylog 會拒絕）
+        self.overrides = {}                                # (method, path) -> (code, body[, headers])
         fake = self
 
         class Handler(BaseHTTPRequestHandler):
             def log_message(self, *a):
                 pass
 
-            def _send(self, code, obj=None):
-                raw = b"" if obj is None else json.dumps(obj).encode()
+            def _send(self, code, obj=None, headers=None):
+                if isinstance(obj, bytes):          # 測試用：回非 JSON 的內容
+                    raw = obj
+                else:
+                    raw = b"" if obj is None else json.dumps(obj).encode()
                 self.send_response(code)
                 self.send_header("Content-Type", "application/json")
                 self.send_header("Content-Length", str(len(raw)))
+                for k, v in (headers or {}).items():
+                    self.send_header(k, v)
                 self.end_headers()
                 self.wfile.write(raw)
 
@@ -51,6 +57,9 @@ class FakeGraylog:
                 if not self.headers.get("X-Requested-By"):
                     fake.header_violations.append((method, self.path))
                     return self._send(400, {"message": "missing X-Requested-By"})
+                ov = fake.overrides.get((method, self.path))
+                if ov:                               # (狀態碼, 內容, 標頭)：強制某個請求回特定結果
+                    return self._send(ov[0], ov[1], ov[2] if len(ov) > 2 else None)
                 code, out = fake.route(method, self.path, body)
                 self._send(code, out)
 
@@ -61,7 +70,8 @@ class FakeGraylog:
 
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
         self.url = "http://127.0.0.1:%d" % self.server.server_address[1]
-        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        # 預設輪詢間隔 0.5 秒，shutdown() 會等到下一次輪詢，每個測試白白多 0.5 秒
+        threading.Thread(target=self.server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True).start()
 
     def close(self):
         self.server.shutdown()

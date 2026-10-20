@@ -13,10 +13,18 @@ gp = load_module("graylog_pipelines", "system/graylog-pipelines.py")
 STREAM = gp.DEFAULT_STREAM_ID
 
 
+# load_config() 會讀的環境變數。先全部清空再套用測試指定的，避免實機上 export 過的值（例如
+# GRAYLOG_FIREWALL_STREAMS）漏進來改變行為
+CONFIG_KEYS = ("GRAYLOG_URL", "GRAYLOG_USER", "GRAYLOG_PASS", "GRAYLOG_CA_FILE", "GRAYLOG_STREAM_ID",
+               "GRAYLOG_FIREWALL_STREAMS")
+
+
 def run(argv, env):
     """以指定環境變數跑 main()，回傳 (退出碼, stdout, stderr)。"""
     out, err = io.StringIO(), io.StringIO()
-    with mock.patch.dict(os.environ, env, clear=False), redirect_stdout(out), redirect_stderr(err):
+    full = dict.fromkeys(CONFIG_KEYS, "")
+    full.update(env)
+    with mock.patch.dict(os.environ, full, clear=False), redirect_stdout(out), redirect_stderr(err):
         # reconfigure 在 StringIO 上不存在，main() 會自行略過
         code = gp.main(argv)
     return code, out.getvalue(), err.getvalue()
@@ -88,6 +96,11 @@ class RuleGenerationTests(unittest.TestCase):
                 for f in re.findall(r"%\{\w+:(\w+)\}", src):
                     self.assertIn(f, gp.STANDARD_FIELDS)
 
+    def test_ssh_invalid_user_line_has_its_own_action(self):
+        """帳號不存在時 sshd 記兩行；兩行若同為 login_failed，一次嘗試會被算成兩次。"""
+        actions = {name: action for name, _, action, _, _ in gp.LINUX_EVENTS}
+        self.assertNotEqual(actions["linux-ssh-invalid-user"], actions["linux-ssh-failed"])
+
     def test_every_event_action_is_documented(self):
         """新增 event_action 代碼卻沒補 docs/ioc/phase0.md 的中文對照，入口之後就會顯示英文代碼。"""
         doc = (ROOT / "docs" / "ioc" / "phase0.md").read_text(encoding="utf-8")
@@ -117,6 +130,20 @@ class ConfigTests(unittest.TestCase):
             self.assertEqual(conf["GRAYLOG_PASS"], "p w")
             self.assertEqual(conf["GRAYLOG_URL"], "https://x:9000")
             self.assertEqual(conf["GRAYLOG_STREAM_ID"], STREAM)   # 預設值
+
+    def test_only_a_matching_pair_of_outer_quotes_is_stripped(self):
+        """密碼結尾是引號時不能被吃掉（舊寫法 strip 會拿掉所有首尾引號）。"""
+        with tempfile.TemporaryDirectory() as d:
+            path = os.path.join(d, "g.conf")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write('GRAYLOG_PASS=abc"\nGRAYLOG_USER=\'u\'\nGRAYLOG_URL="http://x:9000"\n'
+                        'GRAYLOG_CA_FILE="it\'s"\nGRAYLOG_STREAM_ID=\'"\'\n')
+            conf = gp.parse_conf(path)
+        self.assertEqual(conf["GRAYLOG_PASS"], 'abc"')
+        self.assertEqual(conf["GRAYLOG_USER"], "u")
+        self.assertEqual(conf["GRAYLOG_URL"], "http://x:9000")
+        self.assertEqual(conf["GRAYLOG_CA_FILE"], "it's")
+        self.assertEqual(conf["GRAYLOG_STREAM_ID"], '"')
 
     def test_missing_credentials_exit_2_without_requests(self):
         code, _, err = run(["apply"], {"GRAYLOG_API_CONF": "/nonexistent", "GRAYLOG_USER": "", "GRAYLOG_PASS": ""})
@@ -216,6 +243,49 @@ class SyncTests(unittest.TestCase):
         self.assertEqual(code, 0)
         self.assertEqual(self.gl.mutations(), [])
         self.assertEqual(self.gl.conns[self.FW_STREAM], [self.fw_id()])
+
+    # ── 審查後補的失敗情境 ──
+    def test_redirect_is_not_followed_and_is_reported(self):
+        """被重導向時不能帶著帳密跟過去，也不能把 POST 悄悄變成 GET。"""
+        rule_path = "/api/system/pipelines/rule"
+        self.gl.overrides[("POST", rule_path)] = (301, None, {"Location": self.gl.url + rule_path})
+        code, _, err = run(["apply"], self.env)
+        self.assertEqual(code, 1)
+        self.assertIn("重新導向", err)
+        self.assertEqual(self.gl.pipes, {})
+
+    def test_unreadable_connections_stops_before_any_change(self):
+        """to_pipeline 是整組取代；讀不到現況就不能送，而且要在改任何東西之前就停。"""
+        self.gl.overrides[("GET", "/api/system/pipelines/connections")] = (500, {"message": "boom"})
+        code, _, err = run(["apply"], self.env)
+        self.assertEqual(code, 1)
+        self.assertIn("500", err)
+        self.assertEqual(self.gl.mutations(), [])
+
+    def test_non_json_response_is_an_api_error_not_a_traceback(self):
+        self.gl.overrides[("GET", "/api/system/pipelines/rule")] = (200, b"<html>maintenance</html>")
+        code, _, err = run(["apply"], self.env)
+        self.assertEqual(code, 1)
+        self.assertIn("回應不是 JSON", err)
+        self.assertNotIn("Traceback", err)
+        self.assertEqual(self.gl.mutations(), [])
+
+    def test_connection_failure_is_an_api_error(self):
+        self.gl.close()
+        code, _, err = run(["apply"], self.env)
+        self.assertEqual(code, 1)
+        self.assertIn("Graylog API 錯誤", err)
+        self.assertNotIn("Traceback", err)
+
+    def test_remove_still_deletes_when_disconnect_is_rejected(self):
+        """解除連線的呼叫（空 stream 清單）沒在真實 Graylog 驗證過；被拒絕也不能讓回滾卡住。"""
+        run(["apply"], self.env)
+        self.gl.overrides[("POST", "/api/system/pipelines/connections/to_pipeline")] = (400, {"message": "empty"})
+        code, out, _ = run(["remove"], self.env)
+        self.assertEqual(code, 0)
+        self.assertIn("警告：解除連線失敗", out)
+        self.assertEqual(self.gl.pipes, {})
+        self.assertEqual(self.gl.rules, {})
 
     def test_unexpected_streams_response_fails_closed(self):
         orig = self.gl.route

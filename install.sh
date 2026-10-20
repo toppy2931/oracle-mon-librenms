@@ -145,11 +145,13 @@ fi
 
 # ── 5.5) Graylog IOC 欄位標準化 pipeline（冪等；選用，需先建立 graylog-api.conf）──
 GRAYLOG_API_CONF="${GRAYLOG_API_CONF:-/etc/oracle-mon/graylog-api.conf}"
-if [ -f "$GRAYLOG_API_CONF" ] && command -v python3 >/dev/null; then
+if [ ! -f "$GRAYLOG_API_CONF" ]; then
+    say "未設定 $GRAYLOG_API_CONF，略過 Graylog IOC pipeline（設定方式見 docs/ioc/phase0.md）"
+elif ! command -v python3 >/dev/null; then
+    warn "已有 $GRAYLOG_API_CONF 但找不到 python3，略過 Graylog IOC pipeline"
+else
     say "套用 Graylog IOC 欄位標準化 pipeline"
     python3 "$HERE/system/graylog-pipelines.py" apply || warn "Graylog pipeline 未套用（可稍後手動：python3 $HERE/system/graylog-pipelines.py apply）"
-else
-    say "未設定 $GRAYLOG_API_CONF，略過 Graylog IOC pipeline（設定方式見 docs/ioc/phase0.md）"
 fi
 
 # ── 6) 告警規則（add-only，需要 DB 已有指標後較有意義）─────────

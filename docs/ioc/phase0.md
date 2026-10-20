@@ -7,7 +7,7 @@
 
 | 項目 | 狀態 | 說明 |
 |---|---|---|
-| 欄位標準化 pipeline | ✅ 已在 monitor-vm 套用並用重播資料驗證；⏳ **防火牆規則對真實 FortiGate 流量尚待驗證** | `system/graylog-pipelines.py`（32 條規則 / 4 條 pipeline），驗證結果見 §4 |
+| 欄位標準化 pipeline | ✅ 已在 monitor-vm 套用；重播資料與**真實 FortiGate 流量**都驗證過（這台沒有真實 Windows 事件，Windows 規則只驗證過重播） | `system/graylog-pipelines.py`（32 條規則 / 4 條 pipeline），驗證結果見 §4 |
 | 套用與回滾工具 | ✅ | `apply`（冪等）／`plan`（唯讀）／`remove`（只刪本工具建立的）；防火牆可另連到指定 stream |
 | 樣本日誌與重播 | ✅ | `tools/replay-sample-logs.py`、`tests/fixtures/sample-logs.jsonl`（15 筆，每筆標預期欄位） |
 | 既有 Graylog 設定紀錄 | ✅ | [existing-graylog-config.md](existing-graylog-config.md)：monitor-vm 上 FortiGate 的 pipeline、規則、stream 設定（原本 repo 裡沒有） |
@@ -56,6 +56,7 @@ pipeline 把來源日誌寫入下列欄位，**原始欄位不動**。中文入�
 | `account_disabled` | 帳號停用 | Windows | `link_up` | 連接埠上線 | 網路設備 |
 | `account_deleted` | 帳號刪除 | Windows | `link_down` | 連接埠離線 | 網路設備 |
 | `group_member_added` | 加入群組 | Windows | `group_member_removed` | 移出群組 | Windows |
+| `invalid_user` | 無效帳號登入嘗試 | Linux | | | |
 
 `severity` 是初始設定，改 `system/graylog-pipelines.py` 裡的 `WIN_EVENTS`、`LINUX_EVENTS`、`NET_EVENTS` 即可，重跑 `apply` 生效。
 
@@ -64,7 +65,7 @@ pipeline 把來源日誌寫入下列欄位，**原始欄位不動**。中文入�
 | 來源 | 支援方式 | 備註 |
 |---|---|---|
 | Windows 事件 | Winlogbeat（`winlog_*`）與 NXLog（`EventID`、`TargetUserName`…）兩種欄位名 | 20 個事件 ID，清單在 `WIN_EVENTS` |
-| Linux | sshd 登入失敗／成功、sudo | 以 rsyslog 進 Graylog 的 `message` 文字比對 |
+| Linux | sshd 登入失敗／成功、sudo | 以 rsyslog 進 Graylog 的 `message` 文字比對。帳號不存在時 sshd 會記兩行：`Invalid user` 那行是 `invalid_user`，`Failed password for invalid user` 那行是 `login_failed`，入口統計時要分開算，不然一次嘗試會被算成兩次 |
 | 防火牆 | 讀既有 pipeline `fortigate_normalize` 整理過的 `srcip` `dstip` `action`，找不到再退回 CEF 原始的 `src` `dst` `act` | 防火牆 pipeline 排 **stage 2**（要在 `fortigate_normalize` 的 stage 0、1 之後）。FortiGate 訊息在自訂 stream，要設 `GRAYLOG_FIREWALL_STREAMS`（§3）。`act` 不是 deny／allow 類（例如 `close`）的訊息只有 `log_type`、`src_ip`、`dst_ip`、`host_name`，**沒有 `event_action`**。實測 1 小時 15 萬筆：阻擋類 61%、允許類 30%、其他 9%（連線結束與統計，刻意不歸類） |
 | 網路設備 | Cisco IOS 風格的登入失敗／成功、連接埠上下線 | **其他廠牌（Extreme、Junos、…）要有真實日誌樣本才能寫** |
 | PaloAlto、AIX、JBoss／Tomcat | 未做 | 同樣要先拿到樣本 |
@@ -121,16 +122,18 @@ python3 /opt/oracle-mon-librenms/system/graylog-pipelines.py remove
 
 | # | 假設 | 怎麼確認 | 實測結果 |
 |---|---|---|---|
-| 1 | pipeline／規則／連線的 API 路徑與 body 格式 | `apply` 回傳 400／404 時工具會印出 Graylog 的錯誤訊息 | ✅ 建立規則、pipeline、連到 stream 都成功；列表 API 回傳格式正確。⏳ `GET /connections` 的格式尚未證實（冪等判斷用）：再跑一次 `plan` 應為 `changes=0` |
+| 1 | pipeline／規則／連線的 API 路徑與 body 格式 | `apply` 回傳 400／404 時工具會印出 Graylog 的錯誤訊息 | ✅ 建立規則、pipeline、連到 stream 都成功；列表 API 回傳格式正確。`GET /connections` 的格式也證實了（`plan`／`apply` 對既有連線顯示「無變更」）；Graylog 接受**只有 `stage 2`、沒有 stage 0 和 1** 的 pipeline |
 | 2 | 規則語法（巢狀 `to_string`、`set_fields(grok(...))`、`!(...)`） | `apply` 建立規則時 Graylog 會解析；重播後看欄位 | ✅ 重播結果與預期相符（畫面可見的 12／14 筆全部正確，其餘 2 筆待確認） |
 | 3 | Windows 欄位名稱 | 搜尋 `_exists_:winlog_event_id` 與 `_exists_:EventID` | ⏳ 這台**沒有**真實的 Windows 事件（兩者都是未知欄位）。Winlogbeat 與 NXLog 兩種格式都只用重播驗證過 |
-| 4 | 防火牆規則需要的欄位在它執行時已經存在 | 查既有 pipeline 的 stage（[existing-graylog-config.md](existing-graylog-config.md)） | ⚠️ 這台的 FortiGate 欄位是 pipeline `fortigate_normalize`（stage 0、1）產生，**不是 extractor**。同一 stream 的 pipeline 依 stage 編號一起往下跑，所以防火牆 pipeline 排 stage 2。⏳ 對真實流量的效果待驗證 |
+| 4 | 防火牆規則需要的欄位在它執行時已經存在 | 查既有 pipeline 的 stage（[existing-graylog-config.md](existing-graylog-config.md)） | ⚠️ 這台的 FortiGate 欄位是 pipeline `fortigate_normalize`（stage 0、1）產生，**不是 extractor**。同一 stream 的 pipeline 依 stage 編號一起往下跑，所以防火牆 pipeline 排 stage 2。✅ 套用後真實 FortiGate 訊息已有標準欄位（2026-10-20 13:29 查詢，5 分鐘 5,458 筆有 `event_action`；`fw_deny`／`low`、`fw_allow`／`info`、`src_ip`、`dst_ip`、`host_name` 逐筆正確，UTM 的 `passthrough`、`pass` 也歸 `fw_allow`） |
 | 5 | 流量都留在 Default Stream | 看訊息詳情的「Routed into streams」 | ❌ **不成立**：FortiGate 訊息只在 `FortiGate Syslog` stream，且該 stream 移出了 Default Stream。已加 `GRAYLOG_FIREWALL_STREAMS`。GELF、Linux、網路設備、Windows 仍走 Default Stream |
 | 6 | 空字串欄位不會被儲存（取不到值時 `set_field` 等於沒設） | 缺帳號欄位的 Windows 事件 | ⏳ 樣本未涵蓋。本機登入 `-` 沒有 `src_ip` 已驗證，但那是 `when` 條件排除，不是這個行為 |
 | 7 | 新欄位不與既有欄位型別衝突 | 搜尋 `_exists_:severity` 等 | ✅ `severity`、`user_name`、`src_ip`、`EventID`、`winlog_event_id` 都是未知欄位，沒有衝突。✅ 重播後四條 IOC pipeline 的 `Processing Errors` 仍是 0（total 0）：來源欄位不存在時 `to_string(欄位, "")` 不會產生處理錯誤 |
 | 8 | grok 預設 pattern（`USERNAME`、`IP`、`WORD`、`DATA`）可用 | 重播後 Linux、網路設備的 `user_name`、`src_ip` 有值 | ✅ |
-| 9 | `act` 為 `close`、`timeout` 等的訊息如何處理 | FortiGate Syslog stream 的 `action` 分布（`/api/search/aggregate`） | ✅ 1 小時 151,578 筆：阻擋類 60.9%（`deny`、`blocked`）、允許類 29.9%（`pass`、`accept`、`passthrough`）、其他 9.2%（`close`、`client-rst`、`server-rst`、`timeout`、`dns`、`ip-conn`、統計類）。其他是連線結束與統計，非安全事件，**刻意不歸類**。詳見 [existing-graylog-config.md](existing-graylog-config.md) |
-| 10 | Phase 1 要用的 Graylog 搜尋彙整 API（`POST /api/search/aggregate`） | 用相對時間、指定 stream 和 `_exists_` 查詢取欄位分布 | ✅ 回傳 `schema`＋`datarows`＋`metadata`。查詢用 `_exists_:欄位`；在 Graylog 介面搜尋框單打 `*` 會被 7.1 擋下（`'*' or '?' not allowed as first character`），程式裡不要用 |
+| 9 | `act` 為 `close`、`timeout` 等的訊息如何處理 | FortiGate Syslog stream 的 `action` 分布（`/api/search/aggregate`） | ✅ 1 小時 151,578 筆：阻擋類 60.9%（`deny`、`blocked`）、允許類 29.9%（`pass`、`accept`、`passthrough`）、其他 9.2%（`close`、`client-rst`、`server-rst`、`timeout`、`dns`、`ip-conn`、統計類）。其他是連線結束與統計，非安全事件，**刻意不歸類**。占比會隨時間大幅變動：那一小時含 13:06 前後的一次阻擋突發，套用後平穩的 3 分鐘是阻擋 36%、允許 64%（以有 `event_action` 者計），另有約 21% 的防火牆訊息沒有 `event_action`。詳見 [existing-graylog-config.md](existing-graylog-config.md) |
+| 10 | Phase 1 要用的 Graylog 搜尋彙整 API（`POST /api/search/aggregate`） | 用相對時間、指定 stream 和 `_exists_` 查詢取欄位分布 | ✅ 回傳 `schema`＋`datarows`＋`metadata`。查詢用 `_exists_:欄位`；在 Graylog 介面搜尋框單打 `*` 會被 7.1 擋下（`'*' or '?' not allowed as first character`），程式裡不要用。**一定要帶 `group_by`**：只有 `metrics` 會回 400（`groupings must not be empty`），要算總數就隨便 group 一個一定存在的欄位再加總 |
+| 11 | `remove`（回滾）能在真實 Graylog 上完整執行 | 在測試環境跑 `remove`，看 System → Pipelines 與 Manage rules 是否清乾淨，再 `apply` 回來 | ⏳ **尚未驗證**。解除連線用的 `to_pipeline` 搭配空的 stream 清單是否被接受不知道；工具已改成被拒絕時仍繼續刪除並印警告 |
+| 12 | 防火牆規則不會誤標 Default Stream 裡的非防火牆日誌 | Search 選 Default Stream，查 `log_type:firewall AND NOT ioc_demo:true` | ⏳ 防火牆 pipeline 也連在 Default Stream，條件只要求同時有 `srcip`／`dstip`（或 `src`／`dst`）。預期 0 筆；若有，表示有別的日誌帶這些欄位，要收緊條件（例如再要求 `act`／`action`） |
 
 驗證流程：
 
