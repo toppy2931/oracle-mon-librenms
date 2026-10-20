@@ -143,6 +143,15 @@ if command -v python3 >/dev/null; then
     python3 "$HERE/system/graph-app-autocorrect-patch.py" "$LIBRENMS_DIR/includes/html/graphs/application/auth.inc.php" || warn "Graph 自動對應未修補，dashboard widget 若選錯「應用」app_id 會破圖"
 fi
 
+# ── 5.5) Graylog IOC 欄位標準化 pipeline（冪等；選用，需先建立 graylog-api.conf）──
+GRAYLOG_API_CONF="${GRAYLOG_API_CONF:-/etc/oracle-mon/graylog-api.conf}"
+if [ -f "$GRAYLOG_API_CONF" ] && command -v python3 >/dev/null; then
+    say "套用 Graylog IOC 欄位標準化 pipeline"
+    python3 "$HERE/system/graylog-pipelines.py" apply || warn "Graylog pipeline 未套用（可稍後手動：python3 $HERE/system/graylog-pipelines.py apply）"
+else
+    say "未設定 $GRAYLOG_API_CONF，略過 Graylog IOC pipeline（設定方式見 docs/ioc/phase0.md）"
+fi
+
 # ── 6) 告警規則（add-only，需要 DB 已有指標後較有意義）─────────
 say "安裝告警規則（add-only）"
 cp "$HERE/system/install_alert_rules.php" /tmp/oraclemon_alert_rules.php

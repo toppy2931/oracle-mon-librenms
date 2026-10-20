@@ -317,6 +317,21 @@ FortiGate CEF 格式的 `key=value` 內容用 **6 個獨立 Grok pattern Extract
 
 ---
 
+## IOC 欄位標準化 pipeline（智慧維運中心 Phase 0）
+
+把 Windows／Linux／防火牆／網路設備日誌統一寫入 `log_type` `event_action` `severity` `user_name` `src_ip` `dst_ip` `host_name` `target_name`，供之後的中文戰情入口讀取。欄位定義、事件代碼中文對照、實機驗證清單見 [docs/ioc/phase0.md](docs/ioc/phase0.md)。
+
+- **規則由 `system/graylog-pipelines.py` 產生，經 REST 冪等套用**（`print`／`plan`／`apply`／`remove`）。**不要在 Graylog 介面手改 `ioc-*` 規則或 `IOC Normalize - *` pipeline**，下次 `install.sh`／`update.sh` 會蓋掉；要改就改該檔再重跑 `apply`。`remove` 只刪自己建立的，不動 GeoIP 那組。
+- 帳密在 `/etc/oracle-mon/graylog-api.conf`（600）。檔案不存在時 `install.sh`／`update.sh` 直接略過，所以現有部署不受影響。工具**沒有**「關閉憑證驗證」選項（規格 IS-043），HTTPS 自簽請用 `GRAYLOG_CA_FILE`。
+- 設計取捨：每條 pipeline 只用 stage 0（stage 不滿足 match 條件時後面的 stage 不會跑，fallback 鏈會悄悄斷掉）；規則互相獨立、條件互斥，不依賴同一 stage 內的執行順序；條件全寫在 `when`（同上方 GeoIP 的語法坑）。來源欄位名稱因 shipper 而異，用 `coalesce()` 列候選欄位。
+- **新增 `event_action` 代碼要同步補 `docs/ioc/phase0.md` 的中文對照表**，測試會擋。
+- **這組規則還沒在真實 Graylog 上驗證過**（本機只有對假 API 的測試）。第一次套用先在測試環境，照 phase0.md §4 的清單逐項確認。
+- 測試：`python3 -m unittest discover -s tests`。Windows 上 `subprocess` 找 `bash` 會優先挑到 System32 的 WSL 啟動器（環境變數傳不進去、輸出被轉碼），`tests/test_phase0_tools.py` 的 `find_bash()` 已排除。
+- `tools/replay-sample-logs.py` 沒有預設目標，避免誤打正式環境；送出的每筆都帶 `ioc_demo=true`，入口與報表必須排除（規格 IS-054～056）。
+- `system/ioc-preflight.sh` 是上線前唯讀自檢（出廠密碼、HTTP/HTTPS、設定檔權限、pipeline 是否已套用）。
+
+---
+
 ## Web 端點清單（`/opt/librenms/html/`）
 
 主 GUI `oracle-admin.php` 由六個區塊組成（**順序固定 A→B→C→D→E→F**）：**A** Oracle 連線設定、**B** monitor-vm IP 異動、**C** 多 DB 管理、**D** 防火牆管理網段、**E** NAS 備份、**F** Custom Map 自動刷新秒數。每個區塊對應一支 AJAX endpoint 與一支 admin shell：
