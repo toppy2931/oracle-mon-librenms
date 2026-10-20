@@ -27,6 +27,9 @@ final class OverviewService
         'group_member_added', 'audit_log_cleared', 'audit_policy_changed',
     ];
 
+    /** 會產生登入、帳號、權限事件的來源類型（防火牆只有連線允許／阻擋，不算）。 */
+    public const LOGIN_SOURCES = ['windows', 'linux', 'network'];
+
     public const COVERAGE_LABEL = [
         'ok'      => '正常接收',
         'delayed' => '延遲',
@@ -55,6 +58,7 @@ final class OverviewService
     {
         $coverage   = $this->guard(fn () => $this->coverage());
         $suspicious = $this->guard(fn () => $this->suspicious());
+        $login      = $this->loginSources($coverage);
 
         return [
             'meta' => [
@@ -62,7 +66,10 @@ final class OverviewService
                 'range_label'  => '最近 24 小時',
                 'demo'         => $this->demo,
             ],
-            'kpi'      => $this->kpi($devices, $cases, $coverage, $suspicious),
+            'kpi'      => $this->kpi($devices, $cases, $coverage, $suspicious, $login),
+            // 登入類來源（Windows、Linux、網路設備）有哪幾類還沒接入。畫面的「沒有事件」要靠它說清楚：
+            // 沒接入就沒有日誌，「0 筆」不代表沒事（OPS-006）。null＝涵蓋資料取不到，不知道
+            'login_sources' => $login,
             'coverage' => $coverage,
             'activity' => $this->guard(fn () => $this->activity()),
             'attention' => [
@@ -211,9 +218,10 @@ final class OverviewService
      * @param array<string,int>|null $cases
      * @param array<string,mixed> $coverage
      * @param array<string,mixed> $suspicious
+     * @param array{missing:string[],all_missing:bool}|null $login loginSources() 的結果
      * @return array<int,array<string,mixed>>
      */
-    private function kpi(?array $devices, ?array $cases, array $coverage, array $suspicious): array
+    private function kpi(?array $devices, ?array $cases, array $coverage, array $suspicious, ?array $login): array
     {
         $unknown = static fn (string $key, string $label, string $why): array =>
             ['key' => $key, 'label' => $label, 'value' => null, 'state' => 'unknown', 'sub' => $why];
@@ -253,11 +261,18 @@ final class OverviewService
         // 3) 可疑登入事件
         if (!$suspicious['ok']) {
             $susp = $unknown('suspicious', '可疑登入事件', $suspicious['error']);
+        } elseif ($login !== null && $login['all_missing']) {
+            // 會產生登入事件的來源一個都沒接入：0 筆是「沒有日誌」，不是「沒有可疑事件」，不能顯示成綠色的 0
+            $susp = $unknown('suspicious', '可疑登入事件', '尚未接入任何登入類來源（' . implode('、', $login['missing']) . '），無法判斷');
         } else {
             $d = $suspicious['data'];
+            $sub = sprintf('登入失敗／帳號鎖定／高權限操作 · 涉及 %s%d 個帳號', $d['accounts_capped'] ? '至少 ' : '', $d['accounts']);
+            if ($login !== null && $login['missing'] !== []) {
+                $sub .= sprintf(' · %s尚未接入，不含其事件', implode('、', $login['missing']));
+            }
             $susp = ['key' => 'suspicious', 'label' => '可疑登入事件', 'value' => $d['events'],
                 'state' => $d['events'] === 0 ? 'good' : ($d['events'] < 10 ? 'warn' : 'bad'),
-                'sub' => sprintf('登入失敗／帳號鎖定／高權限操作 · 涉及 %s%d 個帳號', $d['accounts_capped'] ? '至少 ' : '', $d['accounts'])];
+                'sub' => $sub];
         }
 
         // 4) 資料來源連線
@@ -298,6 +313,30 @@ final class OverviewService
     private function q(string $query): string
     {
         return '(' . $query . ') AND ' . ($this->demo ? 'ioc_demo:true' : 'NOT ioc_demo:true');
+    }
+
+    /**
+     * 登入類來源（會產生登入、帳號、權限事件的 log_type）有哪幾類 24 小時內完全沒有資料。
+     *
+     * @param array<string,mixed> $coverage
+     * @return array{missing:string[],all_missing:bool}|null 涵蓋資料取不到時回傳 null（不知道）
+     */
+    private function loginSources(array $coverage): ?array
+    {
+        if (!$coverage['ok']) {
+            return null;
+        }
+        $missing = [];
+        $total   = 0;
+        foreach ($coverage['data'] as $c) {
+            if (in_array($c['type'], self::LOGIN_SOURCES, true)) {
+                $total++;
+                if ($c['status'] === 'none') {
+                    $missing[] = $c['label'];
+                }
+            }
+        }
+        return ['missing' => $missing, 'all_missing' => $total > 0 && count($missing) === $total];
     }
 
     /** @return array{ok:bool,data?:mixed,error?:string} */

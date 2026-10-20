@@ -159,6 +159,50 @@ test('總覽：事件案讀不到時，待處理事件是無法取得，不是 0
     assertSame('unknown', $k['cases']['state']);
 });
 
+/** 只有指定的 log_type 有資料；其他都是 24 小時內完全沒有（待接入）。 */
+function sourceWith(array $types, int $suspiciousEvents = 0): FakeLogSource
+{
+    return new FakeLogSource(function (string $q, array $g, array $m) use ($types, $suspiciousEvents): array {
+        if ($g === ['log_type'] && in_array('latest:timestamp', $m, true)) {
+            return array_map(fn ($t) => ['log_type' => $t, 'count' => 10, 'latest_timestamp' => ago(30)], $types);
+        }
+        if ($g === ['log_type'] && $suspiciousEvents > 0) {
+            return [['log_type' => $types[0], 'count' => $suspiciousEvents]];
+        }
+        return [];
+    });
+}
+
+test('登入類來源一個都沒接入時，可疑登入事件是「無法判斷」，不是綠色的 0（VM 正式模式只有防火牆有資料）', function () {
+    $o = (new OverviewService(sourceWith(['firewall']), false, NOW))->build(devices(), cases());
+    $k = kpiByKey($o);
+    assertSame(null, $k['suspicious']['value']);
+    assertSame('unknown', $k['suspicious']['state']);
+    assertTrue(mb_strpos($k['suspicious']['sub'], '尚未接入任何登入類來源') !== false, $k['suspicious']['sub']);
+    assertSame(['Windows 伺服器／網域', 'Linux 主機', '網路設備'], $o['login_sources']['missing']);
+    assertSame(true, $o['login_sources']['all_missing']);
+    assertSame('1/4', $k['sources']['value']);
+});
+
+test('登入類來源只接入一部分時，數字照常顯示，並註明哪些沒接入、不含其事件', function () {
+    $o = (new OverviewService(sourceWith(['windows', 'firewall'], 2), false, NOW))->build(devices(), cases());
+    $k = kpiByKey($o);
+    assertSame(2, $k['suspicious']['value']);
+    assertSame('warn', $k['suspicious']['state']);
+    assertTrue(mb_strpos($k['suspicious']['sub'], 'Linux 主機、網路設備尚未接入，不含其事件') !== false, $k['suspicious']['sub']);
+    assertSame(['Linux 主機', '網路設備'], $o['login_sources']['missing']);
+    assertSame(false, $o['login_sources']['all_missing']);
+});
+
+test('登入類來源都有資料時沒有任何額外註記；涵蓋資料取不到時 login_sources 是 null（不知道）', function () {
+    $o = (new OverviewService(healthySource(), false, NOW))->build(devices(), cases());
+    assertSame(['missing' => [], 'all_missing' => false], $o['login_sources']);
+    assertTrue(mb_strpos(kpiByKey($o)['suspicious']['sub'], '尚未接入') === false);
+
+    $down = new FakeLogSource(function () { throw new GraylogUnavailable('Graylog 連線失敗'); });
+    assertSame(null, (new OverviewService($down, false, NOW))->build(devices(), cases())['login_sources']);
+});
+
 test('總覽：沒有任何設備也沒有任何來源時，整體運作是無法計算，不是 100%', function () {
     $empty = new FakeLogSource();   // 所有查詢都回傳空
     $k = kpiByKey((new OverviewService($empty, false, NOW))->build(['total' => 0, 'up' => 0, 'down_list' => []], cases(0, 0, 0, 0)));
@@ -286,7 +330,12 @@ test('分組碰到上限時要標示「可能不只」，不能默默少算', fu
     for ($i = 0; $i < OverviewService::GROUP_LIMIT; $i++) {
         $many[] = ['user_name' => "u$i", 'src_ip' => '10.0.0.1', 'count' => 1];
     }
-    $src = new FakeLogSource(fn ($q, $g) => in_array('user_name', $g, true) ? $many : []);
+    $src = new FakeLogSource(function ($q, $g, $m) use ($many) {
+        if ($g === ['log_type'] && in_array('latest:timestamp', $m, true)) {   // 登入類來源都有接入，數字才會顯示
+            return array_map(fn ($t) => ['log_type' => $t, 'count' => 1, 'latest_timestamp' => ago(30)], ['windows', 'linux', 'firewall', 'network']);
+        }
+        return in_array('user_name', $g, true) ? $many : [];
+    });
     $o = (new OverviewService($src, false, NOW))->build(devices(), cases());
     assertSame(true, $o['attention']['accounts']['data']['capped']);
     assertTrue(mb_strpos(kpiByKey($o)['suspicious']['sub'], '至少 200') !== false, '涉及帳號數要標「至少」');

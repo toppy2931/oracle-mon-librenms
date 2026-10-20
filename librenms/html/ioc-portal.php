@@ -248,6 +248,13 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
 
   // ── 維運總覽 ──
   const unavailable = (msg) => h('div', { class: 'alert' }, '無法取得：' + msg);
+  // 「沒有事件」要說清楚是真的沒事，還是根本沒有日誌（登入類來源沒接入就沒有日誌，不能讓人以為沒事）
+  const emptyNote = (base) => {
+    const s = state.overview && state.overview.login_sources;
+    if (!s || !s.missing.length) return base;
+    if (s.all_missing) return '尚未接入任何登入類來源（' + s.missing.join('、') + '），沒有資料可顯示，不代表沒有事件。';
+    return base + '（' + s.missing.join('、') + '尚未接入，不含其事件）';
+  };
   const section = (title, hint, body) => h('div', { class: 'card' },
     h('div', { class: 'card-h' }, h('h2', null, title), h('span', null, hint)), h('div', { class: 'card-b' }, body));
   const table = (heads, rows) => h('table', null,
@@ -264,7 +271,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
 
   function renderActivity(sec) {
     if (!sec.ok) return unavailable(sec.error);
-    if (!sec.data.length) return h('p', { class: 'note' }, '這段期間沒有符合條件的事件。');
+    if (!sec.data.length) return h('p', { class: 'note' }, emptyNote('這段期間沒有符合條件的事件。'));
     return table(['時間', '使用者', '發生狀況', '來源位址', '設備名稱', '來源類型', '需注意程度'],
       sec.data.map((r) => [r.time, r.user || '—', r.action, r.src_ip || '—', r.host || '—', r.type, levelBadge(r.level)]));
   }
@@ -285,7 +292,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     const blocks = [];
     blocks.push(h('h3', { class: 'note' }, '可疑登入的帳號與來源'));
     if (!accounts.ok) blocks.push(unavailable(accounts.error));
-    else if (!accounts.data.items.length) blocks.push(h('p', { class: 'note' }, '沒有可疑的登入事件。'));
+    else if (!accounts.data.items.length) blocks.push(h('p', { class: 'note' }, emptyNote('沒有可疑的登入事件。')));
     else {
       accounts.data.items.forEach((a) => blocks.push(h('div', { class: 'row' },
         h('div', null, h('div', { class: 't' }, a.user + (a.src_ip ? ' · ' + a.src_ip : '')), h('div', { class: 'd' }, '24 小時內 ' + fmt(a.count) + ' 次可疑事件')),
