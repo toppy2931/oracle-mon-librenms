@@ -50,6 +50,32 @@ class ReaderTests(unittest.TestCase):
         self.assertEqual(conf["GRAYLOG_STREAMS"], "%s,%s" % (DEFAULT, FW))
         self.assertTrue(conf["GRAYLOG_TOKEN"])
 
+    def test_token_requests_use_the_user_id_not_the_name(self):
+        """monitor-vm 實測：Token 的路徑吃 userId，拿帳號名稱去 Graylog 回 HTTP 500（hexString has 24 characters）。"""
+        code, out, err = self.run_cmd("create")
+        self.assertEqual(code, 0, out + err)
+        uid = self.gl.users["ioc-reader"]["id"]
+        token_calls = [p for m, p, _ in self.gl.requests if m == "POST" and "/tokens/" in p]
+        self.assertEqual(len(token_calls), 1)
+        self.assertTrue(token_calls[0].startswith("/api/users/%s/tokens/" % uid), token_calls[0])
+
+    def test_permission_update_that_silently_does_nothing_is_reported(self):
+        self.run_cmd("create", GRAYLOG_FIREWALL_STREAMS="")
+        uid = self.gl.users["ioc-reader"]["id"]
+        self.gl.overrides[("PUT", "/api/users/%s" % uid)] = (204, None)      # 回 204，但什麼都沒改
+        code, out, err = self.run_cmd("create")                              # 設定檔多了 FortiGate Syslog
+        self.assertEqual(code, 1, out + err)
+        self.assertIn("沒有生效", err)
+
+    def test_remove_that_does_not_really_delete_is_not_reported_as_success(self):
+        self.run_cmd("create")
+        self.gl.overrides[("DELETE", "/api/users/ioc-reader")] = (204, None)  # 回成功但帳號還在
+        code, out, _ = self.run_cmd("remove")
+        self.assertEqual(code, 1, out)
+        self.assertIn("沒有生效", out)
+        self.assertTrue(os.path.exists(self.conf), "帳號還在、Token 還有效，設定檔先不能刪")
+        self.assertNotIn("已刪除", out)
+
     def test_token_never_appears_in_output(self):
         code, out, err = self.run_cmd("create")
         token = self.token_in_conf()

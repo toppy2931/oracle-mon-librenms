@@ -96,31 +96,35 @@ class FakeGraylog:
             if missing:
                 return 400, {"message": "missing %s" % missing}
             name = body["username"]
-            self.users[name] = {"username": name, "roles": list(body["roles"]), "tokens": {},
+            uid = uuid.uuid4().hex[:24]                       # MongoDB ObjectId：24 碼十六進位
+            self.users[name] = {"id": uid, "username": name, "roles": list(body["roles"]), "tokens": {},
                                 "permissions": ["users:edit:" + name] + list(body.get("permissions", []))}  # Graylog 會自己加預設權限
-            return 201, {"user_id": uuid.uuid4().hex}
+            return 201, {"user_id": uid}
         parts = path[len("/api/users/"):].split("/")
-        name = parts[0]
-        if name not in self.users:
-            return 404, {"message": "no such user"}
-        user = self.users[name]
-        if len(parts) == 1:
+        # 真的 Graylog 7.1（monitor-vm 實測）：GET／DELETE 用帳號名稱；修改使用者與 Token 的路徑是 userId，
+        # 拿帳號名稱去會得到 500 "state should be: hexString has 24 characters"
+        if len(parts) == 1 and method in ("GET", "DELETE"):
+            user = self.users.get(parts[0])
+            if user is None:
+                return 404, {"message": "no such user"}
             if method == "GET":
                 return 200, {k: v for k, v in user.items() if k != "tokens"}
-            if method == "PUT":
-                user["roles"] = list(body.get("roles", user["roles"]))
-                user["permissions"] = list(body.get("permissions", user["permissions"]))
-                return 204, None
-            if method == "DELETE":
-                for token in user["tokens"].values():
-                    self.token_auth.pop(self._token_header(token), None)
-                del self.users[name]
-                return 204, None
-        elif len(parts) == 3 and parts[1] == "tokens":
+            for token in user["tokens"].values():
+                self.token_auth.pop(self._token_header(token), None)
+            del self.users[user["username"]]
+            return 204, None
+        user, error = self._by_id(parts[0])
+        if error:
+            return error
+        if len(parts) == 1 and method == "PUT":
+            user["roles"] = list(body.get("roles", user["roles"]))
+            user["permissions"] = list(body.get("permissions", user["permissions"]))
+            return 204, None
+        if len(parts) == 3 and parts[1] == "tokens":
             if method == "POST":
                 token, tid = uuid.uuid4().hex, uuid.uuid4().hex[:12]
                 user["tokens"][tid] = token
-                self.token_auth[self._token_header(token)] = name
+                self.token_auth[self._token_header(token)] = user["username"]
                 return 200, {"id": tid, "name": parts[2], "token": token}
             if method == "DELETE":
                 token = user["tokens"].pop(parts[2], None)
@@ -128,6 +132,15 @@ class FakeGraylog:
                     self.token_auth.pop(self._token_header(token), None)
                 return 204, None
         return 404, {"message": "no route %s %s" % (method, path)}
+
+    def _by_id(self, ident):
+        """路徑上的 userId：要是 24 碼十六進位才查得到人，否則跟真的 Graylog 一樣回 500。"""
+        if len(ident) != 24 or any(c not in "0123456789abcdef" for c in ident):
+            return None, (500, {"type": "ApiError", "message": "state should be: hexString has 24 characters"})
+        for user in self.users.values():
+            if user["id"] == ident:
+                return user, None
+        return None, (404, {"message": "no such user"})
 
     @staticmethod
     def _token_header(token):
