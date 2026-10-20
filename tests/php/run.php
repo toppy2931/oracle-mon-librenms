@@ -18,6 +18,7 @@ set_error_handler(static function (int $no, string $msg, string $file, int $line
 
 require_once __DIR__ . '/../../librenms/ioc/bootstrap.php';
 require_once __DIR__ . '/MemoryCaseRepo.php';
+require_once __DIR__ . '/MemorySettingsRepo.php';
 
 $GLOBALS['__tests'] = [];
 $GLOBALS['__failed'] = 0;

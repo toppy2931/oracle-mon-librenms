@@ -1,6 +1,6 @@
 <?php
 /**
- * 建立 IOC 事件案的資料表（冪等：只有 CREATE TABLE IF NOT EXISTS，重複執行不會動既有資料）。
+ * 建立 IOC 入口的資料表：事件案與設定（冪等：只有 CREATE TABLE IF NOT EXISTS，重複執行不會動既有資料）。
  *
  * 以 librenms 身分執行（install.sh／update.sh 會自動呼叫）：
  *   sudo -u librenms php system/ioc-db-setup.php
@@ -24,7 +24,7 @@ $exists = static function (string $table) use ($pdo): bool {
     return (int) $st->fetchColumn() > 0;
 };
 
-$tables = ['ioc_cases', 'ioc_case_history'];
+$tables = ['ioc_cases', 'ioc_case_history', 'ioc_settings', 'ioc_settings_history'];
 $before = array_map($exists, $tables);
 
 foreach (Ioc\Schema::statements() as $sql) {

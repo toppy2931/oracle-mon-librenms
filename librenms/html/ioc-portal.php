@@ -38,6 +38,7 @@ $config = json_encode([
         'caseSeverity' => Ioc\Labels::CASE_SEVERITY,
         'resolution'   => Ioc\Labels::RESOLUTION,
         'siteLevel'    => Ioc\Fleet::LEVELS,
+        'riskLevel'    => Ioc\RiskScore::LEVEL_LABEL,
     ],
 ], JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
 ?>
@@ -182,6 +183,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     <main id="view-overview"></main>
     <main id="view-cases" hidden></main>
     <main id="view-security" hidden></main>
+    <main id="view-settings" hidden></main>
     <footer>日誌來自 Graylog（唯讀帳號），設備與站點（LibreNMS 的「位置」）來自 LibreNMS，事件案存在 LibreNMS 資料庫。灰色的「尚未提供」項目還沒有資料來源，不會顯示假數字。</footer>
   </div>
 </div>
@@ -194,13 +196,14 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
   const CFG = JSON.parse(document.getElementById('ioc-config').textContent);
   const CAN_HANDLE = CFG.level === 'handler';
   const REFRESH_MS = 60000;
-  const state = { tab: 'overview', filter: 'open', selected: null, form: null, overview: null, loadedAt: 0, overviewError: null, summary: null };
+  const state = { tab: 'overview', filter: 'open', selected: null, form: null, overview: null, loadedAt: 0, overviewError: null, summary: null, refreshSettingsPreview: null };
 
   // 左側導覽。off＝簡報有、但目前沒有資料來源的項目：顯示成停用，不能點進去看到空白或假數字
   const NAV = [
     { key: 'overview', label: '總覽', title: '維運總覽', sub: '站點、資產、事件與資料來源一覽' },
     { key: 'cases', label: '事件案', title: '事件案管理', sub: '建立、確認、處理與結案，每一步都有紀錄', badge: true },
     { key: 'security', label: '資安', title: '資安事件', sub: '登入、帳號與防火牆阻擋' },
+    { key: 'settings', label: '設定', title: '系統設定', sub: '風險等級門檻' },
     { sep: '尚未提供' },
     { key: 'risk', label: '風險與弱點', off: true },
     { key: 'config', label: '組態治理', off: true },
@@ -347,6 +350,8 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     renderNav(); renderTopbar();
     // 已經在事件案頁籤時再按一次不要重載，否則填到一半的表單會被清掉
     if (tab === 'cases' && (changed || force || !$('#case-right'))) { loadCases(); }
+    // 設定頁每次進來都重新讀：別的管理者可能剛改過；已經在這一頁時再按導覽不重載，免得填到一半的值被清掉
+    if (tab === 'settings' && changed) { loadSettings(); }
   }
 
   /** 開事件案頁並套用狀態篩選（鈴鐺用）。 */
@@ -477,10 +482,13 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
       h('div', { class: 'bar' }, p.score === null ? null : h('i', { style: 'width:' + pct(p.score) + '%;background:' + color }))));
     return [
       gauge(d.score, color),
-      h('div', { class: 'g-level', style: 'color:' + color }, d.level_label),
+      h('div', { class: 'g-level', style: 'color:' + color }, d.level_label || '無法判定等級'),
       ...parts,
       d.missing.length ? h('p', { class: 'note warn' }, d.missing.join('、') + '沒有可用的資料，分數只算其他分項。') : null,
-      h('p', { class: 'note' }, '提案版公式：各分項加權平均，分數越高越好；≥85 低風險、≥65 中等風險。'),
+      d.warning ? h('p', { class: 'note warn' }, d.warning) : null,
+      // 門檻是使用者在「設定」頁自己調的，數字一定要用伺服器算等級時用的那組，不能在畫面另外寫死
+      h('p', { class: 'note' }, '提案版公式：各分項加權平均，分數越高越好'
+        + (d.thresholds ? '；≥' + d.thresholds.low + ' 低風險、≥' + d.thresholds.medium + ' 中等風險（到「設定」可調整）。' : '。')),
     ];
   }
 
@@ -607,6 +615,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
       state.overviewError = e.message;
     }
     renderOverview(); renderSecurity(); renderBanner(); renderTopbar();
+    if (state.refreshSettingsPreview) state.refreshSettingsPreview();   // 設定頁開著時，預覽用的風險分數要跟著新資料更新
     refreshBadge();
   }
 
@@ -754,6 +763,91 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
       needsResolution ? resolution : null, note,
       h('div', { class: 'toolbar', style: 'margin-top:8px' }, buttons,
         h('button', { class: 'btn', type: 'button', onclick: () => run({ action: 'comment', note: note.value }, '已留言') }, '只留言')), msg);
+  }
+
+  // ── 設定：風險等級門檻 ──
+  // 預覽用的等級判斷；正式的判定在伺服器（RiskScore::level），這裡只是讓使用者儲存前先看到結果
+  const levelFor = (score, low, medium) => (score >= low ? 'low' : (score >= medium ? 'medium' : 'high'));
+  const wholeIn = (el, min, max) => /^\d{1,3}$/.test(el.value.trim()) && Number(el.value) >= min && Number(el.value) <= max;
+
+  let settingsSeq = 0;   // 連續觸發載入時，只採用最後一次的回應
+  async function loadSettings() {
+    const seq = ++settingsSeq;
+    const root = $('#view-settings');
+    root.replaceChildren(h('p', { class: 'note' }, '載入中…'));
+    try {
+      const r = await api('/ioc-settings.php', { action: 'get' });
+      if (seq === settingsSeq) renderSettings(r.risk);
+    } catch (e) {
+      if (seq === settingsSeq) root.replaceChildren(unavailable(e.message));
+    }
+  }
+
+  /** @param {boolean} [focusSave] 儲存後整個表單會重建，原本按著的儲存鈕會消失；要把鍵盤焦點放回新的儲存鈕。 */
+  function renderSettings(s, focusSave) {
+    const root = $('#view-settings');
+    const num = (id, value) => h('input', { id, type: 'number', min: 1, max: 100, step: 1, value, disabled: !CAN_HANDLE, style: 'width:6em' });
+    const low = num('risk-low', s.low);
+    const medium = num('risk-medium', s.medium);
+    const highAt = h('b', null, String(s.medium));
+    const preview = h('p', { class: 'note', 'aria-live': 'polite' });
+    const msg = h('div', { class: 'note warn', role: 'alert' });
+
+    const refresh = () => {
+      const ok = wholeIn(low, 1, 100) && wholeIn(medium, 1, 100) && Number(medium.value) < Number(low.value);
+      highAt.textContent = wholeIn(medium, 1, 100) ? String(Number(medium.value)) : '—';
+      const risk = state.overview && state.overview.landscape && state.overview.landscape.risk;
+      const score = risk && risk.ok ? risk.data.score : null;
+      if (score === null || score === undefined) { preview.textContent = '目前沒有可用的整體風險分數，無法預覽。'; return; }
+      preview.textContent = ok
+        ? '目前的整體風險分數是 ' + score + ' 分，依這組門檻會是「' + CFG.labels.riskLevel[levelFor(score, Number(low.value), Number(medium.value))] + '」。'
+        : '目前的整體風險分數是 ' + score + ' 分。門檻填好（整數 1～100，中等風險要比低風險小）後會在這裡預覽等級。';
+    };
+    low.addEventListener('input', refresh);
+    medium.addEventListener('input', refresh);
+    refresh();
+    state.refreshSettingsPreview = refresh;
+
+    const when = s.invalid
+      ? h('p', { class: 'alert' }, '資料庫裡的門檻值不合法（可能被手動改過），下面填的是預設值。在重新儲存之前，總覽只顯示分數、不判定風險等級。')
+      : h('p', { class: 'note' }, s.custom ? '目前是自訂值，最後由 ' + s.updated_by + ' 在 ' + s.updated_at + ' 修改。'
+        : '目前使用預設值（' + s.defaults.low + '／' + s.defaults.medium + '），還沒有人自訂過。');
+
+    const save = h('button', { class: 'btn primary', type: 'submit' }, '儲存');
+    const row = (label, id, control) => h('div', { class: 'row' }, h('label', { for: id, style: 'margin:0;font-size:13px;color:var(--text)' }, label), control);
+    const form = h('form', { onsubmit: async (ev) => {
+      ev.preventDefault();
+      save.disabled = true; msg.textContent = '';
+      try {
+        const r = await api('/ioc-settings.php', { action: 'save', risk_low: low.value, risk_medium: medium.value });
+        toast('已儲存風險等級門檻');
+        renderSettings(r.risk, true);
+        loadOverview();                  // 總覽的風險等級要用新門檻重算
+      } catch (e) {
+        msg.textContent = (e.errors && e.errors.length ? e.errors.join('；') : e.message);
+        save.disabled = false;
+      }
+    } },
+      h('p', { class: 'note', style: 'margin-top:0' }, '整體風險分數是 0～100，越高越好。分數落在哪一段，就是哪個風險等級；門檻都是 1～100 的整數，「中等風險」要比「低風險」小。'),
+      row('低風險：分數 ≥', 'risk-low', low),
+      row('中等風險：分數 ≥', 'risk-medium', medium),
+      h('div', { class: 'row' }, h('span', null, '高風險：分數 <（自動，等於中等風險的門檻）'), highAt),
+      preview, when,
+      CAN_HANDLE
+        ? h('div', { class: 'toolbar', style: 'margin-top:12px' }, save,
+            h('button', { class: 'btn', type: 'button', onclick: () => { low.value = s.defaults.low; medium.value = s.defaults.medium; refresh(); } },
+              '填入預設值（' + s.defaults.low + '／' + s.defaults.medium + '）'),
+            h('span', { class: 'note', style: 'margin:0' }, '填入後要按「儲存」才會生效。'))
+        : h('p', { class: 'note warn' }, '你的角色是檢視者（唯讀），只有管理者（admin）能修改門檻。'),
+      msg);
+
+    const history = s.history.length
+      ? table(['時間', '操作者', '項目', '原值', '新值'], s.history.map((x) => [x.time, x.actor, x.label, x.from, x.to]))
+      : h('p', { class: 'note' }, '還沒有人調整過門檻。');
+    root.replaceChildren(h('section', { class: 'grid even' },
+      section('風險等級門檻', '用來把整體風險分數分成低、中、高', form),
+      section('異動紀錄', '最近 10 筆，誰在什麼時候改的', history)));
+    if (focusSave && CAN_HANDLE) save.focus();
   }
 
   // ── 啟動 ──

@@ -13,7 +13,8 @@ namespace Ioc;
  *
  * 某個分項的資料取不到（或沒有可比的對象，例如沒有任何設備）就不納入，權重由其他分項重新分配，
  * 並在 missing 列出；三個分項都沒有資料就是「無法計算」，不是 100 分，也不是 0 分（OPS-006）。
- * 等級：≥85 低風險、≥65 中等風險、其餘高風險。
+ * 等級：分數 ≥ 低風險門檻是低風險、≥ 中等風險門檻是中等風險、其餘高風險。門檻預設 85／65，
+ * 使用者可在入口的「設定」頁自己調（SettingsService 存取與驗證）；門檻讀不到就只算分數、不判定等級。
  */
 final class RiskScore
 {
@@ -21,17 +22,18 @@ final class RiskScore
     public const PART_LABEL = ['devices' => '設備與服務', 'cases' => '事件處置', 'sources' => '資料來源'];
     /** 每件未結案扣幾分。 */
     public const CASE_PENALTY = ['high' => 15, 'medium' => 6, 'low' => 2];
-    public const LOW_RISK_FROM    = 85;
-    public const MEDIUM_RISK_FROM = 65;
+    /** 等級門檻的預設值：low＝低風險的最低分，medium＝中等風險的最低分。 */
+    public const DEFAULT_THRESHOLDS = ['low' => 85, 'medium' => 65];
     public const LEVEL_LABEL = ['low' => '低風險', 'medium' => '中等風險', 'high' => '高風險'];
 
     /**
      * @param array{total:int,up:int}|null $devices 設備總數與正常數；null＝讀不到
      * @param array<string,int>|null $openBySeverity 未結案件數，鍵為 high／medium／low；null＝讀不到
      * @param array{present:int,ok:int}|null $sources 有資料的來源類型數與其中正常接收的；null＝讀不到
-     * @return array{score:?int,level:?string,level_label:?string,parts:array<string,array<string,mixed>>,missing:string[]}
+     * @param array{low:int,medium:int}|null $thresholds 等級門檻；null＝讀不到（有分數但 level 是 null，不能套預設值冒充）
+     * @return array{score:?int,level:?string,level_label:?string,thresholds:?array{low:int,medium:int},parts:array<string,array<string,mixed>>,missing:string[]}
      */
-    public static function compute(?array $devices, ?array $openBySeverity, ?array $sources): array
+    public static function compute(?array $devices, ?array $openBySeverity, ?array $sources, ?array $thresholds): array
     {
         $scores = [
             'devices' => $devices !== null && $devices['total'] > 0 ? 100 * $devices['up'] / $devices['total'] : null,
@@ -53,11 +55,18 @@ final class RiskScore
             $weight += $w;
         }
         if ($weight === 0.0) {
-            return ['score' => null, 'level' => null, 'level_label' => null, 'parts' => $parts, 'missing' => $missing];
+            return ['score' => null, 'level' => null, 'level_label' => null, 'thresholds' => $thresholds, 'parts' => $parts, 'missing' => $missing];
         }
         $score = (int) round($sum / $weight);
-        $level = $score >= self::LOW_RISK_FROM ? 'low' : ($score >= self::MEDIUM_RISK_FROM ? 'medium' : 'high');
-        return ['score' => $score, 'level' => $level, 'level_label' => self::LEVEL_LABEL[$level], 'parts' => $parts, 'missing' => $missing];
+        $level = $thresholds === null ? null : self::level($score, $thresholds);
+        return ['score' => $score, 'level' => $level, 'level_label' => $level === null ? null : self::LEVEL_LABEL[$level],
+                'thresholds' => $thresholds, 'parts' => $parts, 'missing' => $missing];
+    }
+
+    /** @param array{low:int,medium:int} $thresholds */
+    public static function level(int $score, array $thresholds): string
+    {
+        return $score >= $thresholds['low'] ? 'low' : ($score >= $thresholds['medium'] ? 'medium' : 'high');
     }
 
     /** @param array<string,int> $open */
