@@ -5,6 +5,11 @@ collector/dbs/*.conf
 # 編譯產物
 collector/*.class
 *.class
+__pycache__/
+*.pyc
+
+# Graylog API 帳密（graylog-api.conf 存在 /etc，萬一複製進 repo 也不入庫）
+graylog-api.conf
 
 # 打包暫存
 _pkg.tgz
