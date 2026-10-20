@@ -110,6 +110,15 @@ test('Graylog：沒指定 stream 時不送 streams 欄位（查帳號有權限�
     assertTrue(!array_key_exists('streams', lastRequest()['body']));
 });
 
+test('Graylog：分組欄位缺值時的 "(Empty Value)" 變成 null，指標欄位不受影響', function () {
+    $rows = client()->aggregate('EMPTYVALUE', 60, ['user_name', 'src_ip'], ['count']);
+    assertSame([
+        ['user_name' => 'alice', 'src_ip' => null, 'count' => 1],
+        ['user_name' => 'bob', 'src_ip' => '10.0.0.1', 'count' => 2],
+        ['user_name' => null, 'src_ip' => null, 'count' => 3],
+    ], $rows);
+});
+
 test('Graylog：aggregate 沒有 group_by 會被拒絕，因為 Graylog 一定要有', function () {
     assertThrows(InvalidArgumentException::class, fn () => client()->aggregate('x', 60, [], ['count']));
 });

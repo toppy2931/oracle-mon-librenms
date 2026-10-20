@@ -266,9 +266,17 @@ final class OverviewService
         } else {
             $total = count($coverage['data']);
             $none  = $total - $present;
+            $late  = $present - $okSrc;      // 有資料、但不是「正常接收」（延遲、中斷、無法判斷）
+            $notes = [];
+            if ($late > 0) {
+                $notes[] = sprintf('%d 類來源不是正常接收', $late);
+            }
+            if ($none > 0) {
+                $notes[] = sprintf('%d 類來源尚未接入', $none);
+            }
             $src = ['key' => 'sources', 'label' => '資料來源連線', 'value' => $okSrc . '/' . $total,
                 'state' => $okSrc === $total ? 'good' : ($okSrc === 0 ? 'bad' : 'warn'),
-                'sub' => $none > 0 ? sprintf('%d 類來源尚未接入', $none) : '各類來源都有資料'];
+                'sub' => $notes === [] ? '各類來源都有資料' : implode(' · ', $notes)];   // 0/4 旁不能寫「都有資料」
         }
 
         // 5) 設備運作狀況

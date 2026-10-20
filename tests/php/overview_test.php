@@ -198,6 +198,28 @@ test('資料涵蓋：依最後收到資料的時間分正常／延遲／中斷�
     assertSame(['ok', 'delayed'], [$e['windows']['status'], $e['linux']['status']]);
 });
 
+test('資料來源連線：有資料但不是正常接收時，說明不能寫「各類來源都有資料」（VM 畫面出現過 0/4 配這句）', function () {
+    $stale = new FakeLogSource(fn ($q, $g, $m) => $g === ['log_type'] && in_array('latest:timestamp', $m, true)
+        ? array_map(fn ($t) => ['log_type' => $t, 'count' => 3, 'latest_timestamp' => ago(7200)], ['windows', 'linux', 'firewall', 'network']) : []);
+    $k = kpiByKey((new OverviewService($stale, false, NOW))->build(devices(), cases()));
+    assertSame('0/4', $k['sources']['value']);
+    assertSame('bad', $k['sources']['state']);
+    assertSame('4 類來源不是正常接收', $k['sources']['sub']);
+
+    $mixed = new FakeLogSource(fn ($q, $g, $m) => $g === ['log_type'] && in_array('latest:timestamp', $m, true)
+        ? [['log_type' => 'windows', 'count' => 3, 'latest_timestamp' => ago(300)], ['log_type' => 'linux', 'count' => 3, 'latest_timestamp' => ago(1800)]] : []);
+    $k = kpiByKey((new OverviewService($mixed, false, NOW))->build(devices(), cases()));
+    assertSame('1/4', $k['sources']['value']);
+    assertSame('1 類來源不是正常接收 · 2 類來源尚未接入', $k['sources']['sub']);
+});
+
+test('需注意帳號：來源位址缺值時是空字串（不會變成假的位址，建立事件案才不會帶進去）', function () {
+    $src = new FakeLogSource(fn ($q, $g, $m) => $g === ['user_name', 'src_ip'] ? [['user_name' => 'alice', 'src_ip' => null, 'count' => 1]] : []);
+    $items = (new OverviewService($src, false, NOW))->build(devices(), cases())['attention']['accounts']['data']['items'];
+    assertSame('', $items[0]['src_ip']);
+    assertSame('alice', $items[0]['user']);
+});
+
 test('資料涵蓋：有筆數但算不出最後時間，絕不能顯示成正常', function () {
     $src = new FakeLogSource(fn ($q, $g, $m) => $g === ['log_type'] ? [['log_type' => 'windows', 'count' => 50]] : []);
     $c = array_column((new OverviewService($src, false, NOW))->build(devices(), cases())['coverage']['data'], null, 'type');
