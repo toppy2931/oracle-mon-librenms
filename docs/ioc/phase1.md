@@ -20,7 +20,8 @@
    │         │ fetch（X-CSRF-Token）
    │         ├─► /ioc-data.php   總覽資料（GET，快取 20 秒）
    │         ├─► /ioc-cases.php  事件案 API（POST；含 evidence：事件詳情的證據時間軸，唯讀查 Graylog）
-   │         └─► /ioc-settings.php  設定 API（POST；目前只有風險等級門檻）
+   │         ├─► /ioc-settings.php  設定 API（POST；目前只有風險等級門檻）
+   │         └─► /ioc-identity.php  身分與稽核 API（POST；只有 admin：帳號統計、稽核軌跡、主機遠端登入、帳號盤點紀錄）
    │                │
    │      includes/ioc/endpoint.php   登入、角色、CSRF、錯誤不洩漏內部資訊
    │                │
@@ -40,7 +41,7 @@
 | 路徑 | 用途 |
 |---|---|
 | `librenms/html/ioc-portal.php` | 中文入口頁面（深色，版面照參考畫面）。所有資料用 `textContent` 放進畫面，不用 `innerHTML` |
-| `librenms/html/ioc-data.php`、`ioc-cases.php`、`ioc-settings.php` | 總覽資料、事件案 API、設定 API |
+| `librenms/html/ioc-data.php`、`ioc-cases.php`、`ioc-settings.php`、`ioc-identity.php` | 總覽資料、事件案 API、設定 API、身分與稽核 API |
 | `librenms/ioc/endpoint.php` | 端點共用前置檢查；只能在 LibreNMS 環境載入 |
 | `librenms/ioc/*.php` | 純函式庫，`bootstrap.php` 依序載入 |
 | `system/ioc-db-setup.php` | 建立資料表（`CREATE TABLE IF NOT EXISTS`，冪等），`install.sh`／`update.sh` 自動執行 |
@@ -56,6 +57,7 @@
 | 建立事件案、變更狀態、留言 | ✅ | ❌（API 回 403） | ❌ |
 | 看設定頁（風險等級門檻、異動紀錄） | ✅ | ✅（唯讀） | ❌ |
 | 修改風險等級門檻 | ✅ | ❌（API 回 403） | ❌ |
+| 身分與稽核（帳號與角色統計、稽核軌跡、主機遠端登入、帳號盤點紀錄的讀與寫） | ✅ | ❌（導覽不顯示，API 一律回 403） | ❌ |
 
 畫面會依角色隱藏按鈕，但那不是權限控管；後端 `CaseService`、`SettingsService` 每個方法都先檢查，並有測試驗證檢視者直接打 API 會被拒絕且不留任何痕跡。
 
@@ -113,7 +115,7 @@
 
 | 項目 | 狀態 |
 |---|---|
-| 規則與邏輯（權限、狀態流程、驗證、歷程、總覽的缺值處理、顯示轉換、風險等級門檻的設定） | ✅ 140 項 PHP 單元測試（用 WSL 的 PHP 8.3，不碰任何資料庫；含事件類型目錄、新欄位驗證、證據時間軸、Graylog 絕對時間範圍） |
+| 規則與邏輯（權限、狀態流程、驗證、歷程、總覽的缺值處理、顯示轉換、風險等級門檻的設定） | ✅ 174 項 PHP 單元測試（用 WSL 的 PHP 8.3，不碰任何資料庫；含事件類型目錄、新欄位驗證、證據時間軸、Graylog 絕對時間範圍、身分與稽核） |
 | Graylog 用戶端 | ✅ 對 PHP 內建伺服器做的假 Graylog：請求內容、每種失敗、逾時、整次載入的總時間預算（25 秒，避免 5 個區塊各等 15 秒而 504）、不跟隨重導向、http 只能連本機、錯誤訊息不洩漏網址與 Token |
 | 唯讀帳號工具 | ✅ 13 項測試（對假的 Graylog；清單變動沿用同一個 Token、群組設不起來會警告） |
 | 畫面 | ✅ 用暫時的測試台（真的頁面＋真的函式庫＋假資料）在瀏覽器實際操作：建立、確認、結案被擋、檢視者唯讀、Graylog 連不上、手機寬度；惡意字串只當純文字顯示 |
@@ -137,7 +139,7 @@ cd /opt/oracle-mon-librenms && git pull && sudo ./update.sh
 sudo -u librenms php /opt/oracle-mon-librenms/system/ioc-db-selftest.php
 ```
 
-預期 14 項 PASS，最後印「全部通過（測試資料已清除）」。其中 1 項驗證事件案新欄位（`ALTER` 補的欄位）能寫入並讀回，5 項是設定（門檻）：全部在一個永遠 rollBack 的交易裡跑，正式的風險等級門檻與異動紀錄不會被改到（網頁看不到測試值，程式中途被砍也不會留下），最後一項確認回復後與測試前一樣。
+預期 17 項 PASS，最後印「全部通過（測試資料已清除）」。其中 1 項驗證事件案新欄位（`ALTER` 補的欄位）能寫入並讀回；**最後 2 項（身分與稽核）是只讀**，用跟網頁一樣的 PHP 身分（librenms）實際讀 `users`、角色、雙因子、`authlog`、`/var/log/oracle-admin.log`，其中管理操作紀錄檔如果 librenms 讀不到會在這裡失敗並指出檔案（修法：`sudo chmod 640 /var/log/oracle-admin.log && sudo chgrp librenms /var/log/oracle-admin.log`）；5 項是設定（門檻）與帳號盤點：全部在一個永遠 rollBack 的交易裡跑，正式的風險等級門檻與異動紀錄不會被改到（網頁看不到測試值，程式中途被砍也不會留下），最後一項確認回復後與測試前一樣。
 
 **2. 唯讀帳號**（需要 `/etc/oracle-mon/graylog-api.conf` 有 admin 帳密與 `GRAYLOG_FIREWALL_STREAMS`）：
 
@@ -161,6 +163,7 @@ python3 /opt/oracle-mon-librenms/system/graylog-reader.py status
 - 事件詳情（第二批）：從「資安」頁的「可疑登入的帳號」按「建立事件案」（會預選事件類型「可疑登入」並帶入查詢條件），建立後點開，應看到摘要列、攻擊技術 T1110、**證據時間軸有 Graylog 的日誌**（舊到新）、關聯指標（各來源筆數，弱點是「尚未接入」）、建議處置；沒填查詢條件的案件，時間軸寫「沒有填 Graylog 查詢條件」；暫時把 `/etc/oracle-mon/graylog-reader.conf` 改名後重新點開，時間軸應寫「無法取得：尚未設定 Graylog 唯讀帳號」，其餘區塊照常；`global-read` 看得到證據，沒有任何處理按鈕
 - 用 `global-read` 角色的帳號登入：看得到總覽與事件案，沒有任何處理按鈕；直接打 API 回 403
 - 暫時把 `/etc/oracle-mon/graylog-reader.conf` 改名：日誌相關區塊顯示「尚未設定 Graylog 唯讀帳號」，設備與事件案照常（看完改回來）
+- 左側「身分與稽核」（只有 admin 看得到）：上方 5 張卡（啟用中的帳號、管理者、雙因子、久未登入、帳號盤點）、角色分布甜甜圈圖、治理檢查；久未登入的名單下面有註明登入紀錄最早到哪天；填帳號盤點紀錄按儲存，卡片變成「今天」、稽核軌跡多一筆「修改設定：帳號盤點…」；稽核軌跡有你剛剛的登入與管理操作，可依類別與結果篩選；「主機的遠端登入」在最近 24 小時沒收到 Linux／Windows 日誌時寫「沒有收到日誌（還沒接入，或已經中斷了）」。`global-read` 登入後導覽沒有這一項，直接打 `/ioc-identity.php` 回 403
 - 左側「設定」頁：admin 能改風險等級門檻（儲存前會預覽等級、中等風險不能大於低風險），儲存後到「總覽」確認風險等級與說明文字用新門檻、「異動紀錄」多一筆；`global-read` 看得到但輸入框是停用的，直接打 `/ioc-settings.php` 的 `save` 回 403。看完把門檻改回原值
 
 **4. 失敗時看哪裡**：PHP 錯誤在 PHP-FPM 的錯誤 log（`/var/log/php8.3-fpm.log` 或 nginx 的 error log），訊息以 `[ioc]` 開頭；

@@ -19,9 +19,12 @@ require "$librenms/vendor/autoload.php";
 $app = require "$librenms/bootstrap/app.php";
 $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
 require "$lib/bootstrap.php";
+require_once "$lib/endpoint.php";      // 身分與稽核的資料讀取函式在這裡（只定義函式與常數，不會做任何事）
 
 use Ioc\Access;
 use Ioc\AccessDenied;
+use Ioc\AuditTrail;
+use Ioc\IdentityService;
 use Ioc\CaseService;
 use Ioc\InvalidTransition;
 use Ioc\PdoCaseRepo;
@@ -164,6 +167,14 @@ try {
             }
             $assert($settings->riskThresholds(Access::VIEWER) === ['low' => 94, 'medium' => 71], '被拒絕的儲存不能改到資料');
         });
+        $check('帳號盤點紀錄：儲存、讀回、改一個值只多一筆異動紀錄（三個設定值一起寫）', function () use ($settings, $settingsRepo, $H, $assert) {
+            $r = $settings->saveAccountReview(['last_date' => gmdate('Y-m-d', time() - 86400), 'owner' => '自我測試 😀', 'period_days' => '60'], 'selftest', $H);
+            $assert($r['recorded'] === true && $r['invalid'] === false && $r['owner'] === '自我測試 😀' && $r['period_days'] === 60, '儲存後讀回的值不對（含中文與 emoji）');
+            $n = count($settingsRepo->recentHistory(1000000));
+            $settings->saveAccountReview(['last_date' => gmdate('Y-m-d', time() - 86400), 'owner' => '自我測試 😀', 'period_days' => '61'], 'selftest', $H);
+            $assert(count($settingsRepo->recentHistory(1000000)) === $n + 1, '只改週期卻不是多一筆紀錄');
+            $assert(count($settingsRepo->recentHistory(1000000, [SettingsService::RISK_LOW, SettingsService::RISK_MEDIUM])) === count(array_filter($settingsRepo->recentHistory(1000000), fn ($h) => in_array($h['skey'], [SettingsService::RISK_LOW, SettingsService::RISK_MEDIUM], true))), '依設定名稱篩選異動紀錄（SQL 的 IN）不對');
+        });
     } finally {
         if ($pdo->inTransaction()) {
             $pdo->rollBack();
@@ -173,6 +184,25 @@ try {
         $assert($settingsBefore !== null, '測試前的狀態沒有記下來（上面的資料表檢查失敗）');
         $assert($settingsRepo->all() === $settingsBefore['rows'], '設定值沒有復原');
         $assert(count($settingsRepo->recentHistory(1000000)) === $settingsBefore['history'], '異動紀錄沒有復原');
+    });
+    // 身分與稽核的資料讀取（只讀）：LibreNMS 的 users／roles／users_prefs／authlog 與 oracle-admin.log。
+    // 本機的單元測試用假資料，驗證不到這些 SQL 與檔案權限；這裡用跟網頁相同的 PHP 身分（librenms）實際讀一次。
+    $check('身分與稽核：帳號、角色、雙因子、登入紀錄的 SQL 都讀得出來（只讀）', function () use ($assert, $H) {
+        $s = ioc_identity_sources();
+        foreach (['users', 'roles', 'twofactor', 'last_logins'] as $part) {
+            $assert($s[$part] !== null, "「{$part}」讀不到（看 PHP 的錯誤 log，訊息以 [ioc] identity 開頭）");
+        }
+        $assert(count($s['users']) >= 1, 'LibreNMS 至少有一個帳號（你自己），結果是空的');
+        $b = (new IdentityService())->build($s['users'], $s['roles'], $s['twofactor'], $s['last_logins'], $s['authlog_oldest'], ['last_date' => null, 'owner' => null, 'period_days' => 90, 'recorded' => false, 'invalid' => false], $H);
+        $assert($b['summary']['ok'] && $b['roles']['ok'] && $b['two_factor']['ok'] && $b['least_privilege']['ok'], '帳號統計算不出來');
+    });
+    $check('身分與稽核：稽核軌跡的四個來源都讀得到（含 /var/log/oracle-admin.log 的權限，只讀）', function () use ($assert, $H) {
+        $a = ioc_audit_sources();
+        foreach (['login' => 'LibreNMS 登入紀錄（authlog）', 'admin_op' => '管理操作紀錄檔 ' . IOC_ADMIN_LOG . '（librenms 要讀得到）', 'case' => '事件案歷程', 'settings' => '設定異動紀錄'] as $k => $what) {
+            $assert($a[$k] !== null, "{$what} 讀不到");
+        }
+        $t = (new AuditTrail())->build($a, [], $H);
+        $assert(count(array_filter($t['sources'], fn ($s) => !$s['ok'])) === 0, '稽核軌跡有來源標成無法取得');
     });
 } finally {
     // 只清自己的資料：歷程先刪（有外鍵），再刪案件

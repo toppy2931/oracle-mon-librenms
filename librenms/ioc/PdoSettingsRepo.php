@@ -41,9 +41,25 @@ final class PdoSettingsRepo implements SettingsRepo
             ->execute(['t' => $utc, 'a' => $actor, 'k' => $key, 'o' => $old, 'n' => $new]);
     }
 
-    public function recentHistory(int $limit): array
+    public function recentHistory(int $limit, ?array $keys = null): array
     {
-        $st = $this->pdo->prepare('SELECT ts, actor, skey, old_value, new_value FROM ioc_settings_history ORDER BY id DESC LIMIT :lim');
+        $where  = '';
+        $params = [];
+        if ($keys !== null) {
+            if ($keys === []) {
+                return [];
+            }
+            $marks = [];
+            foreach (array_values($keys) as $i => $k) {
+                $marks[] = ':k' . $i;
+                $params['k' . $i] = (string) $k;
+            }
+            $where = ' WHERE skey IN (' . implode(', ', $marks) . ')';
+        }
+        $st = $this->pdo->prepare('SELECT ts, actor, skey, old_value, new_value FROM ioc_settings_history' . $where . ' ORDER BY id DESC LIMIT :lim');
+        foreach ($params as $k => $v) {
+            $st->bindValue(':' . $k, $v);
+        }
         $st->bindValue(':lim', max(1, $limit), \PDO::PARAM_INT);
         $st->execute();
         return $st->fetchAll(\PDO::FETCH_ASSOC);

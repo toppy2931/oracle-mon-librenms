@@ -32,4 +32,12 @@ final class Access
     {
         return $level === self::HANDLER;
     }
+
+    /** 只有 admin 能用的功能（例如身分與稽核）：不是就丟 AccessDenied，由端點轉成 403。 */
+    public static function requireHandler(?string $level, string $message): void
+    {
+        if (!self::canHandle($level)) {
+            throw new AccessDenied($message);
+        }
+    }
 }

@@ -26,7 +26,8 @@ rm -f "$LIBRENMS_DIR"/html/oracle-admin.php \
 rm -f "$LIBRENMS_DIR"/html/ioc-portal.php \
       "$LIBRENMS_DIR"/html/ioc-data.php \
       "$LIBRENMS_DIR"/html/ioc-cases.php \
-      "$LIBRENMS_DIR"/html/ioc-settings.php
+      "$LIBRENMS_DIR"/html/ioc-settings.php \
+      "$LIBRENMS_DIR"/html/ioc-identity.php
 rm -rf "$LIBRENMS_DIR"/includes/ioc      # IOC 入口函式庫（事件案與設定的資料表 ioc_* 與讀取用的 Graylog 帳號會保留，見文末）
 rm -f "$LIBRENMS_DIR"/includes/html/graphs/application/oracle-l1hweb_*.inc.php
 rm -f "$LIBRENMS_DIR"/includes/polling/applications/oracle-l1hweb.inc.php
