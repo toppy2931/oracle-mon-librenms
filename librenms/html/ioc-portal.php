@@ -89,8 +89,9 @@ a{color:var(--blue)}
 .kpis2{grid-template-columns:repeat(2,minmax(0,1fr))}
 .donut-wrap{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
 .donut{width:150px;height:150px;flex:none}
-.donut .c{font-size:9px;fill:var(--muted);text-anchor:middle}
-.donut .n{font-size:13px;font-weight:800;fill:#fff;text-anchor:middle}
+/* SVG 的文字大小用 viewBox 的座標單位（整張圖是 42 單位寬、顯示成 150px，所以 1 單位≈3.6px），不是螢幕像素 */
+.donut .c{font-size:3.6px;fill:var(--muted);text-anchor:middle}
+.donut .n{font-size:8px;font-weight:800;fill:#fff;text-anchor:middle}
 .dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:7px;vertical-align:-1px}
 .two{grid-template-columns:1.25fr .75fr}
 .three{grid-template-columns:minmax(0,.85fr) minmax(0,1.45fr) minmax(0,1fr)}
@@ -1032,7 +1033,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     });
     return sv('svg', { viewBox: '0 0 42 42', class: 'donut', role: 'img', 'aria-label': '角色分布，共 ' + total + ' 個啟用中的帳號' },
       sv('circle', { cx: 21, cy: 21, r: 15.9155, fill: 'none', stroke: '#203551', 'stroke-width': 6 }), segs,
-      sv('text', { x: 21, y: 21.5, class: 'n' }, String(total)), sv('text', { x: 21, y: 28, class: 'c' }, '個帳號'));
+      sv('text', { x: 21, y: 22, class: 'n' }, String(total)), sv('text', { x: 21, y: 27.5, class: 'c' }, '個帳號'));
   }
 
   function renderRoles(items) {
