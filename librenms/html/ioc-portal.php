@@ -964,7 +964,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
       sel('筆數', 'limit', [['50', '50'], ['100', '100'], ['200', '200']]));
     $('#view-identity').replaceChildren(accBox,
       h('section', { class: 'grid' }, section('稽核軌跡', '登入、管理操作、事件案處理、設定異動，最新的在前', [trailBar, trailBody])),
-      h('section', { class: 'grid' }, section('主機的遠端登入（SSH／RDP）', '最近 24 小時，來自 Graylog', hostBox)));
+      h('section', { class: 'grid' }, section('主機的遠端登入（SSH／Windows）', '最近 24 小時，來自 Graylog', hostBox)));
     // 盤點紀錄存好後，帳號區塊要重載，稽核軌跡也會多一筆「修改設定」，所以一起重載
     const afterSave = () => { loadIdentityAccounts(seq, accBox, afterSave); loadIdentityTrail(seq, trailBody); };
     loadIdentityAccounts(seq, accBox, afterSave);
