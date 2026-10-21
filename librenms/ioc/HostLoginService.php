@@ -4,7 +4,7 @@ declare(strict_types=1);
 namespace Ioc;
 
 /**
- * 主機的遠端登入（SSH／RDP）：從 Graylog 取 Linux 與 Windows 的登入成功、登入失敗、無效帳號（簡報「遠端維運稽核軌跡」）。
+ * 主機的遠端登入（SSH 與 Windows 登入）：從 Graylog 取 Linux 與 Windows 的登入成功、登入失敗、無效帳號（簡報「遠端維運稽核軌跡」）。
  *
  * 鐵則：Linux 與 Windows 最近 24 小時都沒有收到日誌時，要說「沒有收到日誌（還沒接入，或已中斷）」，不能顯示成「沒有人登入」或空的表格（OPS-006、EVT-007）；
  * Graylog 取不到是 ['ok'=>false,'error'=>…]。範例資料（ioc_demo=true）預設排除，demo 模式只看範例資料，與總覽一致（IS-054～056）。

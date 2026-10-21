@@ -4,7 +4,7 @@
  *
  *   accounts                                帳號與角色統計、雙因子覆蓋、最小權限、久未登入的帳號、帳號盤點狀態
  *   trail   {category,result,limit}         稽核軌跡（LibreNMS 登入、管理操作、事件案處理、設定異動）
- *   hosts   {demo}                          主機的遠端登入（SSH／RDP，來自 Graylog）
+ *   hosts   {demo}                          主機的遠端登入（SSH 與 Windows 登入，來自 Graylog）
  *   review_save {last_date,owner,period_days}  儲存帳號盤點紀錄
  *
  * **只有 admin 能用**：稽核軌跡會列出所有人的登入位址與失敗嘗試。第一道檢查在這裡（沒有權限就不去讀任何資料），

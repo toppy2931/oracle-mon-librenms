@@ -261,7 +261,7 @@ function ioc_identity_accounts(string $level): array
 }
 
 /**
- * 主機的遠端登入（SSH／RDP）：Graylog 還沒設定好時，HostLoginService 一樣回 ok=false 與原因。
+ * 主機的遠端登入（SSH 與 Windows 登入）：Graylog 還沒設定好時，HostLoginService 一樣回 ok=false 與原因。
  *
  * @return array<string,mixed>
  */
