@@ -21,6 +21,7 @@ use Ioc\GraylogUnavailable;
 use Ioc\HostLoginService;
 use Ioc\IdentityService;
 use Ioc\LandscapeService;
+use Ioc\NetworkVisibilityService;
 use Ioc\OverviewService;
 use Ioc\PdoCaseRepo;
 use Ioc\PdoSettingsRepo;
@@ -29,6 +30,15 @@ use Ioc\UnavailableLogSource;
 
 const IOC_READER_CONF = '/etc/oracle-mon/graylog-reader.conf';
 const IOC_OVERVIEW_CACHE = 'ioc:overview:v3:';     // 後面接 live 或 demo；總覽的伺服器端快取（20 秒）。內容形狀改了就要升版號
+const IOC_NETWORK_CACHE = 'ioc:network:v1:';       // 同上，內網可視性的快取（60 秒，查詢次數多）；內部網段的設定一改就要清掉
+
+/** 內部網段的設定有異動就讓內網可視性的快取失效，否則 60 秒內畫面還是用舊網段算的。 */
+function ioc_network_cache_forget(): void
+{
+    foreach (['live', 'demo'] as $k) {
+        \Illuminate\Support\Facades\Cache::forget(IOC_NETWORK_CACHE . $k);
+    }
+}
 
 /**
  * 事件案或影響總覽內容的設定（例如風險等級門檻）有異動就讓總覽快取失效，
@@ -289,6 +299,32 @@ function ioc_audit_trail($in, string $level): array
 }
 
 /**
+ * 內網可視性（admin 與 global-read 都能看，全部唯讀）。Graylog 還沒設定好時各區塊標示原因；
+ * 內部網段的設定讀不到（資料表壞了或值不合法）時整頁各區塊標「無法取得」，不套用預設網段冒充。
+ *
+ * @return array<string,mixed>
+ */
+function ioc_network(bool $demo, string $level): array
+{
+    try {
+        $logs = GraylogClient::fromConf(IOC_READER_CONF);
+    } catch (GraylogUnavailable $e) {
+        $logs = new UnavailableLogSource($e->getMessage());
+    }
+    $nets = null;
+    $why  = '';
+    try {
+        $nets = ioc_settings()->internalNets($level);
+    } catch (\Ioc\AccessDenied $e) {
+        throw $e;
+    } catch (\Throwable $e) {
+        error_log('[ioc] internal nets: ' . $e->getMessage());
+        $why = $e instanceof \Ioc\IocError ? $e->getMessage() : '無法讀取內部網段的設定（資料表還沒建立？）';
+    }
+    return (new NetworkVisibilityService($logs, $demo))->build($nets, $why, $level);
+}
+
+/**
  * 只取指定欄位、只收純量並轉成字串，其他（陣列、物件）一律丟掉，
  * 避免瀏覽器送來奇怪的型別讓後端出現轉型警告。
  *
@@ -383,7 +419,13 @@ function ioc_overview(bool $demo, string $level): array
         error_log('[ioc] risk thresholds: ' . $e->getMessage());
         $thresholds = null;                       // 資料表還沒建立或值壞了：風險分數只顯示分數、不判定等級
     }
-    $overview = (new OverviewService($logs, $demo))->build($fleet === null ? null : $fleet->legacy(), $cases);
+    try {
+        $nets = ioc_settings()->internalNets($level);
+    } catch (\Throwable $e) {
+        error_log('[ioc] internal nets: ' . $e->getMessage());
+        $nets = null;                             // 讀不到內部網段：「防火牆阻擋的來源」分不出內外，該區塊標「無法取得」，不套預設網段
+    }
+    $overview = (new OverviewService($logs, $demo, null, $nets))->build($fleet === null ? null : $fleet->legacy(), $cases);
     $overview['landscape'] = (new LandscapeService())->build($fleet, $cases, $open, $latest, $trend, $overview['coverage'], $thresholds);
     return $overview;
 }

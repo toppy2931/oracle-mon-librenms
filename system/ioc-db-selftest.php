@@ -175,6 +175,21 @@ try {
             $assert(count($settingsRepo->recentHistory(1000000)) === $n + 1, '只改週期卻不是多一筆紀錄');
             $assert(count($settingsRepo->recentHistory(1000000, [SettingsService::RISK_LOW, SettingsService::RISK_MEDIUM])) === count(array_filter($settingsRepo->recentHistory(1000000), fn ($h) => in_array($h['skey'], [SettingsService::RISK_LOW, SettingsService::RISK_MEDIUM], true))), '依設定名稱篩選異動紀錄（SQL 的 IN）不對');
         });
+        $check('內部網段：儲存、讀回（整理、排序、去重）、整理後沒變動不留紀錄、不合法的值被擋下', function () use ($settings, $settingsRepo, $H, $assert) {
+            $r = $settings->saveNetwork(['cidrs' => "192.168.1.5/24\n10.0.0.0/8, 10.0.0.0/8"], 'selftest', $H);
+            $assert($r['nets'] === ['10.0.0.0/8', '192.168.1.0/24'] && $r['custom'] === true && $r['invalid'] === false, '儲存後讀回的值不對（要整理成網路位址、排序、去重）');
+            $n = count($settingsRepo->recentHistory(1000000));
+            $settings->saveNetwork(['cidrs' => '192.168.1.0/24 10.0.0.0/8'], 'selftest', $H);
+            $assert(count($settingsRepo->recentHistory(1000000)) === $n, '整理後沒有變動卻多了一筆紀錄');
+            try {
+                $settings->saveNetwork(['cidrs' => '10.0.0.0/4'], 'selftest', $H);        // 前綴長度太小
+                throw new RuntimeException('應該被拒絕');
+            } catch (ValidationError $e) {
+            }
+            $assert($settings->internalNets($H) === ['10.0.0.0/8', '192.168.1.0/24'], '被拒絕的儲存不能改到資料');
+            $h = $settings->networkSettings($H)['history'];
+            $assert(count($h) >= 1 && $h[0]['actor'] === 'selftest' && $h[0]['to'] === '10.0.0.0/8,192.168.1.0/24', '內部網段的異動紀錄不對（依設定名稱篩選的 SQL）');
+        });
     } finally {
         if ($pdo->inTransaction()) {
             $pdo->rollBack();

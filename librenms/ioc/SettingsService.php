@@ -4,8 +4,10 @@ declare(strict_types=1);
 namespace Ioc;
 
 /**
- * 入口的可調設定（目前只有「風險等級門檻」）。誰能改（只有 admin）、怎麼驗證、沒設定時用什麼預設，
- * 全在這裡；端點只管登入、CSRF、解析內容。所有方法都先檢查權限，與 CaseService 一致。
+ * 入口的可調設定：風險等級門檻、帳號盤點紀錄、內部網段（內網可視性用）。誰能改（只有 admin）、怎麼驗證、
+ * 沒設定時用什麼預設，全在這裡；端點只管登入、CSRF、解析內容。所有方法都先檢查權限，與 CaseService 一致。
+ * 內部網段的規則在 IpNets（IPv4 CIDR、整理排序去重）；同樣「壞掉的值不悄悄套用預設」：internalNets() 丟例外，
+ * networkSettings() 標 invalid。
  *
  * 風險等級門檻：分數（0–100，越高越好）≥ low 是低風險、≥ medium 是中等風險、其餘高風險。
  * 規則：1 ≤ medium < low ≤ 100，都是整數。沒設定過就用 RiskScore::DEFAULT_THRESHOLDS。
@@ -21,12 +23,14 @@ final class SettingsService
     public const REVIEW_OWNER  = 'review.owner';
     public const REVIEW_PERIOD = 'review.period_days';
     public const REVIEW_PERIOD_DEFAULT = 90;
+    public const NET_INTERNAL  = 'net.internal_cidrs';
     public const KEY_LABEL     = [
         self::RISK_LOW      => '低風險門檻',
         self::RISK_MEDIUM   => '中等風險門檻',
         self::REVIEW_DATE   => '最近一次帳號盤點日期',
         self::REVIEW_OWNER  => '帳號盤點負責人',
         self::REVIEW_PERIOD => '帳號盤點週期（天）',
+        self::NET_INTERNAL  => '內部網段',
     ];
     public const HISTORY_LIMIT = 10;
     /** 沒設定過時各個設定名稱的預設值（風險門檻的來源是 RiskScore::DEFAULT_THRESHOLDS，這裡只是依設定名稱重排）。 */
@@ -155,6 +159,96 @@ final class SettingsService
     }
 
     /**
+     * 目前生效的內部網段（給內網可視性用）。資料表裡的值不合法（有人手動改過）時丟例外：呼叫端要標「無法取得」，
+     * 不能悄悄改用預設網段，否則畫面上的「內部」會跟管理者設定的不一致。
+     *
+     * @return string[] 整理過的 CIDR
+     * @throws IocError 資料表裡的值不合法
+     */
+    public function internalNets(?string $level): array
+    {
+        $this->requireView($level);
+        $s = $this->readNetwork($this->repo->all());
+        if ($s['invalid']) {
+            throw new IocError('內部網段的設定值不合法（資料表被手動改過？），請管理者到「設定」頁重新儲存');
+        }
+        return $s['nets'];
+    }
+
+    /**
+     * 設定頁「內部網段」要的資料：目前的網段、預設值、誰在什麼時候改的、最近的異動紀錄（時間已轉成台北時間）。檢視者可看。
+     *
+     * @return array<string,mixed>
+     */
+    public function networkSettings(?string $level): array
+    {
+        $this->requireView($level);
+        $s = $this->readNetwork($this->repo->all());
+        $history = [];
+        foreach ($this->repo->recentHistory(self::HISTORY_LIMIT, [self::NET_INTERNAL]) as $h) {
+            $history[] = [
+                'time'  => Time::toTaipei($h['ts']),
+                'actor' => (string) $h['actor'],
+                'from'  => (string) $h['old_value'],
+                'to'    => (string) $h['new_value'],
+            ];
+        }
+        return [
+            'nets'       => $s['nets'],
+            'defaults'   => IpNets::DEFAULTS,
+            'custom'     => $s['custom'],
+            'invalid'    => $s['invalid'],
+            'updated_by' => $s['updated_by'],
+            'updated_at' => $s['updated_at'] === null ? null : Time::toTaipei($s['updated_at']),
+            'limits'     => ['max_nets' => IpNets::MAX_NETS, 'min_bits' => IpNets::MIN_BITS],
+            'history'    => $history,
+        ];
+    }
+
+    /**
+     * 儲存內部網段（僅 admin）。網段整理成「網路位址/前綴長度」、排序、去重後存成一個字串；整理後沒有變動就什麼都不寫
+     * （也不留紀錄）。資料表裡的值壞了（invalid）時，無論填什麼都會寫入，管理者重新儲存就能修復。
+     *
+     * @param array<string,mixed> $in cidrs（一行一個網段的文字）
+     * @return array<string,mixed> 儲存後的 networkSettings()
+     */
+    public function saveNetwork(array $in, string $actor, ?string $level): array
+    {
+        $this->requireHandler($level);
+        $text = is_scalar($in['cidrs'] ?? null) ? (string) $in['cidrs'] : '';
+        if (strlen($text) > 1024) {
+            throw new ValidationError(['內容太長了（網段清單不會超過 1024 個字元）']);
+        }
+        $r = IpNets::parseInput($text);
+        if ($r['errors'] !== []) {
+            throw new ValidationError($r['errors']);
+        }
+        $new = $r['nets'];
+        $now = ($this->now)();
+
+        $this->repo->transaction(function () use ($new, $actor, $now): void {
+            $rows = $this->repo->all();
+            $cur  = $this->readNetwork($rows);
+            if (!$cur['invalid'] && $cur['nets'] === $new) {
+                return;
+            }
+            $this->persist([self::NET_INTERNAL => IpNets::toStored($new)], $rows, $actor, $now);
+        });
+        return $this->networkSettings($level);
+    }
+
+    /**
+     * 設定名稱沒設定過時的值（寫異動紀錄的「原值」用）。風險門檻與盤點週期是整數常數，內部網段是 RFC1918 清單，其餘是空字串。
+     */
+    private static function defaultValue(string $key): string
+    {
+        if ($key === self::NET_INTERNAL) {
+            return IpNets::toStored(IpNets::DEFAULTS);
+        }
+        return (string) (self::DEFAULTS[$key] ?? '');
+    }
+
+    /**
      * 把一組設定值寫進去：每個值都寫（「最後修改」才會一致），實際有變動的才留異動紀錄。
      * 舊值是資料表裡現有的值；沒設定過的用預設值（沒有預設值的是空字串）。在交易內呼叫。
      *
@@ -164,7 +258,7 @@ final class SettingsService
     private function persist(array $values, array $rows, string $actor, string $now): void
     {
         foreach ($values as $key => $value) {
-            $old = $rows[$key]['value'] ?? (string) (self::DEFAULTS[$key] ?? '');
+            $old = $rows[$key]['value'] ?? self::defaultValue($key);
             $this->repo->put($key, $value, $actor, $now);
             if ($old !== $value) {
                 $this->repo->addHistory($now, $actor, $key, $old, $value);
@@ -234,6 +328,24 @@ final class SettingsService
         // 兩個值是一起寫的，時間與操作者相同；萬一不同（手動改過）以較晚的為準
         $last = strcmp($lo['updated_at'], $me['updated_at']) >= 0 ? $lo : $me;
         return ['low' => $low, 'medium' => $medium, 'custom' => true, 'invalid' => false, 'updated_by' => $last['updated_by'], 'updated_at' => $last['updated_at']];
+    }
+
+    /**
+     * @param array<string,array{value:string,updated_by:string,updated_at:string}> $rows
+     * @return array{nets:string[],custom:bool,invalid:bool,updated_by:?string,updated_at:?string}
+     */
+    private function readNetwork(array $rows): array
+    {
+        $none = ['nets' => IpNets::DEFAULTS, 'custom' => false, 'invalid' => false, 'updated_by' => null, 'updated_at' => null];
+        $r = $rows[self::NET_INTERNAL] ?? null;
+        if ($r === null) {
+            return $none;
+        }
+        $nets = IpNets::fromStored($r['value']);
+        if ($nets === null) {
+            return ['invalid' => true] + $none;       // 被手動改成不合法的值：壞掉，不悄悄套用預設
+        }
+        return ['nets' => $nets, 'custom' => true, 'invalid' => false, 'updated_by' => $r['updated_by'], 'updated_at' => $r['updated_at']];
     }
 
     /**

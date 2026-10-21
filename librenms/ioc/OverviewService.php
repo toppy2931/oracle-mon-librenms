@@ -41,12 +41,16 @@ final class OverviewService
     private LogSource $logs;
     private bool $demo;
     private int $now;
+    /** @var string[]|null 內部網段（設定頁的「內部網段」）；null＝設定讀不到，分內外的區塊要標「無法取得」，不能套預設網段 */
+    private ?array $nets;
 
-    public function __construct(LogSource $logs, bool $demo = false, ?int $now = null)
+    /** @param string[]|null $nets 內部網段（整理過的 CIDR）；沒傳就是預設的私有位址，傳 null 表示設定讀不到 */
+    public function __construct(LogSource $logs, bool $demo = false, ?int $now = null, ?array $nets = IpNets::DEFAULTS)
     {
         $this->logs = $logs;
         $this->demo = $demo;
         $this->now  = $now ?? time();
+        $this->nets = $nets;
     }
 
     /**
@@ -181,11 +185,15 @@ final class OverviewService
     /**
      * 防火牆阻擋的來源。外部（網際網路）的掃描雜訊量很大，只彙總成一個數字；
      * 內部來源才逐一列出，因為內部主機被擋才代表需要看。廣播與多播（255.255.255.255、224.*、239.*）排除。
+     * 「內部」是設定頁的內部網段（與內網可視性同一個定義）；設定讀不到就無法分內外，整塊標「無法取得」。
      *
      * @return array{internal:array<int,array<string,mixed>>,internal_events:int,external_events:int,capped:bool}
      */
     private function deniedSources(): array
     {
+        if ($this->nets === null) {
+            throw new GraylogUnavailable('內部網段的設定讀不到，無法分辨內部與外部來源（請管理者到「設定」頁檢查）');
+        }
         $q = $this->q('event_action:fw_deny AND _exists_:src_ip AND NOT dst_ip:"255.255.255.255" AND NOT dst_ip:224.* AND NOT dst_ip:239.*');
         $rows = $this->logs->aggregate($q, self::RANGE, ['src_ip'], ['count'], self::GROUP_LIMIT);
         $internal = [];
@@ -197,7 +205,7 @@ final class OverviewService
             if (filter_var($ip, FILTER_VALIDATE_IP) === false) {
                 continue;                    // 空白或格式不對的來源不算內部也不算外部
             }
-            if (self::isInternal($ip)) {
+            if (IpNets::contains($this->nets, $ip)) {
                 $internal[] = ['src_ip' => $ip, 'count' => $n];
                 $internalEvents += $n;
             } else {
@@ -365,22 +373,17 @@ final class OverviewService
         return ['missing' => $missing, 'all_missing' => $total > 0 && count($missing) === $total];
     }
 
-    /** @return array{ok:bool,data?:mixed,error?:string} */
-    private function guard(callable $fn): array
+    /**
+     * 區塊各自成敗的包裝：只攔 GraylogUnavailable，其他例外是 bug，要往上拋。內網可視性等服務共用這一份。
+     *
+     * @return array{ok:bool,data?:mixed,error?:string}
+     */
+    public static function guard(callable $fn): array
     {
         try {
             return ['ok' => true, 'data' => $fn()];
         } catch (GraylogUnavailable $e) {
             return ['ok' => false, 'error' => $e->getMessage()];
         }
-    }
-
-    /** 私有位址（RFC1918）、迴路、連結本地都算內部。 */
-    public static function isInternal(string $ip): bool
-    {
-        if (filter_var($ip, FILTER_VALIDATE_IP) === false) {
-            return false;
-        }
-        return filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) === false;
     }
 }

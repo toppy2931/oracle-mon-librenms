@@ -15,8 +15,8 @@ if (!defined('IOC_LIB_LOADED')) {
         'Errors', 'Labels', 'Access', 'Time', 'CaseFlow', 'CaseRepo', 'CaseService', 'PdoCaseRepo', 'Schema',
         'LogSource', 'WindowedLogSource', 'GraylogClient', 'UnavailableLogSource', 'OverviewService', 'CaseCatalog', 'CaseView', 'EvidenceService',
         'Fleet', 'RiskScore', 'LandscapeService',
-        'SettingsRepo', 'PdoSettingsRepo', 'SettingsService',
-        'IdentityService', 'AuditTrail', 'HostLoginService',
+        'IpNets', 'SettingsRepo', 'PdoSettingsRepo', 'SettingsService',
+        'IdentityService', 'AuditTrail', 'HostLoginService', 'NetworkVisibilityService',
     ] as $f) {
         require_once __DIR__ . '/' . $f . '.php';
     }

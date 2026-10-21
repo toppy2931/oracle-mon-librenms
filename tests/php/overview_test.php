@@ -358,13 +358,28 @@ test('防火牆阻擋來源：內部逐一列出、外部只彙總；廣播與�
     }
 });
 
-test('isInternal：私有、迴路、連結本地是內部；公開位址與壞字串不是', function () {
-    foreach (['10.1.2.3', '172.16.0.1', '172.31.255.255', '192.168.0.9', '127.0.0.1', '169.254.1.1', 'fd00::1'] as $ip) {
-        assertTrue(OverviewService::isInternal($ip), "$ip 應為內部");
-    }
-    foreach (['8.8.8.8', '172.32.0.1', '203.0.113.9', '2001:4860:4860::8888', '', 'abc', '10.0.0.256'] as $ip) {
-        assertTrue(!OverviewService::isInternal($ip), "$ip 不應為內部");
-    }
+test('防火牆阻擋來源：「內部」用設定頁的內部網段（與內網可視性同一個定義），不是寫死的私有位址', function () {
+    $src = new FakeLogSource(fn ($q, $g) => $g === ['src_ip'] ? [
+        ['src_ip' => '10.20.5.23', 'count' => 50], ['src_ip' => '172.16.1.5', 'count' => 5], ['src_ip' => '172.16.2.9', 'count' => 4],
+        ['src_ip' => '192.168.1.1', 'count' => 3], ['src_ip' => '127.0.0.1', 'count' => 2], ['src_ip' => 'fd00::1', 'count' => 1],
+        ['src_ip' => '8.8.8.8', 'count' => 9000],
+    ] : []);
+    $d = (new OverviewService($src, false, NOW, ['172.16.1.0/24']))->build(devices(), cases())['attention']['denied_sources']['data'];
+    assertSame(['172.16.1.5'], array_column($d['internal'], 'src_ip'), '只有設定的網段算內部');
+    assertSame([5, 50 + 4 + 3 + 2 + 1 + 9000], [$d['internal_events'], $d['external_events']], '其餘（含迴路與 IPv6）都算外部，不是內部');
+    // 沒傳網段＝預設的私有位址；迴路、連結本地、IPv6 不算（要的話請管理者在設定頁加）
+    $d = (new OverviewService($src, false, NOW))->build(devices(), cases())['attention']['denied_sources']['data'];
+    assertSame(['10.20.5.23', '172.16.1.5', '172.16.2.9', '192.168.1.1'], array_column($d['internal'], 'src_ip'));
+});
+
+test('防火牆阻擋來源：內部網段讀不到（null）——整塊標「無法取得」，不套預設網段；其他區塊照常', function () {
+    $src = new FakeLogSource(fn ($q, $g) => $g === ['src_ip'] ? [['src_ip' => '10.20.5.23', 'count' => 50]] : []);
+    $o = (new OverviewService($src, false, NOW, null))->build(devices(), cases());
+    assertSame(false, $o['attention']['denied_sources']['ok']);
+    assertTrue(mb_strpos($o['attention']['denied_sources']['error'], '內部網段') !== false);
+    assertSame(true, $o['coverage']['ok'], '其他區塊不受影響');
+    $queries = array_filter($src->calls, fn ($c) => $c['groupBy'] === ['src_ip']);
+    assertSame([], array_values($queries), '分不出內外就不用去查');
 });
 
 test('KPI 狀態門檻：整體運作 95%／80%、設備異常比例', function () {
