@@ -85,7 +85,13 @@ a{color:var(--blue)}
 .banner.err{border-color:var(--red);background:rgba(255,107,107,.08);color:#ffc0c0}
 .grid{display:grid;gap:14px;margin-top:14px}
 .kpis6{grid-template-columns:repeat(6,minmax(0,1fr))}
+.kpis5{grid-template-columns:repeat(5,minmax(0,1fr))}
 .kpis2{grid-template-columns:repeat(2,minmax(0,1fr))}
+.donut-wrap{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
+.donut{width:150px;height:150px;flex:none}
+.donut .c{font-size:9px;fill:var(--muted);text-anchor:middle}
+.donut .n{font-size:13px;font-weight:800;fill:#fff;text-anchor:middle}
+.dot{display:inline-block;width:10px;height:10px;border-radius:50%;margin-right:7px;vertical-align:-1px}
 .two{grid-template-columns:1.25fr .75fr}
 .three{grid-template-columns:minmax(0,.85fr) minmax(0,1.45fr) minmax(0,1fr)}
 .even{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
@@ -172,10 +178,10 @@ code{background:#0a1423;border:1px solid var(--line);border-radius:6px;padding:2
 .toast{position:fixed;right:16px;bottom:16px;max-width:420px;padding:10px 14px;border-radius:10px;background:#1b4a86;color:#fff;display:none;z-index:9}
 .toast.err{background:#8a2b2b}
 footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
-@media(max-width:1280px){.kpis6{grid-template-columns:repeat(3,minmax(0,1fr))}.three{grid-template-columns:1fr}}
+@media(max-width:1280px){.kpis6,.kpis5{grid-template-columns:repeat(3,minmax(0,1fr))}.three{grid-template-columns:1fr}}
 @media(max-width:1180px){.two,.even,.split{grid-template-columns:1fr}}
 @media(max-width:900px){.app{flex-direction:column}.side{position:static;width:auto;height:auto;padding:10px}.nav{flex-direction:row;overflow-x:auto}.nav button{white-space:nowrap;width:auto}.nav .sep{display:none}.main{padding:10px}}
-@media(max-width:720px){.kpis6,.kpis2{grid-template-columns:repeat(2,minmax(0,1fr))}.sumrow{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:720px){.kpis6,.kpis5,.kpis2{grid-template-columns:repeat(2,minmax(0,1fr))}.sumrow{grid-template-columns:repeat(2,minmax(0,1fr))}}
 </style>
 </head>
 <body>
@@ -197,6 +203,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     <main id="view-cases" hidden></main>
     <main id="view-security" hidden></main>
     <main id="view-settings" hidden></main>
+    <main id="view-identity" hidden></main>
     <footer>日誌來自 Graylog（唯讀帳號），設備與站點（LibreNMS 的「位置」）來自 LibreNMS，事件案存在 LibreNMS 資料庫。灰色的「尚未提供」項目還沒有資料來源，不會顯示假數字。</footer>
   </div>
 </div>
@@ -217,6 +224,8 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     { key: 'cases', label: '事件案', title: '事件案管理', sub: '建立、確認、處理與結案，每一步都有紀錄', badge: true },
     { key: 'security', label: '資安', title: '資安事件', sub: '登入、帳號與防火牆阻擋' },
     { key: 'settings', label: '設定', title: '系統設定', sub: '風險等級門檻' },
+    // 身分與稽核只有 admin 看得到（稽核軌跡會列出所有人的登入位址與失敗嘗試）；後端也會擋，這裡只是不顯示入口
+    ...(CAN_HANDLE ? [{ key: 'identity', label: '身分與稽核', title: '身分與稽核', sub: '帳號與角色、稽核軌跡、主機的遠端登入' }] : []),
     { sep: '尚未提供' },
     { key: 'risk', label: '風險與弱點', off: true },
     { key: 'config', label: '組態治理', off: true },
@@ -365,6 +374,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     if (tab === 'cases' && (changed || force || !$('#case-right'))) { loadCases(); }
     // 設定頁每次進來都重新讀：別的管理者可能剛改過；已經在這一頁時再按導覽不重載，免得填到一半的值被清掉
     if (tab === 'settings' && changed) { loadSettings(); }
+    if (tab === 'identity' && (changed || !$('#view-identity').firstChild)) { loadIdentity(); }
   }
 
   /** 開事件案頁並套用狀態篩選（鈴鐺用）。 */
@@ -928,6 +938,202 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
       section('風險等級門檻', '用來把整體風險分數分成低、中、高', form),
       section('異動紀錄', '最近 10 筆，誰在什麼時候改的', history)));
     if (focusSave && CAN_HANDLE) save.focus();
+  }
+
+  // ── 身分與稽核（只有 admin）──
+  // 後端每個動作都只給 admin；這裡不顯示入口只是不讓人點進去看到 403。每個區塊各自載入、各自失敗：
+  // 取不到就寫「無法取得：原因」，不能是空的表格或 0（OPS-006、RPT-007）。
+  const identity = { trail: { category: '', result: '', limit: '100' } };
+  let identitySeq = 0;                       // 切走再切回來時，舊的回應不能蓋掉新的
+  const ROLE_COLOR = { admin: '#ff6b6b', 'global-read': '#61a8ff', user: '#36d399', none: '#778ba6' };
+  const RESULT_BADGE = { ok: 'green', fail: 'red', info: 'gray' };
+
+  function loadIdentity() {
+    const seq = ++identitySeq;
+    const accBox = h('div');
+    const trailBody = h('div');
+    const hostBox = h('div');
+    // 篩選列只建一次，換條件時只重載下面的表格：整個重建會讓鍵盤焦點掉光（同導覽與頂列的做法）
+    const f = identity.trail;
+    const sel = (label, key, options) => h('label', { style: 'margin:0;display:flex;gap:6px;align-items:center;font-size:12px' }, label,
+      h('select', { onchange: (ev) => { f[key] = ev.target.value; loadIdentityTrail(seq, trailBody); } }, options.map(([v, t]) => h('option', { value: v, selected: v === f[key] }, t))));
+    const trailBar = h('div', { class: 'toolbar' },
+      sel('類別', 'category', [['', '全部'], ['login', 'LibreNMS 登入'], ['admin_op', '管理操作'], ['case', '事件案處理'], ['settings', '設定異動']]),
+      sel('結果', 'result', [['', '全部'], ['ok', '成功'], ['fail', '失敗']]),
+      sel('筆數', 'limit', [['50', '50'], ['100', '100'], ['200', '200']]));
+    $('#view-identity').replaceChildren(accBox,
+      h('section', { class: 'grid' }, section('稽核軌跡', '登入、管理操作、事件案處理、設定異動，最新的在前', [trailBar, trailBody])),
+      h('section', { class: 'grid' }, section('主機的遠端登入（SSH／RDP）', '最近 24 小時，來自 Graylog', hostBox)));
+    // 盤點紀錄存好後，帳號區塊要重載，稽核軌跡也會多一筆「修改設定」，所以一起重載
+    const afterSave = () => { loadIdentityAccounts(seq, accBox, afterSave); loadIdentityTrail(seq, trailBody); };
+    loadIdentityAccounts(seq, accBox, afterSave);
+    loadIdentityTrail(seq, trailBody);
+    loadIdentityHosts(seq, hostBox);
+  }
+
+  /** 載入一個區塊：先顯示「載入中」，回來後若這一輪已經過期（切走又切回來）就丟掉；失敗明講原因。 */
+  async function loadIdentityBlock(seq, box, request, render) {
+    box.replaceChildren(h('p', { class: 'note' }, '載入中…'));
+    let d;
+    try { d = await request(); } catch (e) { if (seq === identitySeq) box.replaceChildren(unavailable(e.message)); return; }
+    if (seq === identitySeq) box.replaceChildren(...[].concat(render(d)));
+  }
+
+  const loadIdentityAccounts = (seq, box, afterSave) => loadIdentityBlock(seq, box, async () => (await api('/ioc-identity.php', { action: 'accounts' })).accounts,
+    (d) => renderAccounts(d, afterSave));
+  const loadIdentityHosts = (seq, box) => loadIdentityBlock(seq, box, async () => (await api('/ioc-identity.php', { action: 'hosts', demo: CFG.demo })).hosts, renderHostLogins);
+  const loadIdentityTrail = (seq, box) => loadIdentityBlock(seq, box, async () => {
+    const f = identity.trail;
+    return (await api('/ioc-identity.php', { action: 'trail', category: f.category, result: f.result, limit: f.limit })).trail;
+  }, renderTrail);
+
+  const blockKpi = (b, build) => (b.ok ? build(b.data) : { value: null, state: 'unknown', sub: b.error });
+
+  function renderAccounts(a, reload) {
+    const kpis = [
+      Object.assign({ label: '啟用中的帳號' }, blockKpi(a.summary, (d) => ({ value: d.enabled, state: 'good', sub: '共 ' + d.all + ' 個帳號，停用 ' + d.disabled + ' 個' }))),
+      Object.assign({ label: '管理者（admin）' }, blockKpi(a.least_privilege, (d) => ({ value: d.admins, state: '',
+        sub: '佔啟用帳號 ' + d.total + ' 個中的 ' + d.admins + ' 個' + (d.admin_names.length ? '：' + d.admin_names.slice(0, 5).join('、') + (d.admin_names.length > 5 ? '…' : '') : '') }))),
+      Object.assign({ label: '雙因子驗證' }, blockKpi(a.two_factor, (d) => (d.total === 0
+        ? { value: null, na: '不適用', state: 'unknown', sub: '沒有本機帳號；' + d.external + ' 個帳號走外部驗證，雙因子由那邊管' }
+        : { value: d.enabled + '／' + d.total,
+            state: d.admins_without.length ? 'bad' : (d.enabled < d.total ? 'warn' : 'good'),
+            sub: (d.admins_without.length ? '沒有雙因子的管理者：' + d.admins_without.join('、') : (d.enabled < d.total ? '還有 ' + (d.total - d.enabled) + ' 個本機帳號沒有雙因子' : '本機帳號都已啟用雙因子'))
+              + (d.external > 0 ? '（另有 ' + d.external + ' 個外部驗證的帳號不算）' : '') }))),
+      Object.assign({ label: '久未登入的帳號' }, blockKpi(a.dormant, (d) => ({ value: d.count, state: d.count > 0 ? 'warn' : 'good',
+        sub: '近 ' + d.window_days + ' 天沒有網頁登入紀錄的啟用帳號（登入紀錄最早從 ' + d.oldest.slice(0, 10) + ' 開始）' }))),
+      Object.assign({ label: '帳號盤點' }, a.review.ok
+        ? (a.review.data.recorded
+          ? { value: a.review.data.days_since === 0 ? '今天' : a.review.data.days_since + ' 天前', state: a.review.data.state === 'overdue' ? 'warn' : 'good',
+              sub: a.review.data.owner + '　週期 ' + a.review.data.period_days + ' 天' + (a.review.data.state === 'overdue' ? '，已逾期' : '') }
+          : { value: null, na: a.review.data.invalid ? '紀錄壞掉' : '尚未記錄', state: 'unknown', sub: a.review.data.invalid ? '資料庫裡的盤點紀錄不合法，請重新儲存' : '到下方「帳號盤點紀錄」記錄最近一次盤點' })
+        : { value: null, state: 'unknown', sub: a.review.error }),
+    ];
+    return [
+      h('section', { class: 'grid kpis5', style: 'margin-top:0' }, kpis.map(kpiCard)),
+      h('section', { class: 'grid even' },
+        section('角色分布', '啟用中的帳號', blockOr(a.roles, renderRoles)),
+        section('治理檢查', '雙因子、最小權限、帳號盤點', renderGovernance(a, reload))),
+      h('section', { class: 'grid' }, section('久未登入的帳號', 'LibreNMS 登入紀錄', blockOr(a.dormant, renderDormant))),
+    ];
+  }
+
+  const blockOr = (b, fn) => (b.ok ? fn(b.data) : unavailable(b.error));
+
+  function donut(items) {
+    const total = items.reduce((s, i) => s + i.count, 0);
+    let off = 0;
+    const segs = items.map((i) => {
+      const len = 100 * i.count / total;
+      const c = sv('circle', { cx: 21, cy: 21, r: 15.9155, fill: 'none', stroke: ROLE_COLOR[i.key] || '#778ba6', 'stroke-width': 6,
+        'stroke-dasharray': len.toFixed(2) + ' ' + (100 - len).toFixed(2), 'stroke-dashoffset': (25 - off).toFixed(2) }, sv('title', null, i.label + '：' + i.count));
+      off += len;
+      return c;
+    });
+    return sv('svg', { viewBox: '0 0 42 42', class: 'donut', role: 'img', 'aria-label': '角色分布，共 ' + total + ' 個啟用中的帳號' },
+      sv('circle', { cx: 21, cy: 21, r: 15.9155, fill: 'none', stroke: '#203551', 'stroke-width': 6 }), segs,
+      sv('text', { x: 21, y: 21.5, class: 'n' }, String(total)), sv('text', { x: 21, y: 28, class: 'c' }, '個帳號'));
+  }
+
+  function renderRoles(items) {
+    if (!items.length) return h('p', { class: 'note' }, '沒有啟用中的帳號。');
+    return h('div', { class: 'donut-wrap' }, donut(items),
+      h('div', null, items.map((i) => h('div', { class: 'row' }, h('span', null, h('i', { class: 'dot', style: 'background:' + (ROLE_COLOR[i.key] || '#778ba6') }), i.label), h('b', null, String(i.count)))),
+        h('p', { class: 'note' }, '一個帳號有多個角色時每個角色各算一次。')));
+  }
+
+  function renderDormant(d) {
+    const note = h('p', { class: 'note' }, 'LibreNMS 的登入紀錄只保留一段時間（現在最早從 ' + d.oldest + ' 開始，約 ' + d.covered_days + ' 天），所以這裡只能判斷近 ' + d.window_days + ' 天；不代表更久以前有沒有登入過。'
+      + '另外這份名單看的是 LibreNMS 網頁的登入紀錄：只用 API 權杖的帳號（例如整合用的服務帳號）不會留下登入紀錄，會一直出現在這裡，不代表沒在使用。');
+    if (!d.items.length) return [h('p', { class: 'note', style: 'margin-top:0' }, '啟用中的帳號近 ' + d.window_days + ' 天都有登入紀錄。'), note];
+    return [table(['帳號', '最近一次登入'], d.items.map((i) => [i.username, i.last_login === '—' ? '近 ' + d.window_days + ' 天內沒有' : i.last_login])),
+      d.capped ? h('p', { class: 'note warn' }, '只列前 ' + d.items.length + ' 個，共 ' + d.count + ' 個。') : null, note];
+  }
+
+  function renderGovernance(a, reload) {
+    const rows = [];
+    const row = (title, badgeEl, text) => h('div', { class: 'row' }, h('div', null, h('div', { class: 't' }, title), h('div', { class: 'd' }, text)), badgeEl);
+    if (!a.two_factor.ok) {
+      rows.push(row('雙因子驗證', badge('無法取得', 'gray'), a.two_factor.error));
+    } else {
+      const t = a.two_factor.data;
+      const external = t.external > 0 ? '；另有 ' + t.external + ' 個帳號走外部驗證（LDAP、SSO 等），雙因子由那邊管，不算在這裡' : '';
+      rows.push(t.total === 0
+        ? row('雙因子驗證', badge('不適用', 'gray'), '沒有本機帳號' + external)
+        : row('雙因子驗證', t.admins_without.length ? badge('管理者未啟用', 'red') : (t.enabled < t.total ? badge('部分啟用', 'yellow') : badge('已全面啟用', 'green')),
+          t.enabled + '／' + t.total + ' 個啟用中的本機帳號有雙因子（只判斷有沒有啟用，不讀密鑰）' + external));
+    }
+    rows.push(a.least_privilege.ok
+      ? row('最小權限', badge('僅供參考', 'gray'), '管理者 ' + a.least_privilege.data.admins + ' 位（啟用帳號共 ' + a.least_privilege.data.total + ' 個）。幾位算太多由單位判斷，這裡只列事實')
+      : row('最小權限', badge('無法取得', 'gray'), a.least_privilege.error));
+    if (a.review.ok) {
+      const r = a.review.data;
+      rows.push(row('帳號盤點', r.recorded ? badge(r.state === 'overdue' ? '已逾期' : '週期內', r.state === 'overdue' ? 'yellow' : 'green') : badge(r.invalid ? '紀錄壞掉' : '尚未記錄', 'gray'),
+        r.recorded ? '最近一次 ' + r.last_date + '（' + r.days_since + ' 天前），負責人 ' + r.owner + '，週期 ' + r.period_days + ' 天；' + r.updated_by + ' 於 ' + r.updated_at + ' 記錄'
+          : (r.invalid ? '資料庫裡的盤點紀錄不合法（可能被手動改過），請重新儲存' : '還沒有人記錄過，下面填完按儲存')));
+      return [rows, renderReviewForm(r, reload)];
+    }
+    rows.push(row('帳號盤點', badge('無法取得', 'gray'), a.review.error));
+    return rows;
+  }
+
+  function renderReviewForm(r, reload) {
+    const date = h('input', { type: 'date', id: 'rv-date', value: r.last_date || '' });
+    const owner = h('input', { type: 'text', id: 'rv-owner', maxlength: 64, value: r.owner || '' });
+    const period = h('input', { type: 'number', id: 'rv-period', min: 7, max: 365, step: 1, value: r.period_days, style: 'width:6em' });
+    const msg = h('div', { class: 'note warn', role: 'alert' });
+    const save = h('button', { class: 'btn primary', type: 'submit' }, '儲存盤點紀錄');
+    if (identity.refocus) {
+      identity.refocus = false;
+      setTimeout(() => save.focus(), 0);   // 此時表單還沒掛上畫面，等掛上去再取焦點
+    }
+    return h('form', { style: 'margin-top:12px;padding-top:10px;border-top:1px solid var(--line)', onsubmit: async (ev) => {
+      ev.preventDefault();
+      save.disabled = true; msg.textContent = '';
+      try {
+        await api('/ioc-identity.php', { action: 'review_save', last_date: date.value, owner: owner.value, period_days: period.value });
+        toast('已儲存帳號盤點紀錄');
+        identity.refocus = true;   // 儲存後整塊會重畫，原本按著的按鈕會消失；重畫完把焦點放回表單
+        reload();
+      } catch (e) {
+        msg.textContent = (e.errors && e.errors.length ? e.errors.join('；') : e.message);
+        save.disabled = false;
+      }
+    } },
+      h('h3', { style: 'margin:0 0 4px;font-size:13px' }, '帳號盤點紀錄'),
+      h('p', { class: 'note', style: 'margin-top:0' }, '盤點是人做的事，系統看不到；做完在這裡記一筆，畫面才算得出距今幾天、有沒有逾期。每次儲存都會留異動紀錄。'),
+      h('label', { for: 'rv-date' }, '最近一次盤點日期'), date,
+      h('label', { for: 'rv-owner' }, '負責人'), owner,
+      h('label', { for: 'rv-period' }, '盤點週期（天，7～365）'), period,
+      h('div', { class: 'toolbar', style: 'margin-top:10px' }, save), msg);
+  }
+
+  function renderTrail(d) {
+    const bad = Object.values(d.sources).filter((s) => !s.ok);
+    return [
+      bad.length ? h('div', { class: 'alert', style: 'margin-bottom:8px' }, '無法取得：' + bad.map((s) => s.label + '（' + s.error + '）').join('；') + '。下表不含這些來源的事件，不代表那段時間沒有人做過事。') : null,
+      d.items.length
+        ? table(['時間', '操作者', '來源位址', '類別', '動作', '結果', '說明'], d.items.map((e) => [e.time, e.actor || '—', e.ip || '—', e.category_label, e.action, badge(e.result_label, RESULT_BADGE[e.result]), e.detail || '']))
+        : h('p', { class: 'note' }, '這個條件下沒有事件' + (bad.length ? '（有來源讀不到，見上方）' : '') + '。'),
+      d.truncated ? h('p', { class: 'note warn' }, '只列最新 ' + d.items.length + ' 筆，符合條件的共 ' + fmt(d.total) + ' 筆。') : null,
+      h('p', { class: 'note' }, '各來源的涵蓋：' + Object.values(d.sources).map((s) => s.label + (s.ok ? '（' + s.count + ' 筆' + (s.oldest ? '，最早 ' + s.oldest.slice(0, 16) : '') + '）' : '（無法取得）')).join('；')
+        + '。登入紀錄與管理操作紀錄只保留最近的部分；事件案處理與設定異動沒有來源位址。管理操作紀錄是各個管理端點自己寫入的，寫不進去時不會報錯，所以「沒有紀錄」不能證明沒有人用過管理主控台。'),
+    ].filter(Boolean);
+  }
+
+  function renderHostLogins(d) {
+    if (!d.ok) return unavailable(d.error);
+    const x = d.data;
+    if (!x.connected) return h('p', { class: 'note warn', style: 'margin:0' }, '最近 24 小時沒有收到 ' + x.missing.join('、') + ' 的日誌（還沒接入，或已經中斷了），沒有資料可顯示，不代表沒有人登入。收到日誌後這裡會自動出現。');
+    const labels = { login_success: '登入成功', login_failed: '登入失敗', invalid_user: '無效帳號' };
+    return [
+      h('div', { class: 'counts', style: 'grid-template-columns:repeat(3,minmax(0,1fr))' }, Object.keys(labels).map((k) => h('div', { class: 'cnt' }, h('b', null, fmt(x.counts[k] || 0)), labels[k]))),
+      x.missing.length ? h('p', { class: 'note warn' }, '最近 24 小時沒有收到 ' + x.missing.join('、') + ' 的日誌（還沒接入或已中斷），下表不含這類主機的登入。') : null,
+      x.items.length
+        ? table(['時間', '帳號', '來源位址', '主機', '連線方式', '動作', '結果'], x.items.map((e) => [e.time, e.user || '—', e.ip || '—', e.host || '—', e.channel, e.action, badge(e.result === 'ok' ? '成功' : '失敗', RESULT_BADGE[e.result])]))
+        : h('p', { class: 'note' }, '最近 24 小時沒有符合的登入事件。'),
+      x.capped ? h('p', { class: 'note warn' }, '只列最新 50 筆，上方的筆數是完整的。') : null,
+    ].filter(Boolean);
   }
 
   // ── 啟動 ──

@@ -207,7 +207,7 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
         nav = re.search(r"const NAV = \[(.*?)\n  \];", src, re.S).group(1)
         for key in ("risk", "config", "audit", "reports"):
             self.assertRegex(nav, r"key: '%s'[^}]*off: true" % key, key)
-        for key in ("overview", "cases", "security", "settings"):
+        for key in ("overview", "cases", "security", "settings", "identity"):
             self.assertNotRegex(nav, r"key: '%s'[^}]*off: true" % key, key)
             self.assertIn('id="view-%s"' % key, src, key)
 
@@ -252,8 +252,49 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
 
     def test_evidence_queries_always_exclude_or_select_demo_data(self):
         """入口與報表必須排除範例資料（IS-054～056）；證據查詢也一樣。"""
-        src = (ROOT / "librenms" / "ioc" / "EvidenceService.php").read_text(encoding="utf-8")
-        self.assertRegex(src, r"ioc_demo:true' : 'NOT ioc_demo:true'")
+        overview = (ROOT / "librenms" / "ioc" / "OverviewService.php").read_text(encoding="utf-8")
+        self.assertRegex(overview, r"ioc_demo:true' : 'NOT ioc_demo:true'", "包裝只在 OverviewService::demoFilter 一處")
+        for name in ("OverviewService", "EvidenceService", "HostLoginService"):
+            src = (ROOT / "librenms" / "ioc" / (name + ".php")).read_text(encoding="utf-8")
+            self.assertIn("OverviewService::demoFilter(" if name != "OverviewService" else "self::demoFilter(", src,
+                          name + " 的 Graylog 查詢要走 demoFilter，不能自己拼")
+            if name != "OverviewService":
+                self.assertNotIn("ioc_demo:true", src, name + " 不能另外寫一份範例資料的條件")
+
+    def test_identity_api_checks_admin_before_it_reads_anything(self):
+        """稽核軌跡列出所有人的登入位址與失敗嘗試：沒有 admin 權限就不能去讀任何資料（檢視者也不行）。"""
+        src = (ROOT / "librenms" / "html" / "ioc-identity.php").read_text(encoding="utf-8")
+        self.assertIn("ioc_begin(true)", src, "身分與稽核 API 只接受 POST")
+        gate = src.index("Access::canHandle($level)")
+        self.assertLess(src.index("ioc_begin("), gate)
+        for reader in ("ioc_identity_accounts(", "ioc_audit_trail(", "ioc_host_logins(", "saveAccountReview("):
+            self.assertLess(gate, src.index(reader), reader + " 要在權限檢查之後")
+        portal = (ROOT / "librenms" / "html" / "ioc-portal.php").read_text(encoding="utf-8")
+        self.assertRegex(portal, r"CAN_HANDLE \? \[\{ key: 'identity'", "導覽的「身分與稽核」只有 admin 才建立")
+
+    def test_identity_helpers_check_admin_before_they_read_any_source(self):
+        """身分與稽核的三支讀取函式自己也要先擋非管理者，不能只靠端點檔那一道（兩層各自守）。"""
+        src = (ROOT / "librenms" / "ioc" / "endpoint.php").read_text(encoding="utf-8")
+        for fn in ("ioc_identity_accounts", "ioc_host_logins", "ioc_audit_trail"):
+            body = re.search(r"function %s\(.*?\n\}\n" % fn, src, re.S).group(0)
+            self.assertIn("Access::requireHandler(", body, fn)
+            self.assertLess(body.index("Access::requireHandler("), min(i for i in (body.find("ioc_identity_sources("), body.find("fromConf("), body.find("ioc_audit_sources(")) if i >= 0), fn + " 要先檢查權限再讀資料")
+
+    def test_two_factor_secret_is_never_read(self):
+        """LibreNMS 把雙因子的密鑰放在 users_prefs.value：只能問「哪些 user_id 有這一筆」，不能選 value。"""
+        found = 0
+        for f in sorted((ROOT / "librenms").rglob("*.php")):
+            for m in re.finditer(r"DB::table\('users_prefs'\)[^;]*;", f.read_text(encoding="utf-8")):
+                found += 1
+                self.assertIn("pluck('user_id')", m.group(0), "%s：只能 pluck('user_id')" % f.name)
+                self.assertNotRegex(m.group(0), r"value", "%s：不能碰 users_prefs.value（密鑰）" % f.name)
+        self.assertGreaterEqual(found, 1, "找不到雙因子的查詢，這個檢查失效了")
+
+    def test_admin_log_is_read_from_the_tail_only(self):
+        """oracle-admin.log 沒有輪替，會一直長大：不能整份讀進記憶體。"""
+        src = (ROOT / "librenms" / "ioc" / "endpoint.php").read_text(encoding="utf-8")
+        self.assertIn("IOC_ADMIN_LOG_TAIL", src)
+        self.assertNotRegex(src, r"file_get_contents\(IOC_ADMIN_LOG|file\(IOC_ADMIN_LOG")
 
     def test_settings_api_is_post_only_and_a_save_clears_the_overview_cache(self):
         """風險等級是算好存在總覽快取裡的：存了新門檻卻不清快取，畫面最多 20 秒還是舊等級。"""

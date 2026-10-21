@@ -17,10 +17,24 @@ final class SettingsService
 {
     public const RISK_LOW      = 'risk.low_from';
     public const RISK_MEDIUM   = 'risk.medium_from';
-    public const KEY_LABEL     = [self::RISK_LOW => '低風險門檻', self::RISK_MEDIUM => '中等風險門檻'];
+    public const REVIEW_DATE   = 'review.last_date';
+    public const REVIEW_OWNER  = 'review.owner';
+    public const REVIEW_PERIOD = 'review.period_days';
+    public const REVIEW_PERIOD_DEFAULT = 90;
+    public const KEY_LABEL     = [
+        self::RISK_LOW      => '低風險門檻',
+        self::RISK_MEDIUM   => '中等風險門檻',
+        self::REVIEW_DATE   => '最近一次帳號盤點日期',
+        self::REVIEW_OWNER  => '帳號盤點負責人',
+        self::REVIEW_PERIOD => '帳號盤點週期（天）',
+    ];
     public const HISTORY_LIMIT = 10;
-    /** 沒設定過時各個設定名稱的預設值（來源是 RiskScore::DEFAULT_THRESHOLDS，這裡只是依設定名稱重排）。 */
-    private const DEFAULTS = [self::RISK_LOW => RiskScore::DEFAULT_THRESHOLDS['low'], self::RISK_MEDIUM => RiskScore::DEFAULT_THRESHOLDS['medium']];
+    /** 沒設定過時各個設定名稱的預設值（風險門檻的來源是 RiskScore::DEFAULT_THRESHOLDS，這裡只是依設定名稱重排）。 */
+    private const DEFAULTS = [
+        self::RISK_LOW      => RiskScore::DEFAULT_THRESHOLDS['low'],
+        self::RISK_MEDIUM   => RiskScore::DEFAULT_THRESHOLDS['medium'],
+        self::REVIEW_PERIOD => self::REVIEW_PERIOD_DEFAULT,
+    ];
 
     private SettingsRepo $repo;
     /** @var callable():string */
@@ -59,7 +73,8 @@ final class SettingsService
         $this->requireView($level);
         $s = $this->readRisk($this->repo->all());
         $history = [];
-        foreach ($this->repo->recentHistory(self::HISTORY_LIMIT) as $h) {
+        // 只列風險門檻自己的異動：這一頁檢視者也看得到，帳號盤點那幾筆是 admin 才看得到的（身分與稽核頁）
+        foreach ($this->repo->recentHistory(self::HISTORY_LIMIT, [self::RISK_LOW, self::RISK_MEDIUM]) as $h) {
             $history[] = [
                 'time'  => Time::toTaipei($h['ts']),
                 'actor' => (string) $h['actor'],
@@ -99,16 +114,62 @@ final class SettingsService
             if (!$cur['invalid'] && $cur['low'] === $new['low'] && $cur['medium'] === $new['medium']) {
                 return;
             }
-            foreach ([self::RISK_LOW => $new['low'], self::RISK_MEDIUM => $new['medium']] as $key => $value) {
-                $value = (string) $value;
-                $old   = $rows[$key]['value'] ?? (string) self::DEFAULTS[$key];   // 沒設定過的，舊值就是預設值
-                $this->repo->put($key, $value, $actor, $now);                // 兩個值一起寫，「最後修改」才會一致
-                if ($old !== $value) {
-                    $this->repo->addHistory($now, $actor, $key, $old, $value);
-                }
-            }
+            $this->persist([self::RISK_LOW => (string) $new['low'], self::RISK_MEDIUM => (string) $new['medium']], $rows, $actor, $now);
         });
         return $this->riskSettings($level);
+    }
+
+    /**
+     * 帳號盤點紀錄（僅 admin，讀和寫都是）：最近一次盤點日期、負責人、盤點週期。身分與稽核頁用，那一頁只有 admin 看得到。
+     * 沒記錄過是 recorded=false；資料表裡只剩一部分或內容不合法一律當成壞掉（invalid=true），讓管理者重新儲存即修復。
+     *
+     * @return array{last_date:?string,owner:?string,period_days:int,recorded:bool,invalid:bool,updated_by:?string,updated_at:?string}
+     */
+    public function accountReview(?string $level): array
+    {
+        Access::requireHandler($level, '只有管理者可以看身分與稽核');
+        return $this->readReview($this->repo->all());
+    }
+
+    /**
+     * 儲存帳號盤點紀錄。三個值一起寫；沒有變動就不寫（也不留異動紀錄）。
+     *
+     * @param array<string,mixed> $in last_date（YYYY-MM-DD，不能是未來）、owner、period_days（7～365）
+     * @return array{last_date:?string,owner:?string,period_days:int,recorded:bool,invalid:bool,updated_by:?string,updated_at:?string}
+     */
+    public function saveAccountReview(array $in, string $actor, ?string $level): array
+    {
+        Access::requireHandler($level, '只有管理者可以修改帳號盤點紀錄');
+        $now = ($this->now)();
+        $new = $this->validateReview($in, $now);
+
+        $this->repo->transaction(function () use ($new, $actor, $now): void {
+            $rows = $this->repo->all();
+            $cur  = $this->readReview($rows);
+            if ($cur['recorded'] && !$cur['invalid'] && $cur['last_date'] === $new[self::REVIEW_DATE] && $cur['owner'] === $new[self::REVIEW_OWNER] && (string) $cur['period_days'] === $new[self::REVIEW_PERIOD]) {
+                return;
+            }
+            $this->persist($new, $rows, $actor, $now);
+        });
+        return $this->accountReview($level);
+    }
+
+    /**
+     * 把一組設定值寫進去：每個值都寫（「最後修改」才會一致），實際有變動的才留異動紀錄。
+     * 舊值是資料表裡現有的值；沒設定過的用預設值（沒有預設值的是空字串）。在交易內呼叫。
+     *
+     * @param array<string,string> $values 設定名稱 → 新值
+     * @param array<string,array{value:string,updated_by:string,updated_at:string}> $rows 目前資料表裡的設定
+     */
+    private function persist(array $values, array $rows, string $actor, string $now): void
+    {
+        foreach ($values as $key => $value) {
+            $old = $rows[$key]['value'] ?? (string) (self::DEFAULTS[$key] ?? '');
+            $this->repo->put($key, $value, $actor, $now);
+            if ($old !== $value) {
+                $this->repo->addHistory($now, $actor, $key, $old, $value);
+            }
+        }
     }
 
     // ── 內部 ────────────────────────────────────────────────────────────
@@ -173,6 +234,70 @@ final class SettingsService
         // 兩個值是一起寫的，時間與操作者相同；萬一不同（手動改過）以較晚的為準
         $last = strcmp($lo['updated_at'], $me['updated_at']) >= 0 ? $lo : $me;
         return ['low' => $low, 'medium' => $medium, 'custom' => true, 'invalid' => false, 'updated_by' => $last['updated_by'], 'updated_at' => $last['updated_at']];
+    }
+
+    /**
+     * @param array<string,mixed> $in
+     * @return array<string,string> 設定名稱 → 整理過的值
+     */
+    private function validateReview(array $in, string $nowUtc): array
+    {
+        $errors = [];
+        $date   = is_scalar($in['last_date'] ?? null) ? trim((string) $in['last_date']) : '';
+        if (!$this->isRealDate($date)) {
+            $errors[] = '盤點日期要填成 YYYY-MM-DD 的真實日期';
+        } elseif ($date > $this->todayTaipei($nowUtc)) {
+            $errors[] = '盤點日期不能是未來的日期';
+        }
+        $owner = is_scalar($in['owner'] ?? null) ? trim((string) $in['owner']) : '';
+        if ($owner === '' || mb_strlen($owner) > 64 || preg_match('/[\x00-\x1F\x7F]/', $owner)) {
+            $errors[] = '盤點負責人要填，且不能超過 64 個字';
+        }
+        $period = $this->wholeNumber($in['period_days'] ?? null);
+        if ($period === null || $period < 7 || $period > 365) {
+            $errors[] = '盤點週期要填 7～365 的整數（天）';
+        }
+        if ($errors !== []) {
+            throw new ValidationError($errors);
+        }
+        return [self::REVIEW_DATE => $date, self::REVIEW_OWNER => $owner, self::REVIEW_PERIOD => (string) $period];
+    }
+
+    /**
+     * @param array<string,array{value:string,updated_by:string,updated_at:string}> $rows
+     * @return array{last_date:?string,owner:?string,period_days:int,recorded:bool,invalid:bool,updated_by:?string,updated_at:?string}
+     */
+    private function readReview(array $rows): array
+    {
+        $none = ['last_date' => null, 'owner' => null, 'period_days' => self::REVIEW_PERIOD_DEFAULT, 'recorded' => false, 'invalid' => false, 'updated_by' => null, 'updated_at' => null];
+        $d = $rows[self::REVIEW_DATE] ?? null;
+        $o = $rows[self::REVIEW_OWNER] ?? null;
+        $p = $rows[self::REVIEW_PERIOD] ?? null;
+        if ($d === null && $o === null && $p === null) {
+            return $none;
+        }
+        $period = $p === null ? null : $this->wholeNumber($p['value']);
+        if ($d === null || $o === null || $p === null || !$this->isRealDate($d['value']) || $o['value'] === '' || $period === null || $period < 7 || $period > 365) {
+            return ['invalid' => true] + $none;       // 只剩一部分、或被手動改成不合法的值：壞掉，不悄悄補預設
+        }
+        $last = $d;
+        foreach ([$o, $p] as $row) {
+            if (strcmp($row['updated_at'], $last['updated_at']) > 0) {
+                $last = $row;                         // 三個值是一起寫的；萬一不同以最晚的為準
+            }
+        }
+        return ['last_date' => $d['value'], 'owner' => $o['value'], 'period_days' => $period, 'recorded' => true, 'invalid' => false,
+                'updated_by' => $last['updated_by'], 'updated_at' => Time::toTaipei($last['updated_at'])];
+    }
+
+    private function isRealDate(string $s): bool
+    {
+        return preg_match('/^(\d{4})-(\d{2})-(\d{2})$/', $s, $m) === 1 && checkdate((int) $m[2], (int) $m[3], (int) $m[1]);
+    }
+
+    private function todayTaipei(string $nowUtc): string
+    {
+        return Time::toTaipei($nowUtc, 'Y-m-d');
     }
 
     private function requireView(?string $level): void

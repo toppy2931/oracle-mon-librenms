@@ -33,9 +33,13 @@ class MemorySettingsRepo implements SettingsRepo
         $this->history[] = ['ts' => $utc, 'actor' => $actor, 'skey' => $key, 'old_value' => $old, 'new_value' => $new];
     }
 
-    public function recentHistory(int $limit): array
+    public function recentHistory(int $limit, ?array $keys = null): array
     {
-        return array_slice(array_reverse($this->history), 0, max(1, $limit));
+        $rows = array_reverse($this->history);
+        if ($keys !== null) {
+            $rows = array_values(array_filter($rows, static fn ($h) => in_array($h['skey'], $keys, true)));
+        }
+        return array_slice($rows, 0, max(1, $limit));
     }
 
     public function transaction(callable $fn)

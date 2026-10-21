@@ -307,7 +307,16 @@ final class OverviewService
     /** 加上範例資料的條件：一般模式排除，demo 模式只看範例。 */
     private function q(string $query): string
     {
-        return '(' . $query . ') AND ' . ($this->demo ? 'ioc_demo:true' : 'NOT ioc_demo:true');
+        return self::demoFilter($query, $this->demo);
+    }
+
+    /**
+     * 範例資料（ioc_demo=true）與正式資料互相排除的 Graylog 查詢包裝（IS-054～056）：正式模式排除範例，demo 模式只看範例。
+     * 總覽、事件詳情的證據、主機遠端登入都用這一個，規則改了只要改這裡。
+     */
+    public static function demoFilter(string $query, bool $demo): string
+    {
+        return '(' . $query . ') AND ' . ($demo ? 'ioc_demo:true' : 'NOT ioc_demo:true');
     }
 
     /**

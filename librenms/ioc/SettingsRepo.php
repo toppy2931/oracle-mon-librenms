@@ -19,8 +19,11 @@ interface SettingsRepo
     /** 異動紀錄（只增不改不刪）。$old 是異動前生效的值（沒設定過就是預設值）。 */
     public function addHistory(string $utc, string $actor, string $key, string $old, string $new): void;
 
-    /** @return array<int,array{ts:string,actor:string,skey:string,old_value:string,new_value:string}> 由新到舊 */
-    public function recentHistory(int $limit): array;
+    /**
+     * @param string[]|null $keys 只要這些設定名稱的異動；null＝全部
+     * @return array<int,array{ts:string,actor:string,skey:string,old_value:string,new_value:string}> 由新到舊
+     */
+    public function recentHistory(int $limit, ?array $keys = null): array;
 
     /**
      * 在交易內執行；$fn 丟出例外就回復。回傳 $fn 的結果。

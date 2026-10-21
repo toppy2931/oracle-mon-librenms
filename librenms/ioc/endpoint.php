@@ -11,12 +11,15 @@ require_once __DIR__ . '/bootstrap.php';
 
 use Illuminate\Support\Facades\DB;
 use Ioc\Access;
+use Ioc\AuditTrail;
 use Ioc\CaseService;
 use Ioc\CaseView;
 use Ioc\EvidenceService;
 use Ioc\Fleet;
 use Ioc\GraylogClient;
 use Ioc\GraylogUnavailable;
+use Ioc\HostLoginService;
+use Ioc\IdentityService;
 use Ioc\LandscapeService;
 use Ioc\OverviewService;
 use Ioc\PdoCaseRepo;
@@ -133,6 +136,156 @@ function ioc_evidence(array $case, bool $demo): array
         $logs = new UnavailableLogSource($e->getMessage());
     }
     return (new EvidenceService($logs, $demo))->build($case);
+}
+
+const IOC_ADMIN_LOG      = '/var/log/oracle-admin.log';
+const IOC_ADMIN_LOG_TAIL = 262144;     // 只讀檔案最後 256 KB：這個檔案沒有輪替，不能整份讀進記憶體
+
+/** 轉成純陣列（資料庫的列是 stdClass；函式庫只吃陣列）。 */
+function ioc_rows($rows): array
+{
+    return array_map(static fn ($r) => (array) $r, is_array($rows) ? $rows : $rows->all());
+}
+
+/**
+ * 身分與稽核的帳號資料。每一塊各自讀、各自 try/catch：讀不到是 null（畫面標「無法取得」），不是空陣列。
+ *
+ * ⚠️ 雙因子只問「哪些 user_id 有 twofactor 這一筆」（只 pluck user_id），**絕不能選 users_prefs.value**：那是密鑰。
+ *
+ * @return array{users:?array,roles:?array,twofactor:?array,last_logins:?array,authlog_oldest:?string}
+ */
+function ioc_identity_sources(): array
+{
+    $out = ['users' => null, 'roles' => null, 'twofactor' => null, 'last_logins' => null, 'authlog_oldest' => null];
+    $try = static function (string $what, callable $fn) {
+        try {
+            return $fn();
+        } catch (\Throwable $e) {
+            error_log('[ioc] identity ' . $what . ': ' . $e->getMessage());
+            return null;
+        }
+    };
+    $out['users'] = $try('users', static function () {
+        $users = [];
+        foreach (DB::table('users')->get(['user_id', 'username', 'enabled', 'auth_type']) as $u) {
+            $users[] = ['id' => (int) $u->user_id, 'username' => (string) $u->username, 'enabled' => (int) $u->enabled === 1, 'local' => (string) $u->auth_type === 'mysql'];
+        }
+        return $users;
+    });
+    $out['roles'] = $try('roles', static function () {
+        $map = [];
+        foreach (DB::table('model_has_roles')->join('roles', 'roles.id', '=', 'model_has_roles.role_id')->get(['model_has_roles.model_id as uid', 'roles.name as role']) as $r) {
+            $map[(int) $r->uid][] = (string) $r->role;
+        }
+        return $map;
+    });
+    $out['twofactor'] = $try('twofactor', static fn () => DB::table('users_prefs')->where('pref', 'twofactor')->pluck('user_id')->map(static fn ($v) => (int) $v)->all());
+    $out['last_logins'] = $try('last_logins', static function () {
+        $map = [];
+        foreach (DB::table('authlog')->where('result', 'Logged In')->groupBy('user')->selectRaw('`user` AS u, MAX(`datetime`) AS last_login')->get() as $r) {
+            $map[(string) $r->u] = (string) $r->last_login;
+        }
+        return $map;
+    });
+    $oldest = $try('authlog_oldest', static fn () => [DB::table('authlog')->min('datetime')]);
+    $out['authlog_oldest'] = $oldest === null || $oldest[0] === null ? null : (string) $oldest[0];
+    return $out;
+}
+
+/**
+ * oracle-admin.log 最後一段的行。檔案不存在＝還沒有人用過管理主控台（真的沒有紀錄，回空陣列）；
+ * 存在卻讀不了（權限）是 null，畫面要標「無法取得」，不能當成沒有紀錄。
+ *
+ * @return string[]|null
+ */
+function ioc_admin_log_lines(): ?array
+{
+    if (!file_exists(IOC_ADMIN_LOG)) {
+        return [];
+    }
+    $fh = is_readable(IOC_ADMIN_LOG) ? @fopen(IOC_ADMIN_LOG, 'rb') : false;
+    if ($fh === false) {
+        return null;
+    }
+    $size = (int) filesize(IOC_ADMIN_LOG);
+    $from = max(0, $size - IOC_ADMIN_LOG_TAIL);
+    if ($from > 0) {
+        fseek($fh, $from);
+    }
+    $data = (string) stream_get_contents($fh);
+    fclose($fh);
+    $lines = preg_split('/\R/', $data) ?: [];
+    if ($from > 0) {
+        array_shift($lines);                    // 第一行多半被攔腰截斷
+    }
+    return array_slice(array_values(array_filter($lines, static fn ($l) => $l !== '')), -400);
+}
+
+/**
+ * 稽核軌跡的原始資料：每個來源各自讀，讀不到是 null。
+ *
+ * @return array{login:?array,admin_op:?array,case:?array,settings:?array}
+ */
+function ioc_audit_sources(): array
+{
+    $read = static function (string $what, callable $fn) {
+        try {
+            return $fn();
+        } catch (\Throwable $e) {
+            error_log('[ioc] audit ' . $what . ': ' . $e->getMessage());
+            return null;
+        }
+    };
+    return [
+        'login'    => $read('authlog', static fn () => ioc_rows(DB::table('authlog')->orderByDesc('id')->limit(300)->get(['datetime', 'user', 'address', 'result']))),
+        'admin_op' => $read('admin log', static fn () => ioc_admin_log_lines()),
+        'case'     => $read('case history', static fn () => ioc_rows(DB::table('ioc_case_history')->orderByDesc('id')->limit(200)->get(['case_id', 'ts', 'actor', 'action', 'from_status', 'to_status', 'resolution']))),
+        'settings' => $read('settings history', static fn () => ioc_rows(DB::table('ioc_settings_history')->orderByDesc('id')->limit(100)->get(['ts', 'actor', 'skey', 'old_value', 'new_value']))),
+    ];
+}
+
+/** @return array<string,array<string,mixed>> IdentityService::build 的各區塊 */
+function ioc_identity_accounts(string $level): array
+{
+    Access::requireHandler($level, '只有管理者可以看身分與稽核');      // 先檢查再讀資料；IdentityService 還會再檢查一次
+    $s = ioc_identity_sources();
+    try {
+        $review = ioc_settings()->accountReview($level);
+    } catch (\Ioc\AccessDenied $e) {
+        throw $e;
+    } catch (\Throwable $e) {
+        error_log('[ioc] account review: ' . $e->getMessage());
+        $review = null;                        // 資料表還沒建立：盤點區塊標「無法取得」，其他照常
+    }
+    return (new IdentityService())->build($s['users'], $s['roles'], $s['twofactor'], $s['last_logins'], $s['authlog_oldest'], $review, $level);
+}
+
+/**
+ * 主機的遠端登入（SSH／RDP）：Graylog 還沒設定好時，HostLoginService 一樣回 ok=false 與原因。
+ *
+ * @return array<string,mixed>
+ */
+function ioc_host_logins(bool $demo, string $level): array
+{
+    Access::requireHandler($level, '只有管理者可以看身分與稽核');      // 先檢查再讀 Graylog 憑證檔；HostLoginService 還會再檢查一次
+    try {
+        $logs = GraylogClient::fromConf(IOC_READER_CONF);
+    } catch (GraylogUnavailable $e) {
+        $logs = new UnavailableLogSource($e->getMessage());
+    }
+    return (new HostLoginService($logs, $demo))->build($level);
+}
+
+/**
+ * 稽核軌跡（只有 admin；AuditTrail 會再檢查一次權限）。篩選條件只收白名單欄位，值不正確由 AuditTrail 回 400。
+ *
+ * @param mixed $in 請求內容
+ * @return array<string,mixed>
+ */
+function ioc_audit_trail($in, string $level): array
+{
+    Access::requireHandler($level, '只有管理者可以看身分與稽核');      // 先檢查再讀資料（資料庫與記錄檔）
+    return (new AuditTrail())->build(ioc_audit_sources(), ioc_pick($in, ['category', 'result', 'limit']), $level);
 }
 
 /**

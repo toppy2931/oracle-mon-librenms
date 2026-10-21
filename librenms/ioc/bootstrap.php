@@ -16,6 +16,7 @@ if (!defined('IOC_LIB_LOADED')) {
         'LogSource', 'WindowedLogSource', 'GraylogClient', 'UnavailableLogSource', 'OverviewService', 'CaseCatalog', 'CaseView', 'EvidenceService',
         'Fleet', 'RiskScore', 'LandscapeService',
         'SettingsRepo', 'PdoSettingsRepo', 'SettingsService',
+        'IdentityService', 'AuditTrail', 'HostLoginService',
     ] as $f) {
         require_once __DIR__ . '/' . $f . '.php';
     }

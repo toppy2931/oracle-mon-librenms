@@ -47,7 +47,7 @@ final class EvidenceService
         }
         $from = $created - self::BEFORE;
         $to   = max(min($created + self::AFTER, $this->now), $created);
-        $query = '(' . $q . ') AND ' . ($this->demo ? 'ioc_demo:true' : 'NOT ioc_demo:true');
+        $query = OverviewService::demoFilter($q, $this->demo);
 
         try {
             $rows   = $this->logs->messagesBetween($query, $this->iso($from), $this->iso($to), self::FIELDS, self::LIMIT);
