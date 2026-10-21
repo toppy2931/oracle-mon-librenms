@@ -207,7 +207,7 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
         nav = re.search(r"const NAV = \[(.*?)\n  \];", src, re.S).group(1)
         for key in ("risk", "config", "audit", "reports"):
             self.assertRegex(nav, r"key: '%s'[^}]*off: true" % key, key)
-        for key in ("overview", "cases", "security", "settings", "identity"):
+        for key in ("overview", "cases", "security", "network", "settings", "identity"):
             self.assertNotRegex(nav, r"key: '%s'[^}]*off: true" % key, key)
             self.assertIn('id="view-%s"' % key, src, key)
 
@@ -254,12 +254,51 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
         """入口與報表必須排除範例資料（IS-054～056）；證據查詢也一樣。"""
         overview = (ROOT / "librenms" / "ioc" / "OverviewService.php").read_text(encoding="utf-8")
         self.assertRegex(overview, r"ioc_demo:true' : 'NOT ioc_demo:true'", "包裝只在 OverviewService::demoFilter 一處")
-        for name in ("OverviewService", "EvidenceService", "HostLoginService"):
+        for name in ("OverviewService", "EvidenceService", "HostLoginService", "NetworkVisibilityService"):
             src = (ROOT / "librenms" / "ioc" / (name + ".php")).read_text(encoding="utf-8")
             self.assertIn("OverviewService::demoFilter(" if name != "OverviewService" else "self::demoFilter(", src,
                           name + " 的 Graylog 查詢要走 demoFilter，不能自己拼")
             if name != "OverviewService":
                 self.assertNotIn("ioc_demo:true", src, name + " 不能另外寫一份範例資料的條件")
+
+    def test_network_api_is_post_only_cached_and_takes_demo_only_as_true(self):
+        """內網可視性：要登入與 CSRF（ioc_begin）、demo 旗標只收真正的 true、快取鍵分正式與範例，不是 GET 就能觸發 20 次 Graylog 查詢。"""
+        src = (ROOT / "librenms" / "html" / "ioc-network.php").read_text(encoding="utf-8")
+        self.assertIn("ioc_begin(true)", src, "內網可視性 API 只接受 POST")
+        self.assertIn("=== true", src, "demo 旗標只收真正的 true，不收字串")
+        self.assertIn("IOC_NETWORK_CACHE . ($demo ? 'demo' : 'live')", src, "快取要分正式與範例資料")
+        self.assertLess(src.index("ioc_begin("), src.index("ioc_network("), "要先檢查登入與角色才能查 Graylog")
+        endpoint = (ROOT / "librenms" / "ioc" / "endpoint.php").read_text(encoding="utf-8")
+        self.assertNotRegex(endpoint, r"IpNets::DEFAULTS", "endpoint 不能自己套預設網段；內部網段讀不到要傳 null，由服務標「無法取得」")
+        self.assertRegex(endpoint, r"(?s)internalNets\(\$level\);\s*\} catch \(\\Ioc\\AccessDenied \$e\) \{\s*throw \$e;\s*\} catch \(\\Throwable \$e\) \{.*?\$why = ", "讀不到內部網段要帶原因")
+
+    def test_saving_internal_nets_clears_the_network_cache_and_whitelists_fields(self):
+        """內部網段改了卻不清快取，內網可視性最多 60 秒還是用舊網段算；欄位只收白名單。"""
+        src = (ROOT / "librenms" / "html" / "ioc-settings.php").read_text(encoding="utf-8")
+        block = re.search(r"case 'save_network':(.*?)(?=case '|default:)", src, re.S).group(1)
+        self.assertIn("ioc_network_cache_forget()", block)
+        self.assertIn("ioc_overview_cache_forget()", block, "總覽的「防火牆阻擋來源」也用同一份內部網段，快取裡是舊網段算的")
+        self.assertIn("ioc_pick($in, ['cidrs'])", block)
+        self.assertIn("saveNetwork(", block)
+        endpoint = (ROOT / "librenms" / "ioc" / "endpoint.php").read_text(encoding="utf-8")
+        fn = re.search(r"function ioc_network_cache_forget\(\).*?\n\}\n", endpoint, re.S).group(0)
+        self.assertIn("IOC_NETWORK_CACHE", fn)
+
+    def test_overview_and_network_page_share_one_definition_of_internal(self):
+        """資安頁的「防火牆阻擋來源」與內網可視性都要用設定頁的內部網段；不能各寫一套（曾經一邊寫死 RFC1918、另一邊用設定）。"""
+        overview = (ROOT / "librenms" / "ioc" / "OverviewService.php").read_text(encoding="utf-8")
+        self.assertIn("IpNets::contains($this->nets", overview)
+        self.assertNotIn("FILTER_FLAG_NO_PRIV_RANGE", overview, "不要再用 PHP 內建的私有位址判斷")
+        endpoint = (ROOT / "librenms" / "ioc" / "endpoint.php").read_text(encoding="utf-8")
+        self.assertRegex(endpoint, r"(?s)internalNets\(\$level\);\s*\} catch \(\\Throwable \$e\) \{.*?\$nets = null;.*?new OverviewService\(\$logs, \$demo, null, \$nets\)",
+                         "內部網段讀不到要傳 null，由總覽標「無法取得」，不能套預設網段")
+
+    def test_network_service_never_reads_raw_messages_or_uses_relative_ranges(self):
+        """內網可視性只做彙整查詢（不撈原始訊息，免得把日誌內容帶進畫面），且一律用絕對時間範圍（前期比較要用）。"""
+        src = (ROOT / "librenms" / "ioc" / "NetworkVisibilityService.php").read_text(encoding="utf-8")
+        self.assertNotRegex(src, r"->messages(Between)?\(")
+        self.assertNotRegex(src, r"->aggregate\(")
+        self.assertIn("->aggregateBetween(", src)
 
     def test_identity_api_checks_admin_before_it_reads_anything(self):
         """稽核軌跡列出所有人的登入位址與失敗嘗試：沒有 admin 權限就不能去讀任何資料（檢視者也不行）。"""

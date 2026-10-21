@@ -87,6 +87,7 @@ a{color:var(--blue)}
 .kpis6{grid-template-columns:repeat(6,minmax(0,1fr))}
 .kpis5{grid-template-columns:repeat(5,minmax(0,1fr))}
 .kpis2{grid-template-columns:repeat(2,minmax(0,1fr))}
+.kpis4{grid-template-columns:repeat(4,minmax(0,1fr))}
 .donut-wrap{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
 .donut{width:150px;height:150px;flex:none}
 /* SVG 的文字大小用 viewBox 的座標單位（整張圖是 42 單位寬、顯示成 150px，所以 1 單位≈3.6px），不是螢幕像素 */
@@ -105,7 +106,7 @@ a{color:var(--blue)}
 .kpi .l{font-size:12px;color:var(--muted)}
 .kpi .v{font-size:28px;font-weight:800;margin:6px 0 4px;letter-spacing:-.5px}
 .kpi .s{font-size:12px;color:#9db1ca}
-.good .v{color:var(--green)}.warn .v{color:var(--yellow)}.bad .v{color:var(--red)}.unknown .v{color:var(--gray)}
+.good .v{color:var(--green)}.warn .v{color:var(--yellow)}.bad .v{color:var(--red)}.unknown .v{color:var(--gray)}.info .v{color:var(--blue)}
 .unknown .v{font-size:20px}
 table{width:100%;border-collapse:collapse;font-size:12px}
 th{text-align:left;color:#87a0bd;font-weight:600;padding:8px;border-bottom:1px solid var(--line);white-space:nowrap}
@@ -179,10 +180,10 @@ code{background:#0a1423;border:1px solid var(--line);border-radius:6px;padding:2
 .toast{position:fixed;right:16px;bottom:16px;max-width:420px;padding:10px 14px;border-radius:10px;background:#1b4a86;color:#fff;display:none;z-index:9}
 .toast.err{background:#8a2b2b}
 footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
-@media(max-width:1280px){.kpis6,.kpis5{grid-template-columns:repeat(3,minmax(0,1fr))}.three{grid-template-columns:1fr}}
+@media(max-width:1280px){.kpis6,.kpis5{grid-template-columns:repeat(3,minmax(0,1fr))}.kpis4{grid-template-columns:repeat(2,minmax(0,1fr))}.three{grid-template-columns:1fr}}
 @media(max-width:1180px){.two,.even,.split{grid-template-columns:1fr}}
 @media(max-width:900px){.app{flex-direction:column}.side{position:static;width:auto;height:auto;padding:10px}.nav{flex-direction:row;overflow-x:auto}.nav button{white-space:nowrap;width:auto}.nav .sep{display:none}.main{padding:10px}}
-@media(max-width:720px){.kpis6,.kpis5,.kpis2{grid-template-columns:repeat(2,minmax(0,1fr))}.sumrow{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:720px){.kpis6,.kpis5,.kpis4,.kpis2{grid-template-columns:repeat(2,minmax(0,1fr))}.sumrow{grid-template-columns:repeat(2,minmax(0,1fr))}}
 </style>
 </head>
 <body>
@@ -203,6 +204,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     <main id="view-overview"></main>
     <main id="view-cases" hidden></main>
     <main id="view-security" hidden></main>
+    <main id="view-network" hidden></main>
     <main id="view-settings" hidden></main>
     <main id="view-identity" hidden></main>
     <footer>日誌來自 Graylog（唯讀帳號），設備與站點（LibreNMS 的「位置」）來自 LibreNMS，事件案存在 LibreNMS 資料庫。灰色的「尚未提供」項目還沒有資料來源，不會顯示假數字。</footer>
@@ -224,7 +226,8 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     { key: 'overview', label: '總覽', title: '維運總覽', sub: '站點、資產、事件與資料來源一覽' },
     { key: 'cases', label: '事件案', title: '事件案管理', sub: '建立、確認、處理與結案，每一步都有紀錄', badge: true },
     { key: 'security', label: '資安', title: '資安事件', sub: '登入、帳號與防火牆阻擋' },
-    { key: 'settings', label: '設定', title: '系統設定', sub: '風險等級門檻' },
+    { key: 'network', label: '內網可視性', title: '內網可視性', sub: '東西向流量、Top Talkers 與異常連線（防火牆日誌）' },
+    { key: 'settings', label: '設定', title: '系統設定', sub: '風險等級門檻、內部網段' },
     // 身分與稽核只有 admin 看得到（稽核軌跡會列出所有人的登入位址與失敗嘗試）；後端也會擋，這裡只是不顯示入口
     ...(CAN_HANDLE ? [{ key: 'identity', label: '身分與稽核', title: '身分與稽核', sub: '帳號與角色、稽核軌跡、主機的遠端登入' }] : []),
     { sep: '尚未提供' },
@@ -376,6 +379,8 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     // 設定頁每次進來都重新讀：別的管理者可能剛改過；已經在這一頁時再按導覽不重載，免得填到一半的值被清掉
     if (tab === 'settings' && changed) { loadSettings(); }
     if (tab === 'identity' && (changed || !$('#view-identity').firstChild)) { loadIdentity(); }
+    // 內網可視性每次切進來都重新讀（伺服器端有 60 秒快取，不會每次都打 Graylog）；已經在這一頁時再按導覽不重載
+    if (tab === 'network' && (changed || !$('#view-network').firstChild)) { loadNetwork(); }
   }
 
   /** 開事件案頁並套用狀態篩選（鈴鐺用）。 */
@@ -862,13 +867,15 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
   const wholeIn = (el, min, max) => /^\d{1,3}$/.test(el.value.trim()) && Number(el.value) >= min && Number(el.value) <= max;
 
   let settingsSeq = 0;   // 連續觸發載入時，只採用最後一次的回應
+  let netSettings = null; // 內部網段的設定（伺服器回的 network）
+  let netBox = null;      // 「內部網段」那一塊。風險門檻存檔會重畫整頁，這一塊要沿用同一個節點，免得填到一半的網段被清掉
   async function loadSettings() {
     const seq = ++settingsSeq;
     const root = $('#view-settings');
     root.replaceChildren(h('p', { class: 'note' }, '載入中…'));
     try {
       const r = await api('/ioc-settings.php', { action: 'get' });
-      if (seq === settingsSeq) renderSettings(r.risk);
+      if (seq === settingsSeq) { netSettings = r.network; netBox = null; renderSettings(r.risk); }   // 重新載入：兩塊都用伺服器的最新值
     } catch (e) {
       if (seq === settingsSeq) root.replaceChildren(unavailable(e.message));
     }
@@ -935,10 +942,151 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     const history = s.history.length
       ? table(['時間', '操作者', '項目', '原值', '新值'], s.history.map((x) => [x.time, x.actor, x.label, x.from, x.to]))
       : h('p', { class: 'note' }, '還沒有人調整過門檻。');
+    if (!netBox) { netBox = h('div'); renderNetworkSettings(netBox); }
     root.replaceChildren(h('section', { class: 'grid even' },
       section('風險等級門檻', '用來把整體風險分數分成低、中、高', form),
-      section('異動紀錄', '最近 10 筆，誰在什麼時候改的', history)));
+      section('異動紀錄', '最近 10 筆，誰在什麼時候改的', history)), netBox);
     if (focusSave && CAN_HANDLE) save.focus();
+  }
+
+  /** 設定頁的「內部網段」：內網可視性用它分「內部對內部」。存檔只重畫這一塊，不影響上面填到一半的風險門檻。 */
+  function renderNetworkSettings(box, focusSave) {
+    const s = netSettings;
+    if (!s) { box.replaceChildren(); return; }
+    const area = h('textarea', { id: 'net-cidrs', rows: 5, disabled: !CAN_HANDLE, spellcheck: 'false', style: 'min-height:110px;font-family:monospace' });
+    area.value = s.nets.join('\n');         // 用屬性設值，內容不經過 innerHTML
+    const msg = h('div', { class: 'note warn', role: 'alert' });
+    const save = h('button', { class: 'btn primary', type: 'submit' }, '儲存');
+    const when = s.invalid
+      ? h('p', { class: 'alert' }, '資料庫裡的內部網段不合法（可能被手動改過），上面填的是預設值。在重新儲存之前，內網可視性各區塊會標「無法取得」。')
+      : h('p', { class: 'note' }, s.custom ? '目前是自訂值，最後由 ' + s.updated_by + ' 在 ' + s.updated_at + ' 修改。'
+        : '目前使用預設值（私有位址 ' + s.defaults.join('、') + '），還沒有人自訂過。');
+    const form = h('form', { onsubmit: async (ev) => {
+      ev.preventDefault();
+      save.disabled = true; msg.textContent = '';
+      try {
+        const r = await api('/ioc-settings.php', { action: 'save_network', cidrs: area.value });
+        toast('已儲存內部網段');
+        netSettings = r.network;
+        renderNetworkSettings(box, true);
+      } catch (e) {
+        msg.textContent = (e.errors && e.errors.length ? e.errors.join('；') : e.message);
+        save.disabled = false;
+      }
+    } },
+      h('p', { class: 'note', style: 'margin-top:0' }, '內網可視性用這些網段判斷「內部對內部」（東西向）的流量。一行一個，寫成 10.0.0.0/8 這樣（前綴長度 '
+        + s.limits.min_bits + '～32，最多 ' + s.limits.max_nets + ' 個網段）。只支援 IPv4；IPv6 位址一律不算內部。'),
+      h('label', { for: 'net-cidrs' }, '內部網段（一行一個）'), area, when,
+      CAN_HANDLE
+        ? h('div', { class: 'toolbar', style: 'margin-top:12px' }, save,
+            h('button', { class: 'btn', type: 'button', onclick: () => { area.value = s.defaults.join('\n'); } }, '填入預設值（私有位址）'),
+            h('span', { class: 'note', style: 'margin:0' }, '填入後要按「儲存」才會生效。'))
+        : h('p', { class: 'note warn' }, '你的角色是檢視者（唯讀），只有管理者（admin）能修改內部網段。'),
+      msg);
+    const history = s.history.length
+      ? table(['時間', '操作者', '原值', '新值'], s.history.map((x) => [x.time, x.actor, x.from.split(',').join('、'), x.to.split(',').join('、')]))
+      : h('p', { class: 'note' }, '還沒有人調整過內部網段。');
+    box.replaceChildren(h('section', { class: 'grid even' },
+      section('內部網段', '內網可視性用來分「內部對內部」的流量', form),
+      section('內部網段的異動紀錄', '最近 10 筆，誰在什麼時候改的', history)));
+    if (focusSave && CAN_HANDLE) save.focus();
+  }
+
+  // ── 內網可視性（admin 與 global-read 都能看，全部唯讀）──
+  // 各區塊各自成敗：取不到就寫「無法取得：原因」，沒有防火牆日誌也不能是 0 或「沒有異常」（OPS-006）。
+  let networkSeq = 0;                        // 連續觸發載入時，只採用最後一次的回應
+  async function loadNetwork() {
+    const seq = ++networkSeq;
+    const root = $('#view-network');
+    root.replaceChildren(h('p', { class: 'note' }, '載入中…（要查多次 Graylog，第一次可能要幾秒）'));
+    try {
+      const r = await api('/ioc-network.php', { action: 'get', demo: CFG.demo });
+      if (seq === networkSeq) renderNetwork(r.network);
+    } catch (e) {
+      if (seq === networkSeq) root.replaceChildren(unavailable(e.message));
+    }
+  }
+
+  function renderNetwork(n) {
+    const r = n.meta.rules;
+    const nets = n.meta.nets;
+    const rule = '橫向探測：同一個內部來源、同一個目的埠，' + n.meta.range_label + '內連到 ≥ ' + r.probe_min + ' 個不同的內部主機（≥ ' + r.probe_medium
+      + ' 個為中風險、≥ ' + r.probe_high + ' 個為高風險）；被擋下：內部對內部的連線被防火牆擋下（累積 ≥ ' + r.blocked_medium + ' 次為中風險，否則低風險）。'
+      + '廣播與探索類的埠（' + r.noise_ports.join('、') + '）不算。這組規則是提案版，之後可依實際情況調整。';
+    $('#view-network').replaceChildren(
+      h('div', { class: 'toolbar', style: 'margin:0' },
+        h('button', { class: 'btn', type: 'button', onclick: loadNetwork }, '重新整理'),
+        h('span', { class: 'note', style: 'margin:0' }, '統計期間：' + n.meta.range_label + '，「較前期」是和' + n.meta.previous_label + '比較；更新於 ' + n.meta.generated_at + '（伺服器端快取 60 秒）。')),
+      h('p', { class: 'note', style: 'margin-top:4px' },
+        nets ? '內部網段：' + nets.join('、') + (CAN_HANDLE ? '（到「設定」頁修改）。' : '（由管理者在「設定」頁維護）。') : '',
+        '資料來源是防火牆日誌，所以只看得到經過防火牆的流量；同一個網段內、不經過防火牆的流量看不到（那需要旁路感測器，目前沒有）。'),
+      h('section', { class: 'grid kpis4' }, n.kpi.map(kpiCard)),
+      h('section', { class: 'grid even' },
+        section('東西向流量趨勢', '每 ' + r.bucket_hours + ' 小時一格，左舊右新', renderEwTrend(n.trend)),
+        section('Top Talkers', '內部來源依流量排名（前 ' + r.talkers + ' 名）', renderTalkers(n.talkers))),
+      h('section', { class: 'grid' },
+        section('異常連線清單', n.meta.range_label + '，嚴重的在前', [renderAnomalies(n.anomalies), h('p', { class: 'note' }, rule)])),
+      h('section', { class: 'grid even' },
+        section('旁路感測器', 'SPAN／Flow → IOC Sensor', h('p', { class: 'note', style: 'margin:0' },
+          '尚未接入：目前沒有旁路感測器，所以看不到不經過防火牆的內網流量，也沒有 NSM（網路安全監控）的資料。接入後這裡才會有內容。'))));
+  }
+
+  function renderEwTrend(sec) {
+    if (!sec.ok) return unavailable(sec.error);
+    const d = sec.data;
+    const W = 360, H = 150, padL = 8, padT = 16, padB = 22;
+    const ch = H - padT - padB;
+    const max = Math.max(1, ...d.buckets.map((b) => b.total));
+    const bw = (W - padL * 2) / d.buckets.length;
+    const bars = d.buckets.map((b, i) => {
+      const x = padL + i * bw + bw * 0.15, w = bw * 0.7;
+      const th = Math.round(ch * b.total / max), eh = Math.round(ch * b.east_west / max);
+      return sv('g', null,
+        sv('title', null, b.text),
+        sv('rect', { x, y: padT + ch - th, width: w, height: th, fill: '#3a577d', rx: 2 }),
+        sv('rect', { x, y: padT + ch - eh, width: w, height: eh, fill: '#61a8ff', rx: 2 }),
+        sv('text', { x: x + w / 2, y: Math.max(10, padT + ch - th - 3), 'text-anchor': 'middle' }, b.share === null ? '—' : b.share + '%'),
+        sv('text', { x: x + w / 2, y: H - 6, 'text-anchor': 'middle' }, b.label));
+    });
+    return [
+      sv('svg', { viewBox: '0 0 ' + W + ' ' + H, class: 'chart', role: 'img', 'aria-label': '東西向流量趨勢：' + d.buckets.map((b) => b.text).join('；') }, bars),
+      h('div', { class: 'legend' },
+        h('span', null, h('i', { style: 'background:#3a577d' }), '經過防火牆的轉送流量'),
+        h('span', null, h('i', { style: 'background:#61a8ff' }), '其中內部對內部（長條上方是占比）')),
+      h('p', { class: 'note' }, '24 小時合計：轉送流量 ' + d.total_label + '，內部對內部 ' + d.east_label + '（' + d.share + '%）。格子下方是該格的起始時間（台北時間）。')];
+  }
+
+  function renderTalkers(sec) {
+    if (!sec.ok) return unavailable(sec.error);
+    const d = sec.data;
+    if (!d.items.length) return h('p', { class: 'note' }, '這段期間沒有內部來源的轉送流量（只計經過防火牆、位元組數大於 0 的紀錄）。');
+    const max = Math.max(1, ...d.items.map((t) => t.bytes));
+    return [
+      d.items.map((t, i) => h('div', { class: 'rank' },
+        h('span', { class: 'no' }, String(i + 1)),
+        h('div', { class: 'nm' }, t.ip, h('div', { class: 'bar' }, h('i', { style: 'width:' + pct(100 * t.bytes / max) + '%;background:var(--blue)' }))),
+        h('div', { style: 'text-align:right;font-size:12px;white-space:nowrap' }, h('b', null, t.bytes_label),
+          h('div', { class: 'note', style: 'margin:0' }, (t.share === null ? '' : '占 ' + t.share + '% · ') + fmt(t.sessions) + ' 筆紀錄')))),
+      h('p', { class: 'note' }, '位元組數是送出加收到；「筆紀錄」是日誌筆數，同一條連線可能有開始與結束兩筆。共 ' + fmt(d.sources) + ' 個內部來源有流量。'
+        + (d.capped ? '來源太多，排名可能漏掉流量大但連線很少的來源。' : ''))];
+  }
+
+  function renderAnomalies(sec) {
+    if (!sec.ok) return unavailable(sec.error);
+    const d = sec.data;
+    if (!d.items.length) return h('p', { class: 'note', style: 'margin:0' }, '這段期間沒有符合規則的內部異常連線（只代表經過防火牆、符合下面規則的連線）。');
+    const lv = { high: '高', medium: '中', low: '低' };
+    const heads = ['時間', '來源 → 目的', '行為', '風險'].concat(CAN_HANDLE ? [''] : []);
+    const rows = d.items.map((a) => {
+      const flow = a.src_ip + ' → ' + (a.distinct > 0 ? a.distinct + ' 個內部主機' : '內部主機') + (a.port ? '：' + a.port : '');
+      const btn = createButton({ title: (a.kind === 'probe' ? '內網橫向探測：' : '內部連線被防火牆擋下：') + a.src_ip + (a.port ? '（埠 ' + a.port + '）' : ''),
+        severity: a.level, category: a.kind === 'probe' ? 'lateral_probe' : 'fw_internal_block', subject_ip: a.src_ip, evidence_query: a.evidence_query });
+      return [a.time, flow, a.behavior, levelBadge(lv[a.level])].concat(CAN_HANDLE ? [btn] : []);
+    });
+    return [
+      table(heads, rows),
+      d.total > d.items.length ? h('p', { class: 'note warn' }, '只列前 ' + d.items.length + ' 筆，共 ' + d.total + ' 筆。') : null,
+      d.capped ? h('p', { class: 'note warn' }, '分組結果碰到查詢上限，可能還有沒列出的來源。') : null];
   }
 
   // ── 身分與稽核（只有 admin）──
