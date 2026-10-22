@@ -22,6 +22,8 @@ MODELS = {'ios', 'fortios', 'junos', 'routeros'}
 # FortiOS 內建模型預設採互動式 shell，部分 FortiGate CLI 提示字元無法辨識；
 # IOC 專用模型改用已驗證的 SSH exec channel。
 ENGINE_MODELS = {'fortios': 'iocfortios'}
+# 變更受管 Oxidized 輸出或模型時遞增，以迫使既有設定重新載入。
+ENGINE_CONFIG_REVISION = 2
 LIMIT = 2 * 1024 * 1024
 
 
@@ -241,7 +243,10 @@ end
 
     def applied_engine(self, retry=True):
         settings = self.settings()
-        revision = hashlib.sha256(json.dumps(settings, sort_keys=True).encode()).hexdigest()
+        revision = hashlib.sha256(json.dumps({
+            'settings': settings,
+            'engine_config_revision': ENGINE_CONFIG_REVISION,
+        }, sort_keys=True).encode()).hexdigest()
         out = {'backend': 'oxidized', 'endpoint': ENGINE_URL, 'state': 'unavailable',
                'applied': False, 'checked_at': utcnow(), 'message': '備份工具尚未啟動，設定已儲存但尚未生效'}
         try:

@@ -1,4 +1,5 @@
 """組態備份的狀態、排程、敏感資訊與採集證據測試，不連線設備。"""
+import hashlib
 import json
 import os
 import subprocess
@@ -348,6 +349,15 @@ class BackupTests(unittest.TestCase):
         out = self.call('tick')
         self.assertEqual('pending_apply', out['engine']['state'])
         self.assertFalse(out['engine']['applied'])
+
+    def test_engine_configuration_revision_reloads_legacy_applied_settings(self):
+        self.save()
+        legacy_revision = hashlib.sha256(json.dumps(self.worker.settings(), sort_keys=True).encode()).hexdigest()
+        self.worker.put_meta('applied_revision', legacy_revision)
+        self.engine.calls.clear()
+        out = self.call('tick')
+        self.assertTrue(out['engine']['applied'])
+        self.assertIn('/reload.json', self.engine.calls)
 
     def test_sensitive_only_change_still_records_version(self):
         self.save()
