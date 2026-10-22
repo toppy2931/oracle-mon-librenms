@@ -6,6 +6,8 @@ namespace Ioc;
 /** 管理者組態備份領域邊界；設備位址一律取自可信 LibreNMS 目錄。 */
 final class ConfigBackupService
 {
+    private const HISTORY_PAGE_SIZE = 10;
+
     /** @var callable(array):array */
     private $transport;
     /** @var array<int,array{device_id:int,name:string,host:string}> */
@@ -365,9 +367,9 @@ final class ConfigBackupService
             // Reuse the existing run whitelist and local status messages.
             $runData = $data;
             unset($runData['history'], $runData['comparison']);
-            $runData['runs'] = array_slice(is_array($history['runs'] ?? null) ? $history['runs'] : [], 0, 20);
+            $runData['runs'] = array_slice(is_array($history['runs'] ?? null) ? $history['runs'] : [], 0, self::HISTORY_PAGE_SIZE);
             $versions = [];
-            foreach (array_slice(is_array($history['versions'] ?? null) ? $history['versions'] : [], 0, 20) as $row) {
+            foreach (array_slice(is_array($history['versions'] ?? null) ? $history['versions'] : [], 0, self::HISTORY_PAGE_SIZE) as $row) {
                 if (is_array($row)) {
                     $versions[] = ['id' => (int) ($row['id'] ?? 0), 'device_id' => (int) ($row['device_id'] ?? 0),
                         'created_at' => $this->text($row['created_at'] ?? ''),
@@ -375,7 +377,7 @@ final class ConfigBackupService
                 }
             }
             $result['history'] = ['device_id' => (int) ($history['device_id'] ?? 0),
-                'offset' => max(0, (int) ($history['offset'] ?? 0)), 'limit' => 20,
+                'offset' => max(0, (int) ($history['offset'] ?? 0)), 'limit' => self::HISTORY_PAGE_SIZE,
                 'total_runs' => max(0, (int) ($history['total_runs'] ?? 0)),
                 'total_versions' => max(0, (int) ($history['total_versions'] ?? 0)),
                 'runs' => $this->sanitize($runData)['runs'], 'versions' => $versions];

@@ -77,6 +77,8 @@ class BackupTests(unittest.TestCase):
             self.worker.db.execute("INSERT INTO runs(device_id,device_name,status) VALUES(7,'router','success')")
         self.settings['devices'] = []
         self.call('save', settings=self.settings)
+        page = self.call('history', device_id=7, offset=10)['history']
+        self.assertEqual((10, 10, 10), (page['limit'], len(page['runs']), len(page['versions'])))
         result = self.call('history', device_id=7, offset=20)
         history = result['history']
         self.assertEqual((25, 25, 5, 5), (history['total_runs'], history['total_versions'], len(history['runs']), len(history['versions'])))

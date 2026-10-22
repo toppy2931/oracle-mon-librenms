@@ -82,6 +82,19 @@ test('新增列選擇設備後立即顯示正確名稱與位址，未選設備�
   assert.ok(text(root).includes('分點防火牆'));
   assert.ok(text(root).includes('192.0.2.8'));
 });
+test('備份設定的已設定設備每頁顯示 10 筆並提供頁碼切換', async () => {
+  const p = payload();
+  for (let id = 8; id <= 18; id++) {
+    const device = { device_id: id, name: '設備-' + id, host: '192.0.2.' + id, model: 'fortios', username: 'backup', port: 22, enabled: true, password_set: true };
+    p.backup.settings.devices.push(device); p.devices.push({ device_id: id, name: device.name, host: device.host });
+  }
+  const root = h('div'); await create(async () => p).settings(root);
+  assert.ok(text(root).includes('共 12 筆，每頁 10 筆；第 1／2 頁'));
+  assert.ok(!text(walk(root).find((e) => e.tag === 'table')).includes('設備-18'));
+  button(root, '下一頁').onclick();
+  assert.ok(text(walk(root).find((e) => e.tag === 'table')).includes('設備-18'));
+  assert.ok(text(root).includes('第 2／2 頁'));
+});
 test('新增設備必須先掃描並由管理者勾選確認 SSH 指紋，才會送出信任要求', async () => {
   const calls = []; const root = h('div');
   const ui = create(async (url, body) => {
@@ -147,6 +160,31 @@ test('組態差異以綠紅色與圖例清楚標示新增和刪除行', async ()
   assert.ok(text(root).includes('紅色＝刪除設定'));
 });
 
+test('設備與狀態的各項多筆清單均以每頁 10 筆分頁', async () => {
+  const p = payload();
+  p.backup.engine = { state: 'ready', message: '備份服務已就緒' };
+  for (let index = 1; index <= 11; index++) {
+    const id = index + 20;
+    p.backup.settings.devices.push({ device_id: id, name: '分頁設備-' + index, host: '198.51.100.' + index, enabled: true });
+    p.backup.runs.push({ device_name: '執行紀錄-' + index, kind: 'manual', status: 'success', requested_at: '2026-10-22 01:00:00' });
+    p.backup.changes.push({ device_name: '變更紀錄-' + index, detected_at: '2026-10-22 01:00:00', added: 1, removed: 0, diff: '+設定-' + index });
+    p.backup.audit = p.backup.audit || [];
+    p.backup.audit.push({ occurred_at: '2026-10-22 01:00:00', actor: 'admin', action: 'save', detail: '操作紀錄-' + index });
+  }
+  const root = h('div'); await create(async () => p).governance(root);
+  assert.equal((text(root).match(/共 12 筆，每頁 10 筆；第 1／2 頁/g) || []).length, 1);
+  assert.equal((text(root).match(/共 11 筆，每頁 10 筆；第 1／2 頁/g) || []).length, 3);
+  assert.ok(!text(root).includes('分頁設備-11'));
+  assert.ok(!text(root).includes('執行紀錄-11'));
+  assert.ok(!text(root).includes('變更紀錄-11'));
+  assert.ok(!text(root).includes('操作紀錄-11'));
+  walk(root).filter((e) => e.tag === 'button' && text(e) === '下一頁').forEach((next) => next.onclick());
+  assert.ok(text(root).includes('分頁設備-11'));
+  assert.ok(text(root).includes('執行紀錄-11'));
+  assert.ok(text(root).includes('變更紀錄-11'));
+  assert.ok(text(root).includes('操作紀錄-11'));
+});
+
 test('等待中的備份不自動重新整理整個管理頁', async () => {
   const p = payload();
   p.backup.engine = { state: 'ready', message: '備份服務已就緒' };
@@ -179,7 +217,7 @@ const findLabel = (root, label) => walk(root).find((e) => e.attrs['aria-label'] 
 const button = (root, title) => walk(root).find((e) => e.tag === 'button' && text(e) === title);
 const historyPayload = (offset = 0, device = 7) => {
   const p = payload();
-  p.backup.history = { device_id: device, offset, limit: 20, total_runs: 21, total_versions: 21, runs: [], versions: [{ id: offset ? 1 : 21, device_id: device, created_at: '2026-10-22 01:00:00' }] };
+  p.backup.history = { device_id: device, offset, limit: 10, total_runs: 21, total_versions: 21, runs: [], versions: [{ id: offset ? 1 : 21, device_id: device, created_at: '2026-10-22 01:00:00' }] };
   return p;
 };
 test('管理頁切換保留未儲存的設定表單，設備可依位址搜尋', async () => {

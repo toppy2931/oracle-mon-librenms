@@ -29,6 +29,7 @@ ENGINE_MODELS = {'fortios': 'iocfortios'}
 # 變更受管 Oxidized 輸出或模型時遞增，以迫使既有設定重新載入。
 ENGINE_CONFIG_REVISION = 2
 LIMIT = 2 * 1024 * 1024
+HISTORY_PAGE_SIZE = 10
 
 
 class BackupError(Exception):
@@ -523,9 +524,9 @@ end
         offset = self.identifier(request.get('offset', 0), allow_zero=True)
         if ident not in {d['device_id'] for d in self.history_devices()}:
             raise BackupError('validation', '找不到此設備的備份紀錄')
-        runs = [dict(r) for r in self.db.execute('SELECT id,device_id,device_name,kind,status,requested_at,completed_at,message,version_id FROM runs WHERE device_id=? ORDER BY id DESC LIMIT 20 OFFSET ?', (ident, offset))]
-        versions = [dict(r) for r in self.db.execute('SELECT id,device_id,created_at,digest FROM versions WHERE device_id=? ORDER BY id DESC LIMIT 20 OFFSET ?', (ident, offset))]
-        return {'device_id': ident, 'offset': offset, 'limit': 20, 'runs': runs, 'versions': versions,
+        runs = [dict(r) for r in self.db.execute('SELECT id,device_id,device_name,kind,status,requested_at,completed_at,message,version_id FROM runs WHERE device_id=? ORDER BY id DESC LIMIT ? OFFSET ?', (ident, HISTORY_PAGE_SIZE, offset))]
+        versions = [dict(r) for r in self.db.execute('SELECT id,device_id,created_at,digest FROM versions WHERE device_id=? ORDER BY id DESC LIMIT ? OFFSET ?', (ident, HISTORY_PAGE_SIZE, offset))]
+        return {'device_id': ident, 'offset': offset, 'limit': HISTORY_PAGE_SIZE, 'runs': runs, 'versions': versions,
                 'total_runs': self.db.execute('SELECT COUNT(*) FROM runs WHERE device_id=?', (ident,)).fetchone()[0],
                 'total_versions': self.db.execute('SELECT COUNT(*) FROM versions WHERE device_id=?', (ident,)).fetchone()[0]}
 

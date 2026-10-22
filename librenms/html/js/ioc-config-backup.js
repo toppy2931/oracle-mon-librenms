@@ -29,6 +29,26 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
         return h('span', { style }, line || ' ');
       }));
   };
+  const PAGE_SIZE = 10;
+  // 所有本機清單共用同一個分頁器；資料仍以純 DOM 呈現，避免把設備資料當成 HTML 插入。
+  const paginationControls = (total, size, state, change) => {
+    const pages = Math.max(1, Math.ceil(total / size));
+    state.page = Math.min(Math.max(0, state.page || 0), pages - 1);
+    return h('div', { class: 'toolbar', style: 'margin-top:10px;align-items:center;flex-wrap:wrap' },
+      h('span', { class: 'note' }, '共 ' + total + ' 筆，每頁 ' + size + ' 筆；第 ' + (state.page + 1) + '／' + pages + ' 頁'),
+      h('button', { class: 'btn', type: 'button', disabled: state.page === 0, onclick: () => change(state.page - 1) }, '上一頁'),
+      Array.from({ length: pages }, (_, index) => h('button', { class: 'btn' + (index === state.page ? ' primary' : ''), type: 'button', 'aria-label': '第 ' + (index + 1) + ' 頁', disabled: index === state.page, onclick: () => change(index) }, String(index + 1))),
+      h('button', { class: 'btn', type: 'button', disabled: state.page >= pages - 1, onclick: () => change(state.page + 1) }, '下一頁'));
+  };
+  const paged = (container, items, state, render, empty) => {
+    const total = items.length;
+    const pages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+    state.page = Math.min(Math.max(0, state.page || 0), pages - 1);
+    const start = state.page * PAGE_SIZE;
+    const body = total ? render(items.slice(start, start + PAGE_SIZE)) : note(empty);
+    const controls = paginationControls(total, PAGE_SIZE, state, (page) => { state.page = page; paged(container, items, state, render, empty); });
+    container.replaceChildren(body, total > PAGE_SIZE ? controls : h('span', { class: 'note' }, '共 ' + total + ' 筆'));
+  };
   const request = (action, extra) => api(endpoint, Object.assign({ action }, extra || {}));
   const engineNotice = (engine) => note(engine && engine.message ? engine.message : '備份工具尚未安裝或無法連線，請聯絡管理者完成安裝。');
 
@@ -73,6 +93,7 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
     });
     const deviceTable = h('div');
     const editor = h('div');
+    const devicePage = { page: 0 };
     let selected = entries[0] || null;
     let editorFields = null;
     // API 與表單資料可能分別來自 JSON；統一轉為數字後再比對，避免已選設備被誤判成「已移除設備」。
@@ -103,7 +124,9 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
               drawDevices(); drawEditor();
             } }, '移除'))];
       });
-      deviceTable.replaceChildren(rows.length ? table(['設備', '連線位址', '品牌／系統', '備份帳號', 'SSH 身分', '狀態', '操作'], rows) : note('尚未加入備份設備。'));
+      paged(deviceTable, rows, devicePage,
+        (pageRows) => table(['設備', '連線位址', '品牌／系統', '備份帳號', 'SSH 身分', '狀態', '操作'], pageRows),
+        '尚未加入備份設備。');
     };
     const drawEditor = () => {
       if (!selected) { editorFields = null; editor.replaceChildren(note('請按「加入設備」或在表格選擇「編輯」。')); return; }
@@ -260,6 +283,11 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
     const ready = b.engine && b.engine.state === 'ready';
     const search = h('input', { type: 'search', 'aria-label': '搜尋已設定設備', placeholder: '搜尋設備名稱或位址' });
     const deviceTable = h('div');
+    const devicePage = { page: 0 };
+    const runsTable = h('div');
+    const changesList = h('div');
+    const auditTable = h('div');
+    const runsPage = { page: 0 }, changesPage = { page: 0 }, auditPage = { page: 0 };
     const drawDevices = () => {
     const devices = b.settings.devices.filter((d) => (d.name + ' ' + d.host).toLowerCase().includes(search.value.toLowerCase())).map((d) => {
       const test = h('button', { class: 'btn', type: 'button', disabled: !ready || !d.enabled }, '測試並建立備份');
@@ -268,31 +296,41 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
       run.addEventListener('click', () => action('run', d.device_id, run));
       return [d.name, d.host, d.enabled ? '已納入' : '已停用', h('div', { class: 'toolbar' }, test, run)];
     });
-    deviceTable.replaceChildren(devices.length ? table(['設備', '連線位址', '狀態', '操作'], devices) : note('沒有符合條件的設備。'));
+    paged(deviceTable, devices, devicePage,
+      (pageRows) => table(['設備', '連線位址', '狀態', '操作'], pageRows),
+      '沒有符合條件的設備。');
     };
-    search.addEventListener('input', drawDevices); drawDevices();
+    search.addEventListener('input', () => { devicePage.page = 0; drawDevices(); }); drawDevices();
     const runs = b.runs.map((r) => [r.device_name, kinds[r.kind] || '備份', time(r.requested_at),
       statuses[r.status] || '狀態無法辨識', time(r.completed_at), r.message || '']);
     const changes = b.changes.map((c) => h('details', { style: 'margin:12px 0' },
       h('summary', null, c.device_name + '｜' + time(c.detected_at) + '｜新增 ' + c.added + ' 行、刪除 ' + c.removed + ' 行'),
       note('這是兩次成功備份之間偵測到的差異，無法單靠備份判定實際修改者。敏感設定已遮罩；差異過長時會截斷。'),
       diffLegend(), diffContent(c.diff, '這次只有敏感欄位或未顯示內容發生變更。', '480px')));
+    const audits = (b.audit || []).map((a) => [time(a.occurred_at), a.actor,
+      ({ save: '儲存備份設定', test: '要求測試備份', run: '要求立即備份', scheduled: '排程備份' })[a.action] || '備份操作', a.detail]);
+    paged(runsTable, runs, runsPage,
+      (pageRows) => table(['設備', '方式', '要求時間', '結果', '完成時間', '說明'], pageRows),
+      '目前沒有備份執行紀錄。');
+    paged(changesList, changes, changesPage, (pageRows) => h('div', null, pageRows),
+      '目前沒有可顯示的設定變更。首次備份只建立基準；有成功備份後才能比較。');
+    paged(auditTable, audits, auditPage,
+      (pageRows) => table(['時間', '操作者', '操作', '說明'], pageRows),
+      '目前沒有備份管理操作紀錄。');
     root.replaceChildren(h('div', { class: 'toolbar' },
       h('button', { class: 'btn', type: 'button', onclick: () => load(root, (r) => renderGovernance(root, r)) }, '重新整理備份狀態'),
       note('設備與排程請在本頁「備份設定」調整。')),
       engineNotice(b.engine), note('已排入不代表成功；請重新整理查看完成結果。時間為台北時間。'), message,
       section('備份設備', '可依設備名稱或位址查詢', [search, deviceTable]),
-      section('最近備份紀錄', '最多顯示最近 50 筆，沒有變更也保留執行紀錄', runs.length ? table(['設備', '方式', '要求時間', '結果', '完成時間', '說明'], runs) : note('目前沒有備份執行紀錄。')),
-      section('設定變更紀錄', '最多顯示最近 50 筆；＋為新增，－為刪除', changes.length ? changes : note('目前沒有可顯示的設定變更。首次備份只建立基準；有成功備份後才能比較。')),
-      section('備份管理操作紀錄', '誰在什麼時候儲存設定或要求備份；不包含密碼', (b.audit || []).length
-        ? table(['時間', '操作者', '操作', '說明'], b.audit.map((a) => [time(a.occurred_at), a.actor,
-          ({ save: '儲存備份設定', test: '要求測試備份', run: '要求立即備份', scheduled: '排程備份' })[a.action] || '備份操作', a.detail]))
-        : note('目前沒有備份管理操作紀錄。')));
+      section('最近備份紀錄', '最多顯示最近 50 筆；每頁 10 筆，沒有變更也保留執行紀錄', runsTable),
+      section('設定變更紀錄', '最多顯示最近 50 筆；每頁 10 筆，＋為新增，－為刪除', changesList),
+      section('備份管理操作紀錄', '每頁 10 筆；誰在什麼時候儲存設定或要求備份；不包含密碼', auditTable));
   }
   function settings(box) { return load(box, (r) => renderSettings(box, r)); }
 
   function renderHistory(root, response) {
     let sequence = 0, comparisonSequence = 0, offset = 0;
+    const historyPage = { page: 0 };
     const versions = new Map();
     const devices = response.backup.history_devices || response.backup.settings.devices;
     const picker = h('select', { 'aria-label': '查詢備份設備' }, h('option', { value: '' }, '請選擇設備'),
@@ -324,16 +362,16 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
         if (requestSequence !== sequence) return;
         const history = r.backup.history;
         offset = history.offset;
+        historyPage.page = Math.floor(offset / history.limit);
         history.versions.forEach((v) => versions.set(v.id, v)); updateSelections();
-        const previous = h('button', { type: 'button', class: 'btn', disabled: offset === 0, onclick: () => fetchPage(Math.max(0, offset - history.limit)) }, '上一頁');
-        const next = h('button', { type: 'button', class: 'btn', disabled: offset + history.limit >= Math.max(history.total_runs, history.total_versions), onclick: () => fetchPage(offset + history.limit) }, '下一頁');
-        records.replaceChildren(note('執行紀錄共 ' + history.total_runs + ' 筆；內容版本共 ' + history.total_versions + ' 代。第 ' + (Math.floor(offset / history.limit) + 1) + ' 頁'),
-          h('div', { class: 'toolbar' }, previous, next),
-          section('備份執行紀錄', '內容沒有變更也會保留執行紀錄', history.runs.length ? table(['要求時間', '方式', '結果', '完成時間', '說明'], history.runs.map((r) => [time(r.requested_at), kinds[r.kind] || '備份', statuses[r.status] || '狀態無法辨識', time(r.completed_at), r.message || ''])) : note('此頁沒有執行紀錄。')),
-          section('備份版本', '內容變更才建立新版本；首次成功備份為基準', history.versions.length ? table(['版本', '建立時間'], history.versions.map((v) => ['#' + v.id, time(v.created_at)])) : note('此頁沒有備份版本。')));
+        const total = Math.max(history.total_runs, history.total_versions);
+        records.replaceChildren(note('執行紀錄共 ' + history.total_runs + ' 筆；內容版本共 ' + history.total_versions + ' 代。'),
+          total > history.limit ? paginationControls(total, history.limit, historyPage, (page) => fetchPage(page * history.limit)) : h('span', { class: 'note' }, '共 ' + total + ' 筆'),
+          section('備份執行紀錄', '內容沒有變更也會保留執行紀錄；每頁 ' + history.limit + ' 筆', history.runs.length ? table(['要求時間', '方式', '結果', '完成時間', '說明'], history.runs.map((r) => [time(r.requested_at), kinds[r.kind] || '備份', statuses[r.status] || '狀態無法辨識', time(r.completed_at), r.message || ''])) : note('此頁沒有執行紀錄。')),
+          section('備份版本', '內容變更才建立新版本；首次成功備份為基準；每頁 ' + history.limit + ' 筆', history.versions.length ? table(['版本', '建立時間'], history.versions.map((v) => ['#' + v.id, time(v.created_at)])) : note('此頁沒有備份版本。')));
       } catch (e) { if (requestSequence === sequence) records.replaceChildren(unavailable(e.message)); }
     };
-    picker.addEventListener('change', () => { versions.clear(); from.value = ''; to.value = ''; updateSelections(); return fetchPage(0); });
+    picker.addEventListener('change', () => { versions.clear(); historyPage.page = 0; from.value = ''; to.value = ''; updateSelections(); return fetchPage(0); });
     compare.addEventListener('click', async () => {
       if (!from.value || !to.value || from.value === to.value) return;
       const requestSequence = ++comparisonSequence;

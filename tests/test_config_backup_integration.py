@@ -80,6 +80,7 @@ class ConfigBackupIntegrationTests(unittest.TestCase):
                                (9, '已移除設備', 'manual', 'success', '2026-10-22T00:00:00+00:00', ident))
             code, result = call({'action': 'history', 'device_id': 9, 'offset': 0})
             self.assertEqual(code, 0)
+            self.assertEqual(result['data']['history']['limit'], 10)
             self.assertEqual(result['data']['history']['total_versions'], 2)
             self.assertNotIn('content', result['data']['history']['versions'][0])
             code, result = call({'action': 'compare', 'device_id': 9, 'from_version_id': 1, 'to_version_id': 2})

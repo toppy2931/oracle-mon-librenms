@@ -213,6 +213,7 @@ test('組態備份：歷史允許已移除設備且不回傳原始內容', funct
     $result=$svc->history(99,20,Access::HANDLER);
     assertSame(99,$requests[0]['device_id']);
     assertSame(20,$result['history']['offset']);
+    assertSame(10,$result['history']['limit']);
     assertSame(25,$result['history']['total_runs']);
     assertTrue(strpos(json_encode($result),'hidden')===false);
 });
