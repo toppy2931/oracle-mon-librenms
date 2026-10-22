@@ -29,6 +29,7 @@ class ConfigBackupIntegrationTests(unittest.TestCase):
         self.assertIn('尚未安裝',src)
         portal=(ROOT/'librenms/html/ioc-portal.php').read_text(encoding='utf-8')
         self.assertIn('/js/ioc-config-backup.js',portal)
+        self.assertIn("Cache-Control: no-store", portal)
         self.assertIn('id="view-config"',portal)
         self.assertNotIn("key: 'config', label: '組態治理', off: true",portal)
 

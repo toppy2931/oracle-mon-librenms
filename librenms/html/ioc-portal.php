@@ -27,6 +27,8 @@ $demo = ($_GET['demo'] ?? '') === '1';
 // 這個頁面有會改資料的按鈕（結案等）：不允許被別的網站用透明 iframe 蓋住誘導點擊（clickjacking）
 header('X-Frame-Options: SAMEORIGIN');
 header("Content-Security-Policy: frame-ancestors 'self'");
+// 此頁會載入獨立 IOC 前端模組；禁止 HTML 回應快取，避免部署後仍引用舊版模組。
+header('Cache-Control: no-store, max-age=0');
 
 $config = json_encode([
     'level'  => $level,
