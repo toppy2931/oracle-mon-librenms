@@ -369,6 +369,16 @@ class BackupTests(unittest.TestCase):
         self.assertEqual('127.0.0.1', config['extensions']['oxidized-web']['listen'])
         self.assertFalse(config['output']['clean_obsolete_nodes'])
 
+    def test_fortios_uses_ioc_exec_model_without_modifying_system_model(self):
+        self.settings['devices'][0]['model'] = 'fortios'
+        self.save()
+        home = self.worker.root / 'oxidized'
+        router = (home / 'router.db').read_text()
+        model = (home / 'model' / 'iocfortios.rb').read_text()
+        self.assertIn('|iocfortios|', router)
+        self.assertIn('class IocFortiOS < FortiOS', model)
+        self.assertIn('exec true', model)
+
     def test_save_during_run_rejected(self):
         self.save()
         self.call('run', device_id=7)

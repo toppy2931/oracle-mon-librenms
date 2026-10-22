@@ -19,6 +19,9 @@ from urllib.parse import quote
 STATE_DIR = '/var/lib/oracle-mon/config-backup'
 ENGINE_URL = 'http://127.0.0.1:8879'
 MODELS = {'ios', 'fortios', 'junos', 'routeros'}
+# FortiOS 內建模型預設採互動式 shell，部分 FortiGate CLI 提示字元無法辨識；
+# IOC 專用模型改用已驗證的 SSH exec channel。
+ENGINE_MODELS = {'fortios': 'iocfortios'}
 LIMIT = 2 * 1024 * 1024
 
 
@@ -209,6 +212,9 @@ class Worker:
         output = home / 'configs'
         secure_path(output, True)
         output.mkdir(exist_ok=True, mode=0o700)
+        models = home / 'model'
+        secure_path(models, True)
+        models.mkdir(exist_ok=True, mode=0o700)
         config = {'interval': 0, 'next_adds_job': True, 'threads': 1, 'use_max_threads': True,
                   'timeout': 20, 'timelimit': 300, 'retries': 0, 'debug': False,
                   'resolve_dns': True, 'pid': str(home / 'oxidized.pid'),
@@ -220,7 +226,16 @@ class Worker:
                              'map': {'name': 0, 'ip': 1, 'model': 2, 'username': 3, 'password': 4}, 'vars_map': {}}}}
         # JSON 是 YAML 子集，無需新增 YAML 依賴；來源分隔符不允許出現在輸入。
         self.write_private(home / 'config', json.dumps(config, ensure_ascii=False, indent=2))
-        lines = ['|'.join([d['host'], d['host'], d['model'], d['username'], d['password']])
+        # 不修改系統安裝的 Oxidized 模型；僅在 IOC 受管目錄提供 FortiOS exec 相容層。
+        self.write_private(models / 'iocfortios.rb', """require 'oxidized/model/fortios'
+
+class IocFortiOS < FortiOS
+  cfg :ssh do
+    exec true
+  end
+end
+""")
+        lines = ['|'.join([d['host'], d['host'], ENGINE_MODELS.get(d['model'], d['model']), d['username'], d['password']])
                  for d in self.settings()['devices'] if d['enabled']]
         self.write_private(home / 'router.db', '\n'.join(lines) + ('\n' if lines else ''))
 
