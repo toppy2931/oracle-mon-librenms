@@ -4,7 +4,8 @@ declare(strict_types=1);
 namespace Ioc;
 
 /**
- * 入口的可調設定：風險等級門檻、帳號盤點紀錄、內部網段（內網可視性用）。誰能改（只有 admin）、怎麼驗證、
+ * 入口的可調設定：風險等級門檻、帳號盤點紀錄、內部網段（內網可視性用）、站點與網段（總覽把設備依 IP 歸站點用，
+ * 規則在 Sites，一個站點一列 site.<id>）。誰能改（只有 admin）、怎麼驗證、
  * 沒設定時用什麼預設，全在這裡；端點只管登入、CSRF、解析內容。所有方法都先檢查權限，與 CaseService 一致。
  * 內部網段的規則在 IpNets（IPv4 CIDR、整理排序去重）；同樣「壞掉的值不悄悄套用預設」：internalNets() 丟例外，
  * networkSettings() 標 invalid。
@@ -238,6 +239,136 @@ final class SettingsService
     }
 
     /**
+     * 目前生效的站點（給總覽把設備依 IP 歸站點用）。沒設定過站點是空的 Sites（不是錯誤：行為與沒有這個功能時一樣）；
+     * 資料表裡有壞掉的列（有人手動改過）時丟例外：呼叫端要標明原因，不能默默少算站點。
+     *
+     * @throws IocError 資料表裡的站點設定不合法
+     */
+    public function sites(?string $level): Sites
+    {
+        $this->requireView($level);
+        $s = $this->readSites($this->repo->all());
+        if ($s['broken'] !== []) {
+            throw new IocError('站點的設定值不合法（資料表被手動改過？），請管理者到「設定」頁重新儲存');
+        }
+        return new Sites($s['list']);
+    }
+
+    /**
+     * 設定頁「站點與網段」要的資料：站點清單（id、名稱、網段）、有幾列壞掉、限制、最後修改、最近的異動紀錄。檢視者可看。
+     *
+     * @return array<string,mixed>
+     */
+    public function siteSettings(?string $level): array
+    {
+        $this->requireView($level);
+        $s = $this->readSites($this->repo->all());
+        $sites  = [];
+        $latest = null;
+        foreach ($s['list'] as $row) {
+            $sites[] = ['id' => $row['id'], 'name' => $row['name'], 'nets' => $row['nets']];
+            if ($latest === null || strcmp($row['updated_at'], $latest['updated_at']) > 0) {
+                $latest = $row;
+            }
+        }
+        $history = [];
+        // 站點一列一個設定名稱，刪掉的站點的紀錄也要看得到，沒辦法列舉名稱，所以依前綴篩（在資料庫端，不受其他設定的異動筆數影響）
+        foreach ($this->repo->recentHistory(self::HISTORY_LIMIT, null, Sites::KEY_PREFIX) as $h) {
+            $history[] = [
+                'time'  => Time::toTaipei($h['ts']),
+                'actor' => (string) $h['actor'],
+                'from'  => self::siteText((string) $h['old_value'], '（新增）'),
+                'to'    => self::siteText((string) $h['new_value'], '（刪除）'),
+            ];
+        }
+        return [
+            'sites'      => $sites,
+            'broken'     => count($s['broken']),
+            'invalid'    => $s['broken'] !== [],
+            'limits'     => ['max_sites' => Sites::MAX_SITES, 'max_nets' => Sites::MAX_NETS, 'name_max' => Sites::NAME_MAX],
+            'updated_by' => $latest === null ? null : $latest['updated_by'],
+            'updated_at' => $latest === null ? null : Time::toTaipei($latest['updated_at']),
+            'history'    => $history,
+        ];
+    }
+
+    /**
+     * 儲存整份站點清單（僅 admin）：有 id 的是既有站點（更新），沒有的是新增，沒送來的現有站點就是刪除。
+     * 只寫實際有變動的站點，每個變動（新增、修改、刪除）各留一筆異動紀錄；整份沒有變動就什麼都不寫。
+     * 資料表裡壞掉的列（讀不懂的值）不會出現在清單裡，儲存時一併刪除，管理者重新儲存就能修復。
+     *
+     * @param array<string,mixed> $in sites：[{id?, name, cidrs}]
+     * @return array<string,mixed> 儲存後的 siteSettings()
+     */
+    public function saveSites(array $in, string $actor, ?string $level): array
+    {
+        $this->requireHandler($level);
+        $items = $in['sites'] ?? null;
+        if (!is_array($items)) {
+            throw new ValidationError(['沒有收到站點清單']);
+        }
+        $parsed = Sites::parseSubmitted($items);
+        if ($parsed['errors'] !== []) {
+            throw new ValidationError($parsed['errors']);
+        }
+        $now = ($this->now)();
+
+        $this->repo->transaction(function () use ($parsed, $actor, $now): void {
+            // 鎖定讀取：兩個管理者同時儲存時，第二個會等第一個做完再讀到最新內容（不然兩邊算出同一個新 id、後寫的蓋掉先寫的）
+            $rows = $this->repo->allForUpdate();
+            $cur  = $this->readSites($rows);
+            // 送來的 id 必須是現有站點：不然是別的管理者已經把它刪了，這時重新建立它會讓刪除白做
+            foreach ($parsed['sites'] as $s) {
+                if ($s['id'] !== null && !isset($cur['list'][$s['id']])) {
+                    throw new ValidationError(['這份站點設定已經被別人更新過（或其中的站點已被刪除），請重新整理頁面再修改']);
+                }
+            }
+            // 新站點的 id 只增不減、永不重用：下一個可用的 id 記在 sites.next_id。只看「現有最大 id＋1」的話，刪掉最大的站點再新增，
+            // 新站點會拿到同一個 id，開著舊畫面的人用那個 id 存檔就會蓋掉別人新建的站點（上面的過期檢查擋不住）
+            $stored = isset($rows[Sites::NEXT_ID_KEY]) && ctype_digit($rows[Sites::NEXT_ID_KEY]['value']) ? (int) $rows[Sites::NEXT_ID_KEY]['value'] : 0;
+            $next   = max(1, $stored);
+            foreach (array_keys($rows) as $k) {
+                $id = Sites::idOfKey((string) $k);
+                if ($id !== null && $id >= $next) {
+                    $next = $id + 1;
+                }
+            }
+            $keep = [];
+            foreach ($parsed['sites'] as $s) {
+                $id = $s['id'] ?? $next++;
+                if ($id > Sites::MAX_ID) {
+                    throw new ValidationError(['站點編號已經用完（內部計數器超出範圍），請聯絡系統管理員檢查 ioc_settings 的 ' . Sites::NEXT_ID_KEY]);
+                }
+                $key   = Sites::keyOf($id);
+                $value = Sites::toStored($s['name'], $s['nets']);
+                $keep[$key] = true;
+                if (($rows[$key]['value'] ?? null) !== $value) {
+                    $this->persist([$key => $value], $rows, $actor, $now);
+                }
+            }
+            $removed = false;
+            foreach ($rows as $key => $row) {
+                if (Sites::isSiteKey((string) $key) && !isset($keep[$key])) {
+                    $this->repo->delete((string) $key);
+                    $this->repo->addHistory($now, $actor, (string) $key, $row['value'], '');
+                    $removed = true;
+                }
+            }
+            // 有新增或刪除才需要更新計數器（整份沒有變動時什麼都不寫）；計數器只增不減，所以刪掉的 id 不會再被拿來用
+            if (($removed || $next > max(1, $stored)) && $next !== $stored) {
+                $this->repo->put(Sites::NEXT_ID_KEY, (string) $next, $actor, $now);       // 內部計數器，不留異動紀錄
+            }
+        });
+        return $this->siteSettings($level);
+    }
+
+    /** 設定名稱的中文名（稽核軌跡、異動紀錄用）；站點是一列一個設定名稱，統一叫「站點」。 */
+    public static function keyLabel(string $key): string
+    {
+        return self::KEY_LABEL[$key] ?? (Sites::isSiteKey($key) ? '站點與網段' : $key);
+    }
+
+    /**
      * 設定名稱沒設定過時的值（寫異動紀錄的「原值」用）。風險門檻與盤點週期是整數常數，內部網段是 RFC1918 清單，其餘是空字串。
      */
     private static function defaultValue(string $key): string
@@ -346,6 +477,59 @@ final class SettingsService
             return ['invalid' => true] + $none;       // 被手動改成不合法的值：壞掉，不悄悄套用預設
         }
         return ['nets' => $nets, 'custom' => true, 'invalid' => false, 'updated_by' => $r['updated_by'], 'updated_at' => $r['updated_at']];
+    }
+
+    /**
+     * 資料表裡的站點列 → 站點清單與壞掉的列。壞掉＝設定名稱的 id 不合法、值讀不懂，或名稱／網段與前面的站點重複
+     * （有人手動改過資料表；重複時兩邊哪個算數是模糊的，所以後面那個算壞）。
+     *
+     * @param array<string,array{value:string,updated_by:string,updated_at:string}> $rows
+     * @return array{list:array<int,array{id:int,name:string,nets:string[],updated_by:string,updated_at:string}>,broken:string[]} list 以 id 為鍵、依 id 排序
+     */
+    private function readSites(array $rows): array
+    {
+        $list   = [];
+        $broken = [];
+        foreach ($rows as $key => $r) {
+            if (!Sites::isSiteKey((string) $key)) {
+                continue;
+            }
+            $id = Sites::idOfKey((string) $key);
+            $v  = $id === null ? null : Sites::fromStored($r['value']);
+            if ($v === null) {
+                $broken[] = (string) $key;
+                continue;
+            }
+            $list[$id] = $v + ['id' => $id, 'updated_by' => $r['updated_by'], 'updated_at' => $r['updated_at']];
+        }
+        ksort($list);
+        $names = [];
+        $nets  = [];
+        foreach ($list as $id => $s) {
+            $dup = isset($names[mb_strtolower($s['name'])]);
+            foreach ($s['nets'] as $n) {
+                $dup = $dup || isset($nets[$n]);
+            }
+            if ($dup) {
+                $broken[] = Sites::keyOf($id);
+                unset($list[$id]);
+                continue;
+            }
+            $names[mb_strtolower($s['name'])] = true;
+            foreach ($s['nets'] as $n) {
+                $nets[$n] = true;
+            }
+        }
+        return ['list' => $list, 'broken' => $broken];
+    }
+
+    /** 異動紀錄裡一個站點的值（「名稱|網段,網段」）→ 給人看的文字；空值是新增或刪除，寫 $empty。 */
+    private static function siteText(string $stored, string $empty): string
+    {
+        if ($stored === '') {
+            return $empty;
+        }
+        return str_replace([',', '|'], ['、', '：'], $stored);
     }
 
     /**

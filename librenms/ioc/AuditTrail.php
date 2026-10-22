@@ -242,7 +242,7 @@ final class AuditTrail
             if ($ts === null) {
                 continue;
             }
-            $label = SettingsService::KEY_LABEL[(string) ($r['skey'] ?? '')] ?? (string) ($r['skey'] ?? '');
+            $label = SettingsService::keyLabel((string) ($r['skey'] ?? ''));
             $out[] = $this->event($ts, (string) ($r['actor'] ?? ''), '', 'settings', '修改設定：' . $label,
                 'ok', $this->cut((string) ($r['old_value'] ?? '') . ' → ' . (string) ($r['new_value'] ?? '')));
         }

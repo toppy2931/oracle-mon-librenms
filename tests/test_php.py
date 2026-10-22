@@ -354,6 +354,41 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
         self.assertIn("ioc_overview_cache_forget()", block)
         self.assertIn("ioc_pick($in, ['risk_low', 'risk_medium'])", block, "只收白名單內的欄位")
 
+    def test_saving_sites_is_admin_only_clears_the_overview_cache_and_has_a_bounded_body(self):
+        """站點設定存了卻不清總覽快取，站點數與分佈最多 20 秒還是舊的；整份清單是陣列（ioc_pick 只收純量），
+        所以形狀、長度與內容都由服務嚴格檢查，而且要先檢查權限才處理內容；請求內容有上限。"""
+        src = (ROOT / "librenms" / "html" / "ioc-settings.php").read_text(encoding="utf-8")
+        block = re.search(r"case 'save_sites':(.*?)(?=case '|default:)", src, re.S).group(1)
+        self.assertIn("ioc_overview_cache_forget()", block)
+        self.assertIn("saveSites(", block)
+        self.assertLess(src.index("ioc_begin("), src.index("case 'save_sites'"), "要先登入與驗 CSRF")
+        self.assertIn("32768", src, "請求內容要有上限")
+        self.assertRegex(src, r"strlen\(\$raw\) > 4096 && \(\$in\['action'\] \?\? ''\) !== 'save_sites'",
+                         "只有 save_sites 可以超過 4 KB，其他動作維持原本的上限")
+        svc = (ROOT / "librenms" / "ioc" / "SettingsService.php").read_text(encoding="utf-8")
+        body = re.search(r"public function saveSites\(.*?\n    \}\n", svc, re.S).group(0)
+        self.assertLess(body.index("requireHandler("), body.index("parseSubmitted("), "先檢查權限再處理內容")
+        self.assertLess(body.index("parseSubmitted("), body.index("transaction("), "驗證通過才開始寫")
+        self.assertIn("allForUpdate()", body, "整份取代要用鎖定讀取，兩個管理者同時儲存才不會互相覆蓋")
+        self.assertNotIn("->all()", body, "saveSites 裡不能用沒有鎖的 all()")
+
+    def test_settings_history_prefix_filter_is_parameterized_and_escaped(self):
+        """站點異動紀錄依前綴在資料庫端篩：LIKE 的前綴要走參數、跳脫 % 與 _（站點名稱是 site.<id>，但前綴參數是通用的）。"""
+        src = (ROOT / "librenms" / "ioc" / "PdoSettingsRepo.php").read_text(encoding="utf-8")
+        self.assertIn("skey LIKE :prefix ESCAPE '!'", src)
+        self.assertIn("str_replace(['!', '%', '_'], ['!!', '!%', '!_'], $keyPrefix)", src)
+        self.assertNotRegex(src, r"LIKE\s+'[^']*'\s*\.|LIKE\s+\"[^\"]*\"\s*\.\s*\$", "前綴不能用字串拼接進 SQL")
+
+    def test_overview_reports_unreadable_sites_instead_of_silently_using_location_only(self):
+        """站點設定讀不到時設備只能依 LibreNMS 位置分站點：一定要把原因帶到畫面，不能默默換一套結果；
+        設備 IP 要經 Fleet::deviceIp 轉換（devices.ip 是二進位）。"""
+        endpoint = (ROOT / "librenms" / "ioc" / "endpoint.php").read_text(encoding="utf-8")
+        self.assertRegex(endpoint, r"(?s)->sites\(\$level\);\s*\} catch \(\\Ioc\\AccessDenied \$e\) \{\s*throw \$e;\s*\} catch \(\\Throwable \$e\) \{.*?\$sitesWarning = ",
+                         "站點設定讀不到要帶原因（警告），不能只丟掉")
+        self.assertIn("$thresholds, $sitesWarning)", endpoint)
+        self.assertIn("Fleet::deviceIp(", endpoint)
+        self.assertNotIn("inet_ntop", endpoint, "二進位位址的轉換只在 Fleet::deviceIp（有單元測試）")
+
     def test_overview_does_not_fall_back_to_default_thresholds_when_settings_are_unreadable(self):
         """門檻讀不到時套預設值，畫面上的等級就可能跟管理者設定的不一致（例如設了 95 卻顯示低風險）。"""
         src = (ROOT / "librenms" / "ioc" / "endpoint.php").read_text(encoding="utf-8")

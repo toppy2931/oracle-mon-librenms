@@ -1,7 +1,7 @@
 <?php
 /**
  * 入口資料層的自我測試：在真正的 MariaDB 上走一遍事件案（建立、狀態流程、歷程、交易復原、中文／emoji 讀寫）
- * 與設定（風險等級門檻的儲存、覆寫、異動紀錄、權限）。
+ * 與設定（風險等級門檻、內部網段、站點與網段的儲存、覆寫、刪除、異動紀錄、權限）。
  * 本機的單元測試用的是記憶體版資料存取，驗證不到 SQL；這支補上那一塊，要在 LibreNMS 主機上跑。
  *
  *   sudo -u librenms php system/ioc-db-selftest.php
@@ -26,6 +26,7 @@ use Ioc\AccessDenied;
 use Ioc\AuditTrail;
 use Ioc\IdentityService;
 use Ioc\CaseService;
+use Ioc\Fleet;
 use Ioc\InvalidTransition;
 use Ioc\PdoCaseRepo;
 use Ioc\PdoSettingsRepo;
@@ -190,6 +191,25 @@ try {
             $h = $settings->networkSettings($H)['history'];
             $assert(count($h) >= 1 && $h[0]['actor'] === 'selftest' && $h[0]['to'] === '10.0.0.0/8,192.168.1.0/24', '內部網段的異動紀錄不對（依設定名稱篩選的 SQL）');
         });
+        // 站點是一個站點一列 site.<id>，刪除用 DELETE（其他設定都只有 upsert）。saveSites 是整份取代，正式的站點在這個交易裡會被刪掉，
+        // 但整個交易最後一定 rollBack，所以不會動到正式的站點
+        $check('站點與網段：儲存、讀回、修改、刪除（驗證 DELETE、FOR UPDATE、utf8mb4 與依前綴篩選異動紀錄）', function () use ($settings, $settingsRepo, $H, $assert) {
+            $name = '自我測試站 😀';
+            $r = $settings->saveSites(['sites' => [['name' => $name, 'cidrs' => "198.51.100.77/24\n203.0.113.0/24"]]], 'selftest', $H);
+            $id = $r['sites'][0]['id'] ?? null;
+            $assert($id !== null && $r['sites'][0]['name'] === $name && $r['sites'][0]['nets'] === ['198.51.100.0/24', '203.0.113.0/24'], '儲存後讀回的值不對（整理網段、中文與 emoji）');
+            $assert($settings->sites($H)->siteOf('203.0.113.9') === $name, 'sites() 找不到剛存的站點');
+            $r = $settings->saveSites(['sites' => [['id' => $id, 'name' => $name, 'cidrs' => '198.51.100.0/24']]], 'selftest', $H);
+            $assert($r['sites'][0]['nets'] === ['198.51.100.0/24'], '修改沒有生效（ON DUPLICATE KEY UPDATE）');
+            $r = $settings->saveSites(['sites' => []], 'selftest', $H);
+            $assert($r['sites'] === [], '刪除沒有生效（DELETE）');
+            $assert(count($r['history']) >= 3 && $r['history'][0]['to'] === '（刪除）' && $r['history'][0]['actor'] === 'selftest', '站點的異動紀錄不對（新增、修改、刪除各一筆）');
+            // 前綴篩選（LIKE … ESCAPE '!'）與鎖定讀取（SELECT … FOR UPDATE）第一次對真實的 MariaDB 跑；_ 是 LIKE 的萬用字元，要被當成字面意思
+            $all = $settingsRepo->recentHistory(1000000);
+            $assert(count($settingsRepo->recentHistory(1000000, null, 'site.')) === count(array_filter($all, static fn ($h) => strncmp($h['skey'], 'site.', 5) === 0)), '依前綴篩選異動紀錄的 SQL（LIKE … ESCAPE）結果不對');
+            $assert($settingsRepo->recentHistory(10, null, 'si_e.') === [] && $settingsRepo->recentHistory(10, null, 'si%') === [], '前綴裡的 _ 與 % 沒有被當成字面意思（跳脫沒有生效）');
+            $assert($settingsRepo->allForUpdate() === $settingsRepo->all(), '鎖定讀取（SELECT … FOR UPDATE）的結果與一般讀取不同');
+        });
     } finally {
         if ($pdo->inTransaction()) {
             $pdo->rollBack();
@@ -210,6 +230,15 @@ try {
         $assert(count($s['users']) >= 1, 'LibreNMS 至少有一個帳號（你自己），結果是空的');
         $b = (new IdentityService())->build($s['users'], $s['roles'], $s['twofactor'], $s['last_logins'], $s['authlog_oldest'], ['last_date' => null, 'owner' => null, 'period_days' => 90, 'recorded' => false, 'invalid' => false], $H);
         $assert($b['summary']['ok'] && $b['roles']['ok'] && $b['two_factor']['ok'] && $b['least_privilege']['ok'], '帳號統計算不出來');
+    });
+    // 站點靠設備 IP 歸類：devices.ip 是 varbinary(16)、overwrite_ip 是文字，第一次對真實的 LibreNMS 讀它們（只讀）
+    $check('設備與站點：devices.ip／overwrite_ip 讀得出來，位址都能轉成 IPv4 文字或略過（只讀）', function () use ($assert) {
+        $assert(ioc_fleet() !== null, '設備清單讀不到（看 PHP 的錯誤 log，訊息以 [ioc] devices 開頭；devices.ip、devices.overwrite_ip 欄位存在嗎？）');
+        $rows = Illuminate\Support\Facades\DB::table('devices')->where('disabled', 0)->where('ignore', 0)->limit(500)->get(['hostname', 'ip', 'overwrite_ip']);
+        foreach ($rows as $r) {
+            $ip = Fleet::deviceIp($r->overwrite_ip, $r->ip, $r->hostname);
+            $assert($ip === null || filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) !== false, '設備 IP 轉換出不合法的值：' . $ip);
+        }
     });
     $check('身分與稽核：稽核軌跡的四個來源都讀得到（含 /var/log/oracle-admin.log 的權限，只讀）', function () use ($assert, $H) {
         $a = ioc_audit_sources();

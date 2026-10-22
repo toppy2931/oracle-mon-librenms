@@ -61,18 +61,7 @@ final class IpNets
      */
     public static function parseInput(string $text): array
     {
-        $errors = [];
-        $nets   = [];
-        $tokens = preg_split('/[\s,;，；]+/u', trim($text), -1, PREG_SPLIT_NO_EMPTY) ?: [];
-        foreach ($tokens as $t) {
-            $n = self::normalize($t);
-            if ($n === null) {
-                $errors[] = '「' . mb_substr($t, 0, 40) . '」不是合法的 IPv4 網段（寫成 10.0.0.0/8 這樣，前綴長度 ' . self::MIN_BITS . '～32）';
-                continue;
-            }
-            $nets[$n] = true;
-        }
-        $nets = array_keys($nets);
+        ['nets' => $nets, 'errors' => $errors] = self::parseList($text);
         if ($errors === [] && $nets === []) {
             $errors[] = '至少要有一個內部網段';
         }
@@ -85,8 +74,32 @@ final class IpNets
         if ($errors !== []) {
             return ['nets' => [], 'errors' => $errors];
         }
-        usort($nets, static fn ($a, $b) => self::parse($a)[0] <=> self::parse($b)[0] ?: self::parse($a)[1] <=> self::parse($b)[1]);
         return ['nets' => $nets, 'errors' => []];
+    }
+
+    /**
+     * 管理者填的文字（一行一個，也容許逗號、分號或空白分隔）→ 逐個整理過的網段（依位址排序、去重），
+     * 與每個不合法網段的中文錯誤。只做格式整理，不檢查數量與空白：上限因用途不同（內部網段最多 10 個且展開後 ≤ 256 項，
+     * 站點每個最多 8 個），由呼叫端各自檢查。內部網段（parseInput）與站點的網段（Sites::parseNets）共用這一份。
+     *
+     * @return array{nets:string[],errors:string[]} 有錯誤時 nets 只含合法的那幾個，呼叫端不能拿來用
+     */
+    public static function parseList(string $text): array
+    {
+        $errors = [];
+        $nets   = [];
+        $tokens = preg_split('/[\s,;，；]+/u', trim($text), -1, PREG_SPLIT_NO_EMPTY) ?: [];
+        foreach ($tokens as $t) {
+            $n = self::normalize($t);
+            if ($n === null) {
+                $errors[] = '「' . mb_substr($t, 0, 40) . '」不是合法的 IPv4 網段（寫成 10.0.0.0/8 這樣，前綴長度 ' . self::MIN_BITS . '～32）';
+                continue;
+            }
+            $nets[$n] = true;
+        }
+        $nets = array_keys($nets);
+        usort($nets, static fn ($a, $b) => self::parse($a)[0] <=> self::parse($b)[0] ?: self::parse($a)[1] <=> self::parse($b)[1]);
+        return ['nets' => $nets, 'errors' => $errors];
     }
 
     /**

@@ -6,8 +6,10 @@ namespace Ioc;
 /**
  * LibreNMS 設備清單的彙整：資產數、站點、可用率。
  *
- * 「站點」＝LibreNMS 設備的「位置」（Location，設備設定裡指定）。沒有指定位置的設備不屬於任何站點，
- * 另外計數並在畫面提醒，不能假裝成某個站點（缺資料就說缺，OPS-006）。
+ * 「站點」決定的順序：1) 設備的 IP 落在設定頁自訂站點（Sites）的網段裡 → 該站點（重疊取最長前綴）；
+ * 2) 否則是 LibreNMS 設備的「位置」（Location，設備設定裡指定；與設定好的站點同名就合併，不分大小寫）。
+ * 兩者都沒有的設備不屬於任何站點，另外計數並在畫面提醒，不能假裝成某個站點（缺資料就說缺，OPS-006）。
+ * 沒設定任何站點時（$sites 是 null 或空的），行為與只有 LibreNMS 位置時完全一樣。
  * 站點的異常等級只看設備：該站點離線設備的比例（0＝正常，<25%＝輕微，<50%＝中度，其餘＝嚴重）。
  */
 final class Fleet
@@ -41,14 +43,18 @@ final class Fleet
     private array $devices = [];
     /** @var array<int,array<string,mixed>>|null */
     private ?array $sitesCache = null;
+    private Sites $sites;
 
     /**
      * @param array<int,array<string,mixed>> $rows 每台設備：name、aliases（hostname、sysName…，用來對應事件案的主機）、
-     *        type、status（1＝正常）、reason、last_polled、location（沒有則 null 或空字串）、lat、lng、avail_1d、avail_7d
+     *        type、status（1＝正常）、reason、last_polled、location（沒有則 null 或空字串）、lat、lng、avail_1d、avail_7d、
+     *        ip（IPv4 字串，算不出來是 null；見 deviceIp()）
      * @param string $sourceTz last_polled 這類沒帶時區的時間屬於哪個時區（LibreNMS 是主機本地時間）
+     * @param Sites|null $sites 設定頁自訂的站點；null＝沒有（只用 LibreNMS 位置）
      */
-    public function __construct(array $rows, string $sourceTz = 'UTC')
+    public function __construct(array $rows, string $sourceTz = 'UTC', ?Sites $sites = null)
     {
+        $this->sites = $sites ?? new Sites();
         foreach ($rows as $r) {
             $lat = isset($r['lat']) && is_numeric($r['lat']) ? (float) $r['lat'] : null;
             $lng = isset($r['lng']) && is_numeric($r['lng']) ? (float) $r['lng'] : null;
@@ -56,20 +62,49 @@ final class Fleet
                 $lat = $lng = null;
             }
             $loc = self::realLocation((string) ($r['location'] ?? ''));
+            $ip  = self::ipv4($r['ip'] ?? null);
+            // 網段優先；沒符合才用 LibreNMS 的位置，位置與設定好的站點同名時用設定的寫法（兩邊才會合併成同一個站點）
+            $site = ($ip === null ? null : $this->sites->siteOf($ip)) ?? ($loc === null ? null : ($this->sites->canonicalName($loc) ?? $loc));
             $this->devices[] = [
+                'site'        => $site,
                 'name'        => (string) ($r['name'] ?? ''),
                 'aliases'     => array_values(array_filter(array_map(static fn ($a) => strtolower(trim((string) $a)), (array) ($r['aliases'] ?? [])))),
                 'group'       => self::group((string) ($r['type'] ?? '')),
                 'up'          => (int) ($r['status'] ?? 0) === 1,
                 'reason'      => (string) ($r['reason'] ?? ''),
                 'last_polled' => Time::toTaipei(isset($r['last_polled']) ? (string) $r['last_polled'] : null, 'Y-m-d H:i:s', $sourceTz),
-                'location'    => $loc,
                 'lat'         => $lat,
                 'lng'         => $lng,
                 'avail_1d'    => isset($r['avail_1d']) && is_numeric($r['avail_1d']) ? (float) $r['avail_1d'] : null,
                 'avail_7d'    => isset($r['avail_7d']) && is_numeric($r['avail_7d']) ? (float) $r['avail_7d'] : null,
             ];
         }
+    }
+
+    /** 設備 IP 當成 IPv4 字串；不是合法的 IPv4（含 IPv6、空字串、null）回傳 null。 */
+    private static function ipv4($ip): ?string
+    {
+        $s = is_string($ip) ? trim($ip) : '';
+        return $s !== '' && filter_var($s, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) !== false ? $s : null;
+    }
+
+    /**
+     * LibreNMS 設備的 IPv4 位址，依序：使用者指定的 overwrite_ip → devices.ip（resolver 解析的結果，資料庫存的是
+     * inet_pton 的二進位，用查詢建構器讀到的是原始位元組：4 位元組是 IPv4，16 位元組是 IPv6 略過，因為站點網段只認 IPv4）→
+     * hostname 本身若是 IPv4。都沒有（IPv6、沒解析過、hostname 是網域名稱）回傳 null，這台設備就只能靠 LibreNMS 位置歸站點。
+     *
+     * @param mixed $packedIp devices.ip 的原始值
+     */
+    public static function deviceIp(?string $overwriteIp, $packedIp, ?string $hostname): ?string
+    {
+        $fromPacked = is_string($packedIp) && strlen($packedIp) === 4 ? inet_ntop($packedIp) : null;
+        foreach ([$overwriteIp, $fromPacked === false ? null : $fromPacked, $hostname] as $candidate) {
+            $ip = self::ipv4($candidate);
+            if ($ip !== null) {
+                return $ip;
+            }
+        }
+        return null;
     }
 
     /** 有效的站點名稱；空白或 SNMP 預設值回傳 null（視為沒有指定位置）。 */
@@ -141,14 +176,43 @@ final class Fleet
         return ['total' => $this->total(), 'up' => $this->up(), 'down_list' => $down];
     }
 
-    /** 沒有指定位置的設備台數。 */
+    /** 沒有歸屬站點的設備台數（IP 不在任何站點的網段內，也沒有有效的 LibreNMS 位置）。 */
     public function unlocated(): int
     {
-        return count(array_filter($this->devices, static fn ($d) => $d['location'] === null));
+        return count(array_filter($this->devices, static fn ($d) => $d['site'] === null));
+    }
+
+    /** 設定頁有沒有自訂站點（畫面的說明文字要跟著換：有自訂站點時，「站點」不再只是 LibreNMS 的位置）。 */
+    public function hasConfiguredSites(): bool
+    {
+        return !$this->sites->isEmpty();
     }
 
     /**
-     * 站點（有指定位置的設備，依位置名稱分組），依名稱排序。
+     * 設定好、卻沒有任何設備歸進去的站點名稱（網段可能填錯，或那個網段裡沒有被監控的設備）。
+     *
+     * @return string[]
+     */
+    public function emptyConfiguredSites(): array
+    {
+        $used = [];
+        foreach ($this->devices as $d) {
+            if ($d['site'] !== null) {
+                $used[$d['site']] = true;
+            }
+        }
+        $out = [];
+        foreach ($this->sites->all() as $s) {
+            if (!isset($used[$s['name']])) {
+                $out[] = $s['name'];
+            }
+        }
+        sort($out);
+        return $out;
+    }
+
+    /**
+     * 站點（有歸屬的設備，依站點名稱分組；沒有設備歸進去的站點不列），依名稱排序。
      *
      * @return array<int,array{name:string,devices:int,up:int,down:int,level:string,level_label:string,lat:?float,lng:?float,issues:string}>
      */
@@ -163,11 +227,11 @@ final class Fleet
     {
         $by = [];
         foreach ($this->devices as $d) {
-            if ($d['location'] === null) {
+            if ($d['site'] === null) {
                 continue;
             }
-            $s = &$by[$d['location']];
-            $s ??= ['name' => $d['location'], 'devices' => 0, 'up' => 0, 'lat' => null, 'lng' => null];
+            $s = &$by[$d['site']];
+            $s ??= ['name' => $d['site'], 'devices' => 0, 'up' => 0, 'lat' => null, 'lng' => null];
             $s['devices']++;
             $s['up'] += $d['up'] ? 1 : 0;
             $s['lat'] ??= $d['lat'];
@@ -240,8 +304,8 @@ final class Fleet
             return null;
         }
         foreach ($this->devices as $d) {
-            if ($d['location'] !== null && ($h === strtolower($d['name']) || in_array($h, $d['aliases'], true))) {
-                return $d['location'];
+            if ($d['site'] !== null && ($h === strtolower($d['name']) || in_array($h, $d['aliases'], true))) {
+                return $d['site'];
             }
         }
         return null;

@@ -101,6 +101,25 @@ function nvSource(): FakeNetworkSource
             ['src_ip' => '203.0.113.9', 'dstport' => 445, 'card_dst_ip' => 80, 'count' => 80, 'latest_timestamp' => $when],      // 不在內部網段
         ];
     });
+    // 異常連線清單的目的 IP 補查（來源 × 埠 × 目的三層分組）
+    $src->route(static fn ($q, $f, $t, $g) => $g === ['src_ip', 'dstport', 'dst_ip'], static function ($q) {
+        if (strpos($q, 'event_action:fw_deny') !== false) {
+            return [
+                ['src_ip' => '10.0.0.8', 'dstport' => 445, 'dst_ip' => '10.0.0.1', 'count' => 150],
+                ['src_ip' => '10.0.0.11', 'dstport' => 22, 'dst_ip' => '10.0.0.2', 'count' => 3],
+            ];
+        }
+        return [
+            ['src_ip' => '10.0.0.5', 'dstport' => 445, 'dst_ip' => '10.0.0.30', 'count' => 50],
+            ['src_ip' => '10.0.0.5', 'dstport' => 445, 'dst_ip' => '10.0.0.31', 'count' => 50],
+            ['src_ip' => '10.0.0.5', 'dstport' => 445, 'dst_ip' => '10.0.0.29', 'count' => 60],
+            ['src_ip' => '10.0.0.5', 'dstport' => 445, 'dst_ip' => '10.0.0.28', 'count' => 20],
+            ['src_ip' => '10.0.0.5', 'dstport' => 445, 'dst_ip' => '203.0.113.50', 'count' => 999],   // 外部位址：不列
+            ['src_ip' => '10.0.0.5', 'dstport' => 445, 'dst_ip' => null, 'count' => 999],             // 缺值：不列
+            ['src_ip' => '10.0.0.5', 'dstport' => 22, 'dst_ip' => '10.0.0.77', 'count' => 1000],      // 清單上沒有的（來源, 埠）：不能混進別列
+            ['src_ip' => '10.0.0.6', 'dstport' => 3389, 'dst_ip' => '10.0.0.40', 'count' => 12],
+        ];
+    });
     return $src;
 }
 
@@ -352,7 +371,7 @@ test('內網可視性：查詢條件——一律用絕對時間、排除範例�
     $src = nvSource();
     nvBuild($src);
     $calls = $src->calls;
-    assertSame(21, count($calls), '涵蓋 1＋熱門來源 1＋異常 2＋前期 SMB 2＋IDS 1＋趨勢 14');
+    assertSame(23, count($calls), '涵蓋 1＋熱門來源 1＋異常 2＋目的 IP 補查 2＋前期 SMB 2＋IDS 1＋趨勢 14');
     assertSame(['(log_type:firewall) AND NOT ioc_demo:true', nvIso(NV_NOW - 86400), nvIso(NV_NOW), ['cat']], [$calls[0]['q'], $calls[0]['from'], $calls[0]['to'], $calls[0]['groupBy']], '第一個查詢是涵蓋檢查');
     foreach ($calls as $c) {
         assertTrue(substr($c['q'], -22) === ' AND NOT ioc_demo:true', '每個查詢都要排除範例資料：' . $c['q']);
@@ -580,6 +599,87 @@ test('內網可視性：沒有連接埠的協定（dstport 是 0，例如 ICMP�
     assertSame('橫向探測：連到 40 個不同的內部主機，協定沒有連接埠（例如 ICMP）（400 筆連線紀錄）', $one['behavior']);
     assertSame('src_ip:"10.0.0.5"', $one['evidence_query']);
     assertSame('medium', $one['level']);
+});
+
+/** 異常連線清單的目的 IP 補查（來源 × 埠 × 目的三層分組）的那幾次查詢。 */
+function nvDstCalls(FakeNetworkSource $src): array
+{
+    return array_values(array_filter($src->calls, static fn ($c) => $c['groupBy'] === ['src_ip', 'dstport', 'dst_ip']));
+}
+
+test('內網可視性：異常連線帶目的 IP——最多 3 個、依筆數再依位址排序；外部位址與缺值不列；distinct 仍是真正的目的數', function () {
+    $items = nvBuild(nvSource())['anomalies']['data']['items'];
+    assertSame(['10.0.0.8', '10.0.0.5', '10.0.0.6', '10.0.0.11'], array_column($items, 'src_ip'));
+    assertSame([['10.0.0.1'], ['10.0.0.29', '10.0.0.30', '10.0.0.31'], ['10.0.0.40'], ['10.0.0.2']], array_column($items, 'dst_ips'),
+        '探測的 5 個目的只留 3 個（筆數 60、50、50，同筆數依位址）；203.0.113.50 與缺值不列；(10.0.0.5, 22) 的目的不混進 445 那一列');
+    assertSame([1, 30, 12, 1], array_column($items, 'distinct'), '目的主機數是前面分組算出的真實數量，不是樣本數');
+});
+
+test('內網可視性：目的 IP 補查只限清單上的來源與埠，被擋下與探測各一次，帶內部網段與噪音埠過濾', function () {
+    $src = nvSource();
+    nvBuild($src);
+    $calls = nvDstCalls($src);
+    assertSame(2, count($calls), '兩類各一次');
+    [$probe, $deny] = strpos($calls[0]['q'], 'fw_deny') === false ? [$calls[0], $calls[1]] : [$calls[1], $calls[0]];
+    $internal = static fn (string $f) => IpNets::lucene($f, IpNets::DEFAULTS);
+    foreach (['cat:"traffic:forward"', $internal('src_ip') . ' AND ' . $internal('dst_ip'), 'NOT dstport:(67 OR 68 OR 137 OR 138 OR 1900 OR 5353 OR 5355)',
+              'src_ip:("10.0.0.5" OR "10.0.0.6")', 'dstport:(445 OR 3389)'] as $part) {
+        assertTrue(strpos($probe['q'], $part) !== false, '探測補查要有 ' . $part . ' ／ ' . $probe['q']);
+    }
+    foreach (['log_type:firewall AND event_action:fw_deny', $internal('src_ip') . ' AND ' . $internal('dst_ip'), 'src_ip:("10.0.0.8" OR "10.0.0.11")', 'dstport:(445 OR 22)'] as $part) {
+        assertTrue(strpos($deny['q'], $part) !== false, '被擋下補查要有 ' . $part . ' ／ ' . $deny['q']);
+    }
+    assertSame([['count'], NetworkVisibilityService::LIST_LIMIT, nvIso(NV_NOW - 86400), nvIso(NV_NOW)], [$probe['metrics'], $probe['limit'], $probe['from'], $probe['to']], '一樣用絕對的 24 小時範圍');
+});
+
+test('內網可視性：目的 IP 補查的查詢次數——只有一類才一次，沒有異常就不查', function () {
+    $src = nvAnomalyRows(nvSource(), [], [nvProbeRow('10.0.0.8', 445, 1, 150)]);
+    $d = nvBuild($src);
+    $calls = nvDstCalls($src);
+    assertSame(1, count($calls));
+    assertTrue(strpos($calls[0]['q'], 'event_action:fw_deny') !== false);
+    assertSame([['10.0.0.1']], array_column($d['anomalies']['data']['items'], 'dst_ips'));
+
+    $none = nvAnomalyRows(nvSource(), [], []);
+    nvBuild($none);
+    assertSame(0, count(nvDstCalls($none)), '沒有項目要列就不多打查詢');
+});
+
+test('內網可視性：目的 IP 補查失敗不拖垮清單——只是少了 IP，畫面退回「N 個內部主機」；只壞一類時另一類照常', function () {
+    $src = nvSource();
+    $src->route(static fn ($q, $f, $t, $g) => $g === ['src_ip', 'dstport', 'dst_ip'], static function () {
+        throw new GraylogUnavailable('Graylog 回應 HTTP 400');
+    });
+    $d = nvBuild($src);
+    assertTrue($d['anomalies']['ok'], '清單本身還是好的');
+    $a = $d['anomalies']['data'];
+    assertSame([4, [[], [], [], []], [1, 30, 12, 1]], [$a['total'], array_column($a['items'], 'dst_ips'), array_column($a['items'], 'distinct')]);
+    assertSame('Graylog 回應 HTTP 400', $a['dst_error'], '失敗原因要帶給畫面，不能默默少了 IP');
+    assertTrue($d['kpi'] !== [] && nvKpi($d, 'anomalies')['value'] === 4, 'KPI 不受影響');
+    assertSame(null, nvBuild(nvSource())['anomalies']['data']['dst_error'], '沒有失敗就是 null');
+
+    $half = nvSource();
+    $half->route(static fn ($q, $f, $t, $g) => $g === ['src_ip', 'dstport', 'dst_ip'] && strpos($q, 'fw_deny') === false, static function () {
+        throw new GraylogUnavailable('逾時');
+    });
+    $a = nvBuild($half)['anomalies']['data'];
+    assertSame([['10.0.0.1'], [], [], ['10.0.0.2']], array_column($a['items'], 'dst_ips'));
+    assertSame('逾時', $a['dst_error']);
+});
+
+test('內網可視性：補查成功卻有幾列一個目的也對不上——要說明（不能默默只顯示數量，讓人以為目的 IP 功能壞了）；全部對上就沒有說明', function () {
+    // 10.0.0.50 的目的在假資料裡沒有（例如那幾筆日誌缺目的埠欄位）；10.0.0.5 對得上
+    $d = nvBuild(nvAnomalyRows(nvSource(), [nvProbeRow('10.0.0.5', 445, 30, 120), nvProbeRow('10.0.0.50', 445, 20, 100)], []));
+    $a = $d['anomalies']['data'];
+    assertSame(['10.0.0.5' => 3, '10.0.0.50' => 0], array_column(array_map(static fn ($i) => ['ip' => $i['src_ip'], 'n' => count($i['dst_ips'])], $a['items']), 'n', 'ip'));
+    assertSame('有 1 列沒有查到目的 IP（例如那幾筆日誌缺目的埠欄位）', $a['dst_error']);
+    assertSame(null, nvBuild(nvAnomalyRows(nvSource(), [nvProbeRow('10.0.0.5', 445, 30, 120)], []))['anomalies']['data']['dst_error'], '全部對上就沒有說明');
+    // 補查本身失敗時說的是失敗原因，不是這句
+    $src = nvSource();
+    $src->route(static fn ($q, $f, $t, $g) => $g === ['src_ip', 'dstport', 'dst_ip'], static function () {
+        throw new GraylogUnavailable('逾時');
+    });
+    assertSame('逾時', nvBuild($src)['anomalies']['data']['dst_error']);
 });
 
 test('內網可視性：日誌根本沒有 dstport 欄位（每一列的埠都是缺值）——異常區塊與 SMB 標「無法取得」，不是綠色的 0；其他區塊照常', function () {

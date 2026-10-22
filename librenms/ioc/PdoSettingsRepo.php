@@ -19,8 +19,19 @@ final class PdoSettingsRepo implements SettingsRepo
 
     public function all(): array
     {
+        return $this->read('');
+    }
+
+    public function allForUpdate(): array
+    {
+        return $this->read(' FOR UPDATE');
+    }
+
+    /** @return array<string,array{value:string,updated_by:string,updated_at:string}> */
+    private function read(string $suffix): array
+    {
         $out = [];
-        foreach ($this->pdo->query('SELECT skey, svalue, updated_by, updated_at FROM ioc_settings') as $r) {
+        foreach ($this->pdo->query('SELECT skey, svalue, updated_by, updated_at FROM ioc_settings' . $suffix) as $r) {
             $out[(string) $r['skey']] = ['value' => (string) $r['svalue'], 'updated_by' => (string) $r['updated_by'], 'updated_at' => (string) $r['updated_at']];
         }
         return $out;
@@ -35,15 +46,20 @@ final class PdoSettingsRepo implements SettingsRepo
         )->execute(['k' => $key, 'v' => $value, 'u' => $actor, 't' => $utc, 'v2' => $value, 'u2' => $actor, 't2' => $utc]);
     }
 
+    public function delete(string $key): void
+    {
+        $this->pdo->prepare('DELETE FROM ioc_settings WHERE skey = :k')->execute(['k' => $key]);
+    }
+
     public function addHistory(string $utc, string $actor, string $key, string $old, string $new): void
     {
         $this->pdo->prepare('INSERT INTO ioc_settings_history (ts, actor, skey, old_value, new_value) VALUES (:t, :a, :k, :o, :n)')
             ->execute(['t' => $utc, 'a' => $actor, 'k' => $key, 'o' => $old, 'n' => $new]);
     }
 
-    public function recentHistory(int $limit, ?array $keys = null): array
+    public function recentHistory(int $limit, ?array $keys = null, ?string $keyPrefix = null): array
     {
-        $where  = '';
+        $conds  = [];
         $params = [];
         if ($keys !== null) {
             if ($keys === []) {
@@ -54,8 +70,14 @@ final class PdoSettingsRepo implements SettingsRepo
                 $marks[] = ':k' . $i;
                 $params['k' . $i] = (string) $k;
             }
-            $where = ' WHERE skey IN (' . implode(', ', $marks) . ')';
+            $conds[] = 'skey IN (' . implode(', ', $marks) . ')';
         }
+        if ($keyPrefix !== null) {
+            // 前綴裡的 % _ 是 LIKE 的萬用字元，要跳脫成字面意思。跳脫字元用 !（反斜線在 NO_BACKSLASH_ESCAPES 模式下意思不同）
+            $conds[] = "skey LIKE :prefix ESCAPE '!'";
+            $params['prefix'] = str_replace(['!', '%', '_'], ['!!', '!%', '!_'], $keyPrefix) . '%';
+        }
+        $where = $conds === [] ? '' : ' WHERE ' . implode(' AND ', $conds);
         $st = $this->pdo->prepare('SELECT ts, actor, skey, old_value, new_value FROM ioc_settings_history' . $where . ' ORDER BY id DESC LIMIT :lim');
         foreach ($params as $k => $v) {
             $st->bindValue(':' . $k, $v);

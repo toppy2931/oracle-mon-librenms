@@ -19,10 +19,23 @@ class MemorySettingsRepo implements SettingsRepo
         return $this->rows;
     }
 
+    public int $locks = 0;
+
+    public function allForUpdate(): array
+    {
+        $this->locks++;          // 測試用：確認「讀了再寫」的流程有走鎖定讀取
+        return $this->rows;
+    }
+
     public function put(string $key, string $value, string $actor, string $utc): void
     {
         $this->puts++;
         $this->rows[$key] = ['value' => $value, 'updated_by' => $actor, 'updated_at' => $utc];
+    }
+
+    public function delete(string $key): void
+    {
+        unset($this->rows[$key]);
     }
 
     public function addHistory(string $utc, string $actor, string $key, string $old, string $new): void
@@ -33,11 +46,14 @@ class MemorySettingsRepo implements SettingsRepo
         $this->history[] = ['ts' => $utc, 'actor' => $actor, 'skey' => $key, 'old_value' => $old, 'new_value' => $new];
     }
 
-    public function recentHistory(int $limit, ?array $keys = null): array
+    public function recentHistory(int $limit, ?array $keys = null, ?string $keyPrefix = null): array
     {
         $rows = array_reverse($this->history);
         if ($keys !== null) {
             $rows = array_values(array_filter($rows, static fn ($h) => in_array($h['skey'], $keys, true)));
+        }
+        if ($keyPrefix !== null) {
+            $rows = array_values(array_filter($rows, static fn ($h) => strncmp($h['skey'], $keyPrefix, strlen($keyPrefix)) === 0));
         }
         return array_slice($rows, 0, max(1, $limit));
     }

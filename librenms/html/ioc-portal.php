@@ -180,10 +180,12 @@ code{background:#0a1423;border:1px solid var(--line);border-radius:6px;padding:2
 .toast{position:fixed;right:16px;bottom:16px;max-width:420px;padding:10px 14px;border-radius:10px;background:#1b4a86;color:#fff;display:none;z-index:9}
 .toast.err{background:#8a2b2b}
 footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
+.site-row{display:grid;grid-template-columns:minmax(140px,1fr) minmax(200px,2fr) auto;gap:8px;align-items:start;margin-bottom:8px}
+.site-row input,.site-row textarea{width:100%;box-sizing:border-box}
 @media(max-width:1280px){.kpis6,.kpis5{grid-template-columns:repeat(3,minmax(0,1fr))}.kpis4{grid-template-columns:repeat(2,minmax(0,1fr))}.three{grid-template-columns:1fr}}
 @media(max-width:1180px){.two,.even,.split{grid-template-columns:1fr}}
 @media(max-width:900px){.app{flex-direction:column}.side{position:static;width:auto;height:auto;padding:10px}.nav{flex-direction:row;overflow-x:auto}.nav button{white-space:nowrap;width:auto}.nav .sep{display:none}.main{padding:10px}}
-@media(max-width:720px){.kpis6,.kpis5,.kpis4,.kpis2{grid-template-columns:repeat(2,minmax(0,1fr))}.sumrow{grid-template-columns:repeat(2,minmax(0,1fr))}}
+@media(max-width:720px){.kpis6,.kpis5,.kpis4,.kpis2{grid-template-columns:repeat(2,minmax(0,1fr))}.sumrow{grid-template-columns:repeat(2,minmax(0,1fr))}.site-row{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -207,7 +209,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     <main id="view-network" hidden></main>
     <main id="view-settings" hidden></main>
     <main id="view-identity" hidden></main>
-    <footer>日誌來自 Graylog（唯讀帳號），設備與站點（LibreNMS 的「位置」）來自 LibreNMS，事件案存在 LibreNMS 資料庫。灰色的「尚未提供」項目還沒有資料來源，不會顯示假數字。</footer>
+    <footer>日誌來自 Graylog（唯讀帳號），設備來自 LibreNMS，站點依設定頁的站點網段歸類（沒有符合時用 LibreNMS 的「位置」），事件案存在 LibreNMS 資料庫。灰色的「尚未提供」項目還沒有資料來源，不會顯示假數字。</footer>
   </div>
 </div>
 <div class="toast" id="toast" role="status"></div>
@@ -566,10 +568,16 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     const noCoord = d.items.filter((s) => s.lat === null || s.lng === null).length;
     return [
       h('div', { class: 'counts' }, Object.keys(SITE_LABEL).map((lv) => h('div', { class: 'cnt' }, h('b', { style: 'color:' + SITE_COLOR[lv] }, String(d.counts[lv])), SITE_LABEL[lv]))),
-      d.has_locations ? siteMap(d.items) : h('p', { class: 'note warn' }, '這些位置在 LibreNMS 裡沒有座標，無法畫散佈圖（設備位置設定 → 座標）。'),
+      // 站點讀不到設定時，一定要說：不然數字突然變了卻沒有原因
+      d.warning ? h('p', { class: 'note warn' }, d.warning) : null,
+      d.has_locations ? siteMap(d.items) : h('p', { class: 'note warn' }, '這些站點沒有座標，無法畫散佈圖（座標來自設備在 LibreNMS 的位置設定 → 座標；只用網段定義的站點沒有座標）。'),
       // 沒座標的站點不在圖上；不說的話會被誤認為那些站點不存在或沒問題（上面的計數與排行都有算進去）
-      d.has_locations && noCoord > 0 ? h('p', { class: 'note warn' }, '另有 ' + noCoord + ' 個站點在 LibreNMS 沒有座標，沒有畫在圖上；上面的計數與下方的排行有算進去。') : null,
-      d.unlocated > 0 ? h('p', { class: 'note warn' }, '另有 ' + d.unlocated + ' 台設備沒有有效的位置（未指定，或是 Unknown 這類 SNMP 預設值），不屬於任何站點。') : null,
+      d.has_locations && noCoord > 0 ? h('p', { class: 'note warn' }, '另有 ' + noCoord + ' 個站點沒有座標，沒有畫在圖上；上面的計數與下方的排行有算進去。') : null,
+      d.unlocated > 0 ? h('p', { class: 'note warn' }, d.configured
+        ? '另有 ' + d.unlocated + ' 台設備沒有歸屬站點（IP 不在任何站點的網段內，也沒有有效的 LibreNMS 位置），不屬於任何站點。'
+        : '另有 ' + d.unlocated + ' 台設備沒有有效的位置（未指定，或是 Unknown 這類 SNMP 預設值），不屬於任何站點。') : null,
+      // 設定了卻沒有設備歸進去的站點不會出現在上面，要說明（多半是網段填錯）
+      d.empty_sites && d.empty_sites.length ? h('p', { class: 'note warn' }, '設定頁的這些站點沒有任何設備歸進去，所以沒有列在上面（請檢查網段有沒有填對）：' + d.empty_sites.join('、')) : null,
       h('p', { class: 'note' }, '站點異常等級看離線設備的比例：<25% 輕微、<50% 中度、≥50% 嚴重。散佈圖沒有底圖（離線環境不載入外部地圖）。'),
     ];
   }
@@ -610,7 +618,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
       h('section', { class: 'grid three' },
         section('整體風險概況', '分數越高越好', renderRisk(L.risk)),
         section('近 30 日新建事件案', '依嚴重性', renderTrend(L.trend)),
-        section('站點分佈', '依 LibreNMS 的位置', renderSites(L.sites))),
+        section('站點分佈', '依設定頁的站點網段，沒有符合的設備依 LibreNMS 的位置', renderSites(L.sites))),
       h('section', { class: 'grid even' },
         section('站點健康度排行', '離線設備比例高的在前', renderRanking(L.ranking)),
         section('最新事件', '事件案，最近更新的在前', renderLatest(L.latest_cases))),
@@ -869,13 +877,15 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
   let settingsSeq = 0;   // 連續觸發載入時，只採用最後一次的回應
   let netSettings = null; // 內部網段的設定（伺服器回的 network）
   let netBox = null;      // 「內部網段」那一塊。風險門檻存檔會重畫整頁，這一塊要沿用同一個節點，免得填到一半的網段被清掉
+  let siteSettings = null; // 站點與網段的設定（伺服器回的 sites）
+  let siteBox = null;      // 「站點與網段」那一塊，理由同上
   async function loadSettings() {
     const seq = ++settingsSeq;
     const root = $('#view-settings');
     root.replaceChildren(h('p', { class: 'note' }, '載入中…'));
     try {
       const r = await api('/ioc-settings.php', { action: 'get' });
-      if (seq === settingsSeq) { netSettings = r.network; netBox = null; renderSettings(r.risk); }   // 重新載入：兩塊都用伺服器的最新值
+      if (seq === settingsSeq) { netSettings = r.network; siteSettings = r.sites; netBox = null; siteBox = null; renderSettings(r.risk); }   // 重新載入：各塊都用伺服器的最新值
     } catch (e) {
       if (seq === settingsSeq) root.replaceChildren(unavailable(e.message));
     }
@@ -943,9 +953,10 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
       ? table(['時間', '操作者', '項目', '原值', '新值'], s.history.map((x) => [x.time, x.actor, x.label, x.from, x.to]))
       : h('p', { class: 'note' }, '還沒有人調整過門檻。');
     if (!netBox) { netBox = h('div'); renderNetworkSettings(netBox); }
+    if (!siteBox) { siteBox = h('div'); renderSiteSettings(siteBox); }
     root.replaceChildren(h('section', { class: 'grid even' },
       section('風險等級門檻', '用來把整體風險分數分成低、中、高', form),
-      section('異動紀錄', '最近 10 筆，誰在什麼時候改的', history)), netBox);
+      section('異動紀錄', '最近 10 筆，誰在什麼時候改的', history)), netBox, siteBox);
     if (focusSave && CAN_HANDLE) save.focus();
   }
 
@@ -989,6 +1000,76 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     box.replaceChildren(h('section', { class: 'grid even' },
       section('內部網段', '內網可視性用來分「內部對內部」的流量', form),
       section('內部網段的異動紀錄', '最近 10 筆，誰在什麼時候改的', history)));
+    if (focusSave && CAN_HANDLE) save.focus();
+  }
+
+  /**
+   * 設定頁的「站點與網段」：總覽把設備依 IP 歸到站點。一個站點一列（名稱＋網段，一行一個），整份一起儲存（新增、修改、刪除）。
+   * 存檔只重畫這一塊，不影響上面填到一半的風險門檻與內部網段。名稱與網段的規則由伺服器驗證，這裡只擋明顯的空白。
+   */
+  function renderSiteSettings(box, focusSave) {
+    const s = siteSettings;
+    if (!s) { box.replaceChildren(); return; }
+    const L = s.limits;
+    const list = h('div');
+    const rows = [];
+    const msg = h('div', { class: 'note warn', role: 'alert' });
+    const save = h('button', { class: 'btn primary', type: 'submit' }, '儲存');
+    const count = h('span', { class: 'note', style: 'margin:0' });
+    const empty = h('p', { class: 'note' }, '還沒有自訂站點。');
+    const addBtn = h('button', { class: 'btn', type: 'button', onclick: () => { addRow(null).name.focus(); } }, '＋ 新增站點');
+    const refresh = () => {
+      count.textContent = rows.length + ' / ' + L.max_sites + ' 個站點';
+      addBtn.disabled = rows.length >= L.max_sites;
+      empty.hidden = rows.length > 0;
+    };
+    const addRow = (site) => {
+      const name = h('input', { type: 'text', maxlength: L.name_max, disabled: !CAN_HANDLE, placeholder: '站點名稱，例如：總部機房', 'aria-label': '站點名稱' });
+      name.value = site ? site.name : '';
+      const area = h('textarea', { rows: 3, disabled: !CAN_HANDLE, spellcheck: 'false', placeholder: '172.16.1.0/24', 'aria-label': '這個站點的網段（一行一個）', style: 'min-height:72px;font-family:monospace' });
+      area.value = site ? site.nets.join('\n') : '';       // 用屬性設值，內容不經過 innerHTML
+      const entry = { id: site ? site.id : null, name, area };
+      const el = h('div', { class: 'site-row' }, h('div', null, name), h('div', null, area),
+        CAN_HANDLE ? h('button', { class: 'btn', type: 'button', onclick: () => { rows.splice(rows.indexOf(entry), 1); el.remove(); refresh(); } }, '刪除') : null);
+      rows.push(entry);
+      list.append(el);
+      refresh();
+      return entry;
+    };
+    s.sites.forEach(addRow);
+
+    const when = s.invalid
+      ? h('p', { class: 'alert' }, '資料庫裡有 ' + s.broken + ' 筆站點設定不合法（可能被手動改過），沒有列在上面。在重新儲存之前，總覽會標明站點設定讀不到、暫時只依 LibreNMS 的位置分站點；儲存之後這些不合法的設定會被移除。')
+      : h('p', { class: 'note' }, s.updated_by ? '最後由 ' + s.updated_by + ' 在 ' + s.updated_at + ' 修改。' : '還沒有人設定過站點。');
+    const form = h('form', { onsubmit: async (ev) => {
+      ev.preventDefault();
+      save.disabled = true; msg.replaceChildren();
+      try {
+        const r = await api('/ioc-settings.php', { action: 'save_sites', sites: rows.map((x) => ({ id: x.id, name: x.name.value, cidrs: x.area.value })) });
+        toast('已儲存站點與網段');
+        siteSettings = r.sites;
+        renderSiteSettings(box, true);
+        loadOverview();                  // 總覽的站點數、分佈與排行要用新設定重算
+      } catch (e) {
+        msg.replaceChildren(...(e.errors && e.errors.length ? e.errors : [e.message]).map((t) => h('div', null, t)));
+        save.disabled = false;
+      }
+    } },
+      h('p', { class: 'note', style: 'margin-top:0' }, '總覽用這裡的設定把設備歸到站點：設備的 IP 落在某個站點的網段內，就屬於那個站點（網段重疊時，前綴長的優先）；'
+        + '沒有符合的設備，才用 LibreNMS 設備上設定的「位置」當站點。網段一行一個，寫成 172.16.1.0/24 這樣（前綴長度 8～32，每個站點最多 '
+        + L.max_nets + ' 個網段，最多 ' + L.max_sites + ' 個站點）。只支援 IPv4；同一個網段只能屬於一個站點。'),
+      list, empty, when,
+      CAN_HANDLE
+        ? h('div', { class: 'toolbar', style: 'margin-top:12px' }, save, addBtn, count,
+            h('span', { class: 'note', style: 'margin:0' }, '改完要按「儲存」才會生效。'))
+        : h('p', { class: 'note warn' }, '你的角色是檢視者（唯讀），只有管理者（admin）能修改站點與網段。'),
+      msg);
+    const history = s.history.length
+      ? table(['時間', '操作者', '原值', '新值'], s.history.map((x) => [x.time, x.actor, x.from, x.to]))
+      : h('p', { class: 'note' }, '還沒有人調整過站點。');
+    box.replaceChildren(h('section', { class: 'grid even' },
+      section('站點與網段', '設備依 IP 歸到站點，總覽的站點數、分佈與排行用它', form),
+      section('站點的異動紀錄', '最近 10 筆，誰在什麼時候改的', history)));
     if (focusSave && CAN_HANDLE) save.focus();
   }
 
@@ -1081,7 +1162,12 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     const lv = { high: '高', medium: '中', low: '低' };
     const heads = ['時間', '來源 → 目的', '行為', '風險'].concat(CAN_HANDLE ? [''] : []);
     const rows = d.items.map((a) => {
-      const flow = a.src_ip + ' → ' + (a.distinct > 0 ? a.distinct + ' 個內部主機' : '內部主機') + (a.port ? '：' + a.port : '');
+      // 有目的 IP 就直接列（最多幾個由伺服器決定，其餘寫「等 N 個」）；補查失敗時 dst_ips 是空的，退回只寫數量
+      const ips = a.dst_ips || [];
+      const dst = ips.length
+        ? ips.join('、') + (a.distinct > ips.length ? ' 等 ' + a.distinct + ' 個' : '')
+        : (a.distinct > 0 ? a.distinct + ' 個內部主機' : '內部主機');
+      const flow = a.src_ip + ' → ' + dst + (a.port ? '：' + a.port : '');
       const btn = createButton({ title: (a.kind === 'probe' ? '內網橫向探測：' : '內部連線被防火牆擋下：') + a.src_ip + (a.port ? '（埠 ' + a.port + '）' : ''),
         severity: a.level, category: a.kind === 'probe' ? 'lateral_probe' : 'fw_internal_block', subject_ip: a.src_ip, evidence_query: a.evidence_query });
       return [a.time, flow, a.behavior, levelBadge(lv[a.level])].concat(CAN_HANDLE ? [btn] : []);
@@ -1089,7 +1175,8 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     return [
       table(heads, rows),
       d.total > d.items.length ? h('p', { class: 'note warn' }, '只列前 ' + d.items.length + ' 筆，共 ' + d.total + ' 筆。') : null,
-      d.capped ? h('p', { class: 'note warn' }, '分組結果碰到查詢上限，可能還有沒列出的來源。') : null];
+      d.capped ? h('p', { class: 'note warn' }, '分組結果碰到查詢上限，可能還有沒列出的來源。') : null,
+      d.dst_error ? h('p', { class: 'note warn' }, '目的主機的 IP 沒有全部查到，沒查到的那幾列只顯示目的主機的數量（清單的其他內容不受影響）：' + d.dst_error) : null];
   }
 
   // ── 身分與稽核（只有 admin）──
