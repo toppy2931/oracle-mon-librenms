@@ -137,7 +137,7 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
       if (current.device_id && !choices.some((d) => Number(d.device_id) === Number(current.device_id))) choices.push(deviceInfo(current));
       const selectingNewDevice = isDraft(current);
       const select = h('select', {
-        'aria-label': '選擇設備', required: true, disabled: !selectingNewDevice,
+        'aria-label': '選擇設備', required: true,
         style: 'width:100%'
       }, h('option', { value: '' }, '請選擇設備'),
         choices.map((d) => h('option', {
@@ -146,6 +146,13 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
           disabled: entries.some((entry) => Number(entry.device_id) === Number(d.device_id) && (!selectingNewDevice || entry !== current)),
         }, d.name + '（' + d.host + '）')));
       select.value = current.device_id ? String(current.device_id) : '';
+      // 已儲存列以唯讀文字呈現，避免看起來像故障的下拉選單；內部仍保留選取值供 SSH 驗證流程使用。
+      const deviceField = selectingNewDevice
+        ? select
+        : h('input', {
+          'aria-label': '已固定設備', type: 'text', readOnly: true,
+          value: deviceInfo(current).name + '（' + deviceInfo(current).host + '）', style: 'width:100%'
+        });
       const model = h('select', { 'aria-label': '設備品牌', style: 'width:100%' }, models.map(([v, title]) => h('option', { value: v }, title)));
       model.value = current.model || 'fortios';
       const username = h('input', { type: 'text', maxlength: 128, autocomplete: 'off', required: true, style: 'width:100%' });
@@ -222,7 +229,7 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
       }); updatePasswordRule();
       editorFields = { select, model, username, password, active };
       editor.replaceChildren(h('fieldset', { style: 'border:1px solid var(--line);border-radius:10px;margin:12px 0;padding:12px' },
-        h('legend', null, '設備備份設定'), label('設備', select),
+        h('legend', null, '設備備份設定'), label(selectingNewDevice ? '設備' : '已固定設備', deviceField),
         selectingNewDevice
           ? note('新增模式：只能選擇尚未納入備份的設備。')
           : note('此設備已儲存，設備名稱與連線位址已固定；如需更換設備，請先移除此筆後再新增。'),

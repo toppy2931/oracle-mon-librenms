@@ -37,7 +37,9 @@ test('已有密碼只顯示沿用提示，不把秘密放回輸入框', async ()
   const password = walk(root).find((e) => e.type === 'password');
   assert.equal(password.value, ''); assert.equal(password.required, false);
   assert.ok(password.placeholder.includes('留白可沿用'));
-  assert.equal(findLabel(root, '選擇設備').disabled, true);
+  const fixedDevice = findLabel(root, '已固定設備');
+  assert.equal(fixedDevice.readOnly, true);
+  assert.ok(fixedDevice.value.includes('機房防火牆'));
   button(root, '＋ 加入設備').onclick();
   const select = walk(root).find((e) => e.attrs['aria-label'] === '選擇設備');
   select.value = '8'; select.listeners.change();
@@ -75,19 +77,19 @@ test('既有設備的身分固定，新增列也不可重選已設定設備', as
   p.devices.push({ device_id: 8, name: '分點防火牆', host: '192.0.2.8' });
   p.devices.push({ device_id: 9, name: '可新增設備', host: '192.0.2.9' });
   const root = h('div'); await create(async () => p).settings(root);
-  const current = findLabel(root, '選擇設備');
-  assert.equal(current.disabled, true);
-  current.value = '8'; current.listeners.change();
+  const current = findLabel(root, '已固定設備');
+  assert.equal(current.readOnly, true);
+  assert.equal(findLabel(root, '選擇設備'), undefined);
   assert.ok(text(walk(root).find((e) => e.tag === 'table')).includes('機房防火牆'));
   assert.ok(!text(walk(root).find((e) => e.tag === 'table')).includes('可新增設備'));
 
   button(root, '＋ 加入設備').onclick();
   const addSelect = findLabel(root, '選擇設備');
-  assert.equal(addSelect.disabled, false);
+  assert.notEqual(addSelect.disabled, true);
   const options = walk(addSelect).filter((e) => e.tag === 'option');
   assert.equal(options.find((e) => e.value === '7').disabled, true);
   assert.equal(options.find((e) => e.value === '8').disabled, true);
-  assert.equal(options.find((e) => e.value === '9').disabled, false);
+  assert.notEqual(options.find((e) => e.value === '9').disabled, true);
 });
 test('新增列選擇設備後立即顯示正確名稱與位址，未選設備不可儲存', async () => {
   const calls = [];
