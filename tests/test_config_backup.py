@@ -229,6 +229,16 @@ class BackupTests(unittest.TestCase):
             self.assertEqual('failed', out['runs'][0]['status'])
         self.assertEqual(1, self.worker.db.execute('SELECT COUNT(*) FROM versions').fetchone()[0])
 
+    def test_oxidized_utc_result_marks_failed_run_complete(self):
+        self.save()
+        self.call('run', device_id=7)
+        dispatched = backup.timestamp(self.worker.db.execute('SELECT dispatched_at FROM runs').fetchone()[0])
+        reported = dispatched.strftime('%Y-%m-%d %H:%M:%S UTC')
+        self.engine.nodes = [{'name': '192.168.10.1', 'last': {
+            'start': reported, 'end': reported, 'status': 'no_connection'}}]
+        result = self.call('tick')
+        self.assertEqual('failed', result['runs'][0]['status'])
+
     def test_tick_schedules_only_due_and_enabled(self):
         self.settings['enabled'] = True
         self.save()

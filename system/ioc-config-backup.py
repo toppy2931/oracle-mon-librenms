@@ -35,6 +35,8 @@ def utcnow():
 def timestamp(value):
     if not isinstance(value, str):
         raise ValueError('時間格式錯誤')
+    if value.endswith(' UTC'):
+        return datetime.strptime(value, '%Y-%m-%d %H:%M:%S UTC').replace(tzinfo=timezone.utc)
     return datetime.fromisoformat(value.replace('Z', '+00:00')).astimezone(timezone.utc)
 
 
@@ -326,9 +328,13 @@ class Worker:
             last = by_name.get(devices.get(run['device_id'], {}).get('host'), {}).get('last') or {}
             status, version, message = None, None, None
             try:
+                started_at = timestamp(last.get('start'))
+                dispatched_at = timestamp(run['dispatched_at'])
+                # Oxidized 的 API 只回傳到秒；派送與完成在同一秒時，以既有
+                # previous_end 防止舊結果誤判，再容許秒級回應完成本次工作。
                 valid = (run['dispatched_at'] is not None and last.get('end') != run['previous_end'] and
-                         timestamp(last.get('start')) >= timestamp(run['dispatched_at']) and
-                         timestamp(last.get('end')) >= timestamp(last.get('start')))
+                         started_at >= dispatched_at.replace(microsecond=0) and
+                         timestamp(last.get('end')) >= started_at)
             except (ValueError, TypeError):
                 valid = False
             if (datetime.now(timezone.utc) - timestamp(run['requested_at'])).total_seconds() > 900:
