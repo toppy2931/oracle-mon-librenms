@@ -20,7 +20,9 @@ namespace Ioc;
  *
  * 限制（畫面也會寫）：只看得到「經過防火牆」的流量；同一個網段內、不經過防火牆的流量看不到（那需要旁路感測器）。
  * 日誌欄位來自這台既有的 FortiGate pipeline（fortigate_normalize 與 fortigate-extract-flow-fields）：
- * cat、dstport、network_bytes（送＋收的位元組數）；換設備廠牌時改下面的 F_* 常數。
+ * cat、dstport 來自那條 pipeline；位元組數是 IOC 自己的防火牆 pipeline 寫的 net_bytes（送出＋收到，規則 ioc-fw-bytes，
+ * 從 CEF 的 out／in 取）——既有 pipeline 的 network_bytes 讀的是 sentbyte／rcvdbyte，這台 FortiGate 的 CEF 沒有，全是 0。
+ * 換設備廠牌時改下面的 F_* 常數。net_bytes 只有 pipeline 套用之後進來的日誌才有，之前的日誌補不回來。
  */
 final class NetworkVisibilityService
 {
@@ -40,11 +42,11 @@ final class NetworkVisibilityService
     public const NOISE_PORTS   = [67, 68, 137, 138, 1900, 5353, 5355];
     public const PORT_NAME     = [22 => 'SSH', 23 => 'Telnet', 135 => 'RPC', 139 => 'NetBIOS', 445 => 'SMB', 3389 => 'RDP', 5985 => 'WinRM', 5986 => 'WinRM'];
 
-    private const F_BYTES   = 'network_bytes';
+    private const F_BYTES   = 'net_bytes';
     private const F_PORT    = 'dstport';
     private const F_CAT     = 'cat';
     private const FORWARD   = 'traffic:forward';
-    private const NO_BYTES  = '轉送流量的日誌裡沒有位元組數欄位（network_bytes），無法計算流量；請確認 Graylog 的 FortiGate pipeline 有寫入這個欄位';
+    private const NO_BYTES  = '轉送流量的日誌裡沒有位元組數（net_bytes 欄位不存在或全是 0），無法計算流量。這個欄位由 IOC 的防火牆 pipeline（規則 ioc-fw-bytes）從 FortiGate 日誌的 out／in 寫入：請確認更新時 pipeline 有套用成功；剛套用時要等新的日誌進來才有值，之前的日誌補不回來';
     private const NO_PORT   = '內部連線的日誌裡沒有目的埠欄位（dstport），無法判斷連接埠與 SMB；請確認 Graylog 的 FortiGate pipeline 有寫入這個欄位';
     private const LEVEL_RANK = ['high' => 3, 'medium' => 2, 'low' => 1];
 
@@ -173,9 +175,13 @@ final class NetworkVisibilityService
             $e = $this->bytes($ew, $from, $from + self::BUCKET);
             $label = Time::toTaipei(gmdate('Y-m-d H:i:s', $from), 'H:i');
             $share = $t > 0 ? (int) round(100 * $e / $t) : null;
+            $hours = intdiv(self::BUCKET, 3600);
             $buckets[] = [
                 'label' => $label, 'total' => $t, 'east_west' => $e, 'share' => $share,
-                'text'  => sprintf('%s 起 %d 小時：轉送流量 %s，內部對內部 %s（%s）', $label, intdiv(self::BUCKET, 3600), self::humanBytes($t), self::humanBytes($e), $share === null ? '沒有流量' : $share . '%'),
+                // 0 位元組有兩種可能：那段時間真的沒有轉送流量，或位元組欄位還沒開始寫入（剛套用 pipeline）；這裡分不出來，兩種都寫
+                'text'  => $t === 0
+                    ? sprintf('%s 起 %d 小時：沒有位元組數資料（沒有轉送流量，或位元組欄位還沒開始寫入）', $label, $hours)
+                    : sprintf('%s 起 %d 小時：轉送流量 %s，內部對內部 %s（%s）', $label, $hours, self::humanBytes($t), self::humanBytes($e), $share . '%'),
             ];
             $total += $t;
             $east  += $e;
@@ -199,6 +205,7 @@ final class NetworkVisibilityService
             'total'       => $total,
             'east_west'   => $east,
             'share'       => (int) round(100 * $east / $total),
+            'empty_buckets' => count(array_filter($buckets, static fn ($b) => $b['total'] === 0)),
             'total_label' => self::humanBytes($total),
             'east_label'  => self::humanBytes($east),
             'previous'    => $previous,
@@ -443,8 +450,9 @@ final class NetworkVisibilityService
             $cmp = ($p === null || $p['share'] === null)
                 ? '前一個 24 小時沒有資料可比較'
                 : ($d['share'] === $p['share'] ? '與前一個 24 小時相同' : sprintf('較前一個 24 小時%s %d 個百分點', $d['share'] > $p['share'] ? '高了' : '低了', abs($d['share'] - $p['share'])));
+            $part = $d['empty_buckets'] > 0 ? sprintf(' · 只有 %d／%d 格有位元組數資料', self::BUCKETS - $d['empty_buckets'], self::BUCKETS) : '';
             $east = ['key' => 'eastwest', 'label' => '東西向流量佔比', 'value' => $d['share'] . '%', 'state' => 'info',
-                'sub' => sprintf('內部對內部 %s ／ 轉送流量共 %s · %s', $d['east_label'], $d['total_label'], $cmp), 'na' => null];
+                'sub' => sprintf('內部對內部 %s ／ 轉送流量共 %s · %s%s', $d['east_label'], $d['total_label'], $cmp, $part), 'na' => null];
         }
 
         if (!$b['anomalies']['ok']) {

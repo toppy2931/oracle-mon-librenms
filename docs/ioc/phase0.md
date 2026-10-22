@@ -7,7 +7,7 @@
 
 | 項目 | 狀態 | 說明 |
 |---|---|---|
-| 欄位標準化 pipeline | ✅ 已在 monitor-vm 套用；重播資料與**真實 FortiGate 流量**都驗證過（這台沒有真實 Windows 事件，Windows 規則只驗證過重播） | `system/graylog-pipelines.py`（32 條規則 / 4 條 pipeline），驗證結果見 §4 |
+| 欄位標準化 pipeline | ✅ 已在 monitor-vm 套用；重播資料與**真實 FortiGate 流量**都驗證過（這台沒有真實 Windows 事件，Windows 規則只驗證過重播） | `system/graylog-pipelines.py`（33 條規則 / 4 條 pipeline；防火牆多一條 `ioc-fw-bytes`），驗證結果見 §4 |
 | 套用與回滾工具 | ✅ | `apply`（冪等）／`plan`（唯讀）／`remove`（只刪本工具建立的）；防火牆可另連到指定 stream |
 | 樣本日誌與重播 | ✅ | `tools/replay-sample-logs.py`、`tests/fixtures/sample-logs.jsonl`（15 筆，每筆標預期欄位） |
 | 既有 Graylog 設定紀錄 | ✅ | [existing-graylog-config.md](existing-graylog-config.md)：monitor-vm 上 FortiGate 的 pipeline、規則、stream 設定（原本 repo 裡沒有） |
@@ -40,6 +40,7 @@ pipeline 把來源日誌寫入下列欄位，**原始欄位不動**。中文入�
 | `dst_ip` | IP | 目的位址（防火牆） |
 | `host_name` | 主機名 | 產生日誌的主機 |
 | `target_name` | 名稱 | 被操作的對象：群組、帳號、服務、介面 |
+| `net_bytes` | 數字 | 防火牆連線的總位元組數（送出加收到），規則 `ioc-fw-bytes` 從 CEF 原文的 ` out=`、` in=` 取。只有帶這兩個鍵的日誌（連線結束的 `close` 等）才有；沒有就不寫（沒有資料≠0）。**只有套用之後進來的日誌才有**，之前的補不回來。給內網可視性算流量用 |
 | `ioc_demo` | `true` | 由重播工具加上，不是 pipeline 寫的。入口與報表必須排除，不得和正式資料混在一起（IS-054～056） |
 
 `event_action` 與中文名稱（入口顯示用，Phase 1 會做成程式裡的對照表）：
@@ -134,6 +135,7 @@ python3 /opt/oracle-mon-librenms/system/graylog-pipelines.py remove
 | 10 | Phase 1 要用的 Graylog 搜尋彙整 API（`POST /api/search/aggregate`） | 用相對時間、指定 stream 和 `_exists_` 查詢取欄位分布 | ✅ 回傳 `schema`＋`datarows`＋`metadata`。查詢用 `_exists_:欄位`；在 Graylog 介面搜尋框單打 `*` 會被 7.1 擋下（`'*' or '?' not allowed as first character`），程式裡不要用。**一定要帶 `group_by`**：只有 `metrics` 會回 400（`groupings must not be empty`），要算總數就隨便 group 一個一定存在的欄位再加總 |
 | 11 | `remove`（回滾）能在真實 Graylog 上完整執行 | 在測試環境跑 `remove`，看 System → Pipelines 與 Manage rules 是否清乾淨，再 `apply` 回來 | ⏳ **尚未驗證**。解除連線用的 `to_pipeline` 搭配空的 stream 清單是否被接受不知道；工具已改成被拒絕時仍繼續刪除並印警告 |
 | 12 | 防火牆規則不會誤標 Default Stream 裡的非防火牆日誌 | Search 選 Default Stream，查 `log_type:firewall AND NOT ioc_demo:true` | ⏳ 防火牆 pipeline 也連在 Default Stream，條件只要求同時有 `srcip`／`dstip`（或 `src`／`dst`）。預期 0 筆；若有，表示有別的日誌帶這些欄位，要收緊條件（例如再要求 `act`／`action`） |
+| 13 | 位元組數規則 `ioc-fw-bytes`（`contains`、`regex_replace(...)`＋`to_long(…, 0)`）能被 Graylog 接受，且寫出數字欄位 `net_bytes` | `python3 system/graylog-pipelines.py plan`（預期只有「規則 ioc-fw-bytes：新增」與「Pipeline IOC Normalize - Firewall：更新」）→ `apply` → 約 1～2 分鐘後 Graylog 搜尋 `_exists_:net_bytes`，看值是否等於日誌原文 `out=` 加 `in=` | ⏳ **尚未在真實 Graylog 驗證**（2026-10-21 才寫；起因是既有 pipeline 的 `network_bytes` 每筆都是 0，見 [existing-graylog-config.md](existing-graylog-config.md)）。規則被 Graylog 拒絕時 `apply` 會在建 pipeline 之前停下，既有 pipeline 不受影響。只有套用之後進來的日誌才有 `net_bytes` |
 
 驗證流程：
 

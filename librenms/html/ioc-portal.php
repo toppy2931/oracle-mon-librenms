@@ -1023,7 +1023,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
       h('section', { class: 'grid kpis4' }, n.kpi.map(kpiCard)),
       h('section', { class: 'grid even' },
         section('東西向流量趨勢', '每 ' + r.bucket_hours + ' 小時一格，左舊右新', renderEwTrend(n.trend)),
-        section('Top Talkers', '內部來源依流量排名（前 ' + r.talkers + ' 名）', renderTalkers(n.talkers))),
+        section('Top Talkers', '內部來源依流量排名（前 ' + r.talkers + ' 名）', renderTalkers(n.talkers, n.trend.ok && n.trend.data.empty_buckets > 0))),
       h('section', { class: 'grid' },
         section('異常連線清單', n.meta.range_label + '，嚴重的在前', [renderAnomalies(n.anomalies), h('p', { class: 'note' }, rule)])),
       h('section', { class: 'grid even' },
@@ -1053,10 +1053,12 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
       h('div', { class: 'legend' },
         h('span', null, h('i', { style: 'background:#3a577d' }), '經過防火牆的轉送流量'),
         h('span', null, h('i', { style: 'background:#61a8ff' }), '其中內部對內部（長條上方是占比）')),
-      h('p', { class: 'note' }, '24 小時合計：轉送流量 ' + d.total_label + '，內部對內部 ' + d.east_label + '（' + d.share + '%）。格子下方是該格的起始時間（台北時間）。')];
+      h('p', { class: 'note' }, '24 小時合計：轉送流量 ' + d.total_label + '，內部對內部 ' + d.east_label + '（' + d.share + '%）。格子下方是該格的起始時間（台北時間）。'),
+      d.empty_buckets > 0 ? h('p', { class: 'note warn' }, '有 ' + d.empty_buckets + ' 格沒有位元組數資料：那段時間沒有轉送流量，或位元組欄位（net_bytes）還沒開始寫入。'
+        + '更新 IOC 的防火牆 pipeline 之後，要等新的日誌進來才有值，之前的日誌補不回來，所以 24 小時合計與佔比只含有資料的時段。') : null];
   }
 
-  function renderTalkers(sec) {
+  function renderTalkers(sec, partial) {
     if (!sec.ok) return unavailable(sec.error);
     const d = sec.data;
     if (!d.items.length) return h('p', { class: 'note' }, '這段期間沒有內部來源的轉送流量（只計經過防火牆、位元組數大於 0 的紀錄）。');
@@ -1068,7 +1070,8 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
         h('div', { style: 'text-align:right;font-size:12px;white-space:nowrap' }, h('b', null, t.bytes_label),
           h('div', { class: 'note', style: 'margin:0' }, (t.share === null ? '' : '占 ' + t.share + '% · ') + fmt(t.sessions) + ' 筆紀錄')))),
       h('p', { class: 'note' }, '位元組數是送出加收到；「筆紀錄」是日誌筆數，同一條連線可能有開始與結束兩筆。共 ' + fmt(d.sources) + ' 個內部來源有流量。'
-        + (d.capped ? '來源太多，排名可能漏掉流量大但連線很少的來源。' : ''))];
+        + (d.capped ? '來源太多，排名可能漏掉流量大但連線很少的來源。' : '')
+        + (partial ? '位元組欄位剛開始寫入時，流量只算有資料之後的日誌（見東西向流量趨勢下方的說明）。' : ''))];
   }
 
   function renderAnomalies(sec) {

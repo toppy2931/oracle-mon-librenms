@@ -300,6 +300,17 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
         self.assertNotRegex(src, r"->aggregate\(")
         self.assertIn("->aggregateBetween(", src)
 
+    def test_network_bytes_field_is_the_one_the_ioc_firewall_pipeline_writes(self):
+        """服務讀的位元組欄位（F_BYTES）必須就是 IOC 防火牆 pipeline 的 ioc-fw-bytes 規則寫的標準欄位；
+        兩邊各改各的，流量那三塊會悄悄變成「沒有位元組數」，而兩邊的單元測試都還是綠的。"""
+        svc = (ROOT / "librenms" / "ioc" / "NetworkVisibilityService.php").read_text(encoding="utf-8")
+        field = re.search(r"const F_BYTES\s*=\s*'(\w+)'", svc).group(1)
+        rule = dict(gp.firewall_rules())["ioc-fw-bytes"]
+        written = set(re.findall(r'set_field\("(\w+)"', rule)) - {"ioc_schema"}
+        self.assertEqual(written, {field}, "ioc-fw-bytes 寫的欄位要和服務讀的 F_BYTES 一樣")
+        self.assertIn(field, gp.STANDARD_FIELDS)
+        self.assertNotEqual(field, "network_bytes", "既有 pipeline 的 network_bytes 每一筆都是 0，不能用")
+
     def test_identity_api_checks_admin_before_it_reads_anything(self):
         """稽核軌跡列出所有人的登入位址與失敗嘗試：沒有 admin 權限就不能去讀任何資料（檢視者也不行）。"""
         src = (ROOT / "librenms" / "html" / "ioc-identity.php").read_text(encoding="utf-8")
