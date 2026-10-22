@@ -1,0 +1,323 @@
+"""組態備份的狀態、排程、敏感資訊與採集證據測試，不連線設備。"""
+import json
+import os
+import subprocess
+import sys
+import tempfile
+import unittest
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from unittest.mock import patch
+
+from helpers import load_module
+
+backup = load_module('ioc_config_backup', 'system/ioc-config-backup.py')
+
+
+class FakeEngine:
+    def __init__(self):
+        self.nodes = [{'name': '192.168.10.1', 'last': None}]
+        self.content = 'hostname router\ninterface eth0\n description office\n'
+        self.calls = []
+        self.online = True
+
+    def request(self, route):
+        self.calls.append(route)
+        if not self.online:
+            raise backup.BackupError('unavailable', '備份工具尚未啟動')
+        if route == '/reload.json' and not self.nodes:
+            self.nodes = [{'name': '192.168.10.1', 'last': None}]
+        if route == '/nodes.json':
+            return self.nodes
+        if route.startswith('/node/fetch/'):
+            return self.content
+        return 'ok'
+
+
+class BackupTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.engine = FakeEngine()
+        self.worker = backup.Worker(Path(self.temp.name) / 'state', self.engine)
+        self.settings = {'enabled': False, 'interval_hours': 24, 'devices': [
+            {'device_id': 7, 'name': '核心交換器', 'host': '192.168.10.1', 'model': 'ios',
+             'username': 'backup', 'password': 'private-secret', 'port': 22, 'enabled': True}]}
+
+    def tearDown(self):
+        self.worker.close()
+        self.temp.cleanup()
+
+    def call(self, action, **kwargs):
+        result = self.worker.dispatch({'action': action, 'actor': 'admin', **kwargs})
+        if action in {'test', 'run'}:
+            self.worker.dispatch({'action': 'tick', 'actor': 'system'})
+        return result
+
+    def save(self):
+        self.call('save', settings=self.settings)
+        return self.call('tick')
+
+    def finish(self, status='success', content=None):
+        now = datetime.now(timezone.utc)
+        self.engine.nodes = [{'name': '192.168.10.1', 'last': {
+            'start': (now + timedelta(seconds=1)).isoformat(),
+            'end': (now + timedelta(seconds=2)).isoformat(), 'status': status}}]
+        if content is not None:
+            self.engine.content = content
+        return self.call('tick')
+
+    def test_settings_never_return_password(self):
+        out = self.save()
+        self.assertNotIn('private-secret', json.dumps(out))
+        self.assertTrue(out['settings']['devices'][0]['password_set'])
+        self.assertIn('private-secret', (self.worker.root / 'oxidized' / 'router.db').read_text())
+
+    def test_blank_password_preserves_saved_secret(self):
+        self.save()
+        self.settings['devices'][0]['password'] = ''
+        self.save()
+        self.assertTrue(self.call('settings')['settings']['devices'][0]['password_set'])
+
+    def test_unknown_action_is_rejected(self):
+        with self.assertRaises(backup.BackupError):
+            self.call('shell')
+
+    def test_host_and_csv_injection_rejected(self):
+        for value in ['localhost', '127.0.0.1', '169.254.1.1', '224.0.0.1', '::1', '-router', 'router\nroot', 'host:22']:
+            with self.subTest(value=value):
+                self.settings['devices'][0]['host'] = value
+                with self.assertRaises(backup.BackupError):
+                    self.save()
+
+    def test_secret_newline_and_interpolation_rejected(self):
+        for value in ['abc\ndef', 'x|y', '#{ENV["HOME"]}']:
+            with self.subTest(value=value):
+                self.settings['devices'][0]['password'] = value
+                with self.assertRaises(backup.BackupError):
+                    self.save()
+
+    def test_port_model_limits_rejected(self):
+        for field, value in [('port', 2222), ('model', '../../evil'), ('device_id', True)]:
+            with self.subTest(field=field):
+                prior = self.settings['devices'][0][field]
+                self.settings['devices'][0][field] = value
+                with self.assertRaises(backup.BackupError):
+                    self.save()
+                self.settings['devices'][0][field] = prior
+
+    def test_interval_limit_and_duplicate_device(self):
+        self.settings['interval_hours'] = 0
+        with self.assertRaises(backup.BackupError):
+            self.save()
+        self.settings['interval_hours'] = 24
+        self.settings['devices'] *= 2
+        with self.assertRaises(backup.BackupError):
+            self.save()
+
+    def test_unavailable_is_not_applied(self):
+        self.engine.online = False
+        out = self.save()
+        self.assertEqual('unavailable', out['engine']['state'])
+        self.assertFalse(out['engine']['applied'])
+        with self.assertRaises(backup.BackupError):
+            self.call('run', device_id=7)
+
+    def test_enqueue_is_not_success_and_no_overlap(self):
+        self.save()
+        out = self.call('run', device_id=7)
+        self.assertEqual('queued', out['runs'][0]['status'])
+        with self.assertRaises(backup.BackupError):
+            self.call('test', device_id=7)
+        self.assertEqual(1, len(out['runs']))
+
+    def test_old_completion_cannot_complete_new_run(self):
+        self.save()
+        old = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat()
+        self.engine.nodes = [{'name': '192.168.10.1', 'last': {'start': old, 'end': old, 'status': 'success'}}]
+        self.call('run', device_id=7)
+        self.assertEqual('queued', self.call('status')['runs'][0]['status'])
+
+    def test_baseline_unchanged_and_changed(self):
+        self.save()
+        self.call('run', device_id=7)
+        out = self.finish()
+        self.assertEqual('success', out['runs'][0]['status'])
+        self.assertEqual([], out['changes'])
+        self.engine.nodes = []
+        self.call('run', device_id=7)
+        out = self.finish()
+        self.assertEqual('unchanged', out['runs'][0]['status'])
+        self.engine.nodes = []
+        self.call('run', device_id=7)
+        out = self.finish(content='hostname router\ninterface eth0\n description changed\npassword private-secret\n')
+        self.assertEqual(1, len(out['changes']))
+        self.assertNotIn('private-secret', json.dumps(out))
+        self.assertIn('description changed', out['changes'][0]['diff'])
+
+    def test_failure_and_empty_content_keep_previous_version(self):
+        self.save()
+        self.call('run', device_id=7)
+        self.finish()
+        for status, content in [('no_connection', None), ('success', '')]:
+            self.engine.nodes = []
+            self.call('run', device_id=7)
+            out = self.finish(status=status, content=content)
+            self.assertEqual('failed', out['runs'][0]['status'])
+        self.assertEqual(1, self.worker.db.execute('SELECT COUNT(*) FROM versions').fetchone()[0])
+
+    def test_tick_schedules_only_due_and_enabled(self):
+        self.settings['enabled'] = True
+        self.save()
+        self.call('tick')
+        self.assertEqual(1, len(self.call('status')['runs']))
+        self.finish()
+        self.call('tick')
+        self.assertEqual(1, len(self.call('status')['runs']))
+        self.settings['enabled'] = False
+        self.save()
+        self.call('tick')
+        self.assertEqual(1, len(self.call('status')['runs']))
+
+    def test_fetch_lines_array_is_valid_backup(self):
+        self.save()
+        self.call('run', device_id=7)
+        out = self.finish(content=['hostname router\n', 'interface eth0\n'])
+        self.assertEqual('success', out['runs'][0]['status'])
+
+    def test_status_and_save_do_not_call_network(self):
+        self.worker.dispatch({'action': 'save', 'actor': 'admin', 'settings': self.settings})
+        out = self.call('status')
+        self.assertEqual([], self.engine.calls)
+        self.assertEqual('pending_apply', out['engine']['state'])
+        self.assertFalse(out['engine']['applied'])
+
+    def test_fetch_unavailable_after_valid_completion_still_times_out(self):
+        self.save()
+        self.call('run', device_id=7)
+        now = datetime.now(timezone.utc)
+        self.engine.nodes = [{'name': '192.168.10.1', 'last': {
+            'start': (now + timedelta(seconds=1)).isoformat(),
+            'end': (now + timedelta(seconds=2)).isoformat(), 'status': 'success'}}]
+        self.worker.db.execute("UPDATE runs SET requested_at='2000-01-01T00:00:00+00:00'")
+        original = self.engine.request
+        def request(route):
+            if route.startswith('/node/fetch/'):
+                raise backup.BackupError('unavailable', '工具暫時無法取得內容')
+            return original(route)
+        self.engine.request = request
+        self.assertEqual('timeout', self.call('tick')['runs'][0]['status'])
+
+    def test_parallel_dispatch_does_not_send_same_work_twice(self):
+        self.settings['devices'].append({**self.settings['devices'][0], 'device_id': 8, 'host': '192.168.10.2'})
+        self.engine.nodes.append({'name': '192.168.10.2', 'last': None})
+        self.save()
+        self.worker.queue(7, 'manual')
+        self.worker.queue(8, 'manual')
+        other = backup.Worker(self.worker.root, self.engine)
+        original = self.engine.request
+        entered = False
+        def request(route):
+            nonlocal entered
+            result = original(route)
+            if route.startswith('/node/next/') and not entered:
+                entered = True
+                other.dispatch_pending(self.engine.nodes)
+            return result
+        self.engine.request = request
+        try:
+            self.worker.dispatch_pending(self.engine.nodes)
+        finally:
+            other.close()
+        self.assertEqual(1, self.engine.calls.count('/node/next/192.168.10.2.json'))
+
+    def test_unclosed_private_key_is_redacted_to_end(self):
+        content = 'hostname safe\n-----BEGIN RSA PRIVATE KEY-----\nSENSITIVE_BASE64_BODY\n'
+        output = self.worker.redact(content)
+        self.assertNotIn('SENSITIVE_BASE64_BODY', output)
+        self.assertIn('hostname safe', output)
+
+    def test_cli_malformed_state_returns_safe_json(self):
+        self.worker.put_meta('settings', {'devices': None, 'enabled': False, 'interval_hours': 24})
+        env = {**os.environ, 'IOC_BACKUP_STATE_DIR': str(self.worker.root), 'PYTHONIOENCODING': 'utf-8'}
+        result = subprocess.run([sys.executable, backup.__file__], input=b'{"action":"status","actor":""}', capture_output=True, env=env, timeout=10)
+        self.assertEqual(1, result.returncode)
+        self.assertEqual('state_error', json.loads(result.stdout)['error']['code'])
+        self.assertNotIn(b'Traceback', result.stderr)
+
+    def test_status_read_does_not_wait_for_writer(self):
+        self.save()
+        self.worker.db.execute('BEGIN IMMEDIATE')
+        other = None
+        try:
+            other = backup.Worker(self.worker.root, self.engine)
+            out = other.dispatch({'action': 'status', 'actor': ''})
+            self.assertEqual(7, out['settings']['devices'][0]['device_id'])
+        finally:
+            if other:
+                other.close()
+            self.worker.db.rollback()
+
+    def test_stale_engine_is_not_ready(self):
+        self.save()
+        engine = self.worker.get_meta('engine')
+        engine['checked_at'] = '2000-01-01T00:00:00+00:00'
+        self.worker.put_meta('engine', engine)
+        out = self.call('status')
+        self.assertEqual('unavailable', out['engine']['state'])
+        self.assertFalse(out['engine']['applied'])
+        with self.assertRaises(backup.BackupError):
+            self.call('run', device_id=7)
+
+    def test_different_daemon_nodes_are_not_ready(self):
+        self.save()
+        self.engine.nodes = [{'name': 'foreign', 'last': None}]
+        out = self.call('tick')
+        self.assertEqual('pending_apply', out['engine']['state'])
+        self.assertFalse(out['engine']['applied'])
+
+    def test_sensitive_only_change_still_records_version(self):
+        self.save()
+        self.call('run', device_id=7)
+        self.finish(content='hostname router\npassword one\n')
+        self.engine.nodes = []
+        self.call('run', device_id=7)
+        out = self.finish(content='hostname router\npassword two\n')
+        self.assertEqual(1, len(out['changes']))
+        self.assertIn('敏感設定', out['changes'][0]['diff'])
+        self.assertNotIn('password two', json.dumps(out))
+
+    def test_engine_config_disables_own_schedule_and_secret_api(self):
+        self.save()
+        config = json.loads((self.worker.root / 'oxidized' / 'config').read_text())
+        self.assertEqual(0, config['interval'])
+        self.assertTrue(config['next_adds_job'])
+        self.assertTrue(config['input']['ssh']['secure'])
+        self.assertEqual('127.0.0.1', config['extensions']['oxidized-web']['listen'])
+        self.assertFalse(config['output']['clean_obsolete_nodes'])
+
+    def test_save_during_run_rejected(self):
+        self.save()
+        self.call('run', device_id=7)
+        with self.assertRaises(backup.BackupError):
+            self.save()
+
+    def test_timeout_is_recorded(self):
+        self.save()
+        self.call('run', device_id=7)
+        self.worker.db.execute("UPDATE runs SET requested_at='2000-01-01T00:00:00+00:00'")
+        self.assertEqual('timeout', self.call('tick')['runs'][0]['status'])
+
+    def test_symlink_state_rejected(self):
+        target = Path(self.temp.name) / 'target'
+        target.mkdir()
+        link = Path(self.temp.name) / 'link'
+        try:
+            link.symlink_to(target, target_is_directory=True)
+        except OSError:
+            self.skipTest('此環境未授予建立符號連結權限')
+        with self.assertRaises(backup.BackupError):
+            backup.Worker(link, self.engine)
+
+
+if __name__ == '__main__':
+    unittest.main()

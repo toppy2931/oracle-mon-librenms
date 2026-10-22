@@ -409,3 +409,14 @@ FortiGate CEF 格式的 `key=value` 內容用 **6 個獨立 Grok pattern Extract
 | `oracle-nasbackup.php` | E | NAS 掛載/同步 status/save/test/sync/unmount | `manage-nas-backup.sh` |
 | `oracle-custom-map.php` | F | Custom Map 自動刷新秒數 get/set/clear（寫 `config.php`） | `set-custom-map-refresh.sh` |
 | `ioc-portal.php` + `ioc-data.php` + `ioc-cases.php` + `ioc-settings.php` + `ioc-identity.php` + `ioc-network.php` | — | 中文入口：維運總覽、事件案、設定（風險等級門檻、內部網段）、身分與稽核、內網可視性（admin 處理與修改、global-read 唯讀；身分與稽核只有 admin；內網可視性兩種角色都能看且全部唯讀；不走 sudo） | — |
+
+
+## IOC 組態治理與設備備份（2026-10-22 新增；尚未 VM 驗收）
+
+- UI 模組 `librenms/html/js/ioc-config-backup.js` 放 IOC 設定頁，結果放組態治理頁；`ioc-backup.php` 全部 admin-only，先 `ioc_begin(true)` 與 `Access::requireHandler` 才讀設備或呼叫 helper。設備位址以 LibreNMS 目錄覆蓋瀏覽器輸入。範例模式介面不連正式備份。
+- 這是既有 IOC 唯讀／自有資料表架構之外的新增受限操作：PHP → 固定 sudo helper `manage-config-backup.sh` → 降權 `oracle-backup` → Python worker。不能讓 PHP 直接寫設定檔、傳任意 shell／URL／路徑。憑證只走 stdin，不能放 argv、錯誤或稽核紀錄。
+- 專用狀態在 `/var/lib/oracle-mon/config-backup`（700）；SQLite 保存政策、憑證、原始版本、差異、稽核，檔案 600。不是 LibreNMS 資料庫的一部分，主機備份需另外包含它。`remove_secret=false` 保存採集原文，Web 僅回遮罩差異；這不是靜態加密，也不承諾所有設備可完整還原。
+- REST 僅 `127.0.0.1:8879`，但沒有本機使用者認證，僅可用於可信專用 VM，不能公開反代。詳見 [組態備份維運指引](docs/ioc/config-backup-worker.md)。
+- Oxidized `interval=0`，IOC timer 單一排程。status/save/test/run 不做網路採集，只有背景 tick 執行；queued 不是 success，必須驗新採集時間並取得有效內容才建版本。每設備防重疊、派送原子認領；超過 15 分鐘未完成要 timeout（包含有成功狀態卻取不到內容）。
+- 原始內容先雜湊偵測變更，差異另遮罩；私鑰缺 END 仍遮到 EOF。秘密欄位改動也要有紀錄，不能因遮罩後相同就說沒有變更。
+- install/update 只部署介接檔與 unit，不安裝 Oxidized、不自動啟用；不要為方便測試直接部署或啟動正式服務。uninstall 停服務但保留備份、歷史與帳號。

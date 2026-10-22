@@ -17,6 +17,7 @@ if (!defined('IOC_LIB_LOADED')) {
         'Fleet', 'RiskScore', 'LandscapeService',
         'IpNets', 'Sites', 'SettingsRepo', 'PdoSettingsRepo', 'SettingsService',
         'IdentityService', 'AuditTrail', 'HostLoginService', 'NetworkVisibilityService',
+        'ConfigBackupGateway', 'ConfigBackupService',
     ] as $f) {
         require_once __DIR__ . '/' . $f . '.php';
     }

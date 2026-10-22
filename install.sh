@@ -119,6 +119,10 @@ else
 fi
 
 # ── 3) sudoers（讓 LibreNMS PHP 可呼叫 admin 腳本）──────────────
+# 組態備份模組只安裝介接檔，預設不啟用、不安裝第三方工具。
+env ORACLE_MON_DIR="$ORACLE_MON_DIR" LIBRENMS_DIR="$LIBRENMS_DIR" LIBRENMS_USER="$LIBRENMS_USER" \
+    bash "$HERE/system/install-config-backup.sh"
+
 say "安裝 sudoers"
 install -m 440 -o root -g root "$HERE/system/sudoers.oracle-admin" /etc/sudoers.d/oracle-admin
 visudo -cf /etc/sudoers.d/oracle-admin >/dev/null || die "sudoers 語法錯誤"

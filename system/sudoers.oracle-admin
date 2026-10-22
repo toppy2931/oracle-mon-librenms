@@ -16,3 +16,6 @@ librenms ALL=(root) NOPASSWD: /opt/oracle-mon/admin/generate-librenms-app.sh
 librenms ALL=(root) NOPASSWD: /opt/oracle-mon/admin/remove-librenms-app.sh
 # 特權佇列：web 只能「排入請求」，實際套用由 systemd oracle-mon-apply 以 root 執行
 librenms ALL=(root) NOPASSWD: /opt/oracle-mon/admin/queue-request.sh
+
+# 組態備份：固定入口再降權至 oracle-backup，憑證僅由 stdin 傳遞
+librenms ALL=(root) NOPASSWD: /opt/oracle-mon/admin/manage-config-backup.sh ""

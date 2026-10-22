@@ -208,6 +208,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     <main id="view-security" hidden></main>
     <main id="view-network" hidden></main>
     <main id="view-settings" hidden></main>
+    <main id="view-config" hidden></main>
     <main id="view-identity" hidden></main>
     <footer>日誌來自 Graylog（唯讀帳號），設備來自 LibreNMS，站點以設定頁的站點與網段為準（還沒設定任何站點時才用 LibreNMS 的「位置」），事件案存在 LibreNMS 資料庫。灰色的「尚未提供」項目還沒有資料來源，不會顯示假數字。</footer>
   </div>
@@ -215,6 +216,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
 <div class="toast" id="toast" role="status"></div>
 
 <script type="application/json" id="ioc-config"><?= $config ?></script>
+<script src="/js/ioc-config-backup.js?v=1"></script>
 <script>
 (() => {
   'use strict';
@@ -229,12 +231,12 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     { key: 'cases', label: '事件案', title: '事件案管理', sub: '建立、確認、處理與結案，每一步都有紀錄', badge: true },
     { key: 'security', label: '資安', title: '資安事件', sub: '登入、帳號與防火牆阻擋' },
     { key: 'network', label: '內網可視性', title: '內網可視性', sub: '東西向流量、Top Talkers 與異常連線（防火牆日誌）' },
-    { key: 'settings', label: '設定', title: '系統設定', sub: '風險等級門檻、內部網段' },
+    { key: 'settings', label: '設定', title: '系統設定', sub: '風險等級門檻、內部網段與設備組態備份' },
     // 身分與稽核只有 admin 看得到（稽核軌跡會列出所有人的登入位址與失敗嘗試）；後端也會擋，這裡只是不顯示入口
     ...(CAN_HANDLE ? [{ key: 'identity', label: '身分與稽核', title: '身分與稽核', sub: '帳號與角色、稽核軌跡、主機的遠端登入' }] : []),
+    ...(CAN_HANDLE ? [{ key: 'config', label: '組態治理', title: '組態治理', sub: '設備設定備份、執行紀錄與版本差異' }] : []),
     { sep: '尚未提供' },
     { key: 'risk', label: '風險與弱點', off: true },
-    { key: 'config', label: '組態治理', off: true },
     { key: 'audit', label: '稽核與證據', off: true },
     { key: 'reports', label: '報表', off: true },
   ];
@@ -380,6 +382,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     if (tab === 'cases' && (changed || force || !$('#case-right'))) { loadCases(); }
     // 設定頁每次進來都重新讀：別的管理者可能剛改過；已經在這一頁時再按導覽不重載，免得填到一半的值被清掉
     if (tab === 'settings' && changed) { loadSettings(); }
+    if (tab === 'config' && (changed || !$('#view-config').firstChild)) { backupUi.governance($('#view-config')); }
     if (tab === 'identity' && (changed || !$('#view-identity').firstChild)) { loadIdentity(); }
     // 內網可視性每次切進來都重新讀（伺服器端有 60 秒快取，不會每次都打 Graylog）；已經在這一頁時再按導覽不重載
     if (tab === 'network' && (changed || !$('#view-network').firstChild)) { loadNetwork(); }
@@ -878,6 +881,11 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
   const levelFor = (score, low, medium) => (score >= low ? 'low' : (score >= medium ? 'medium' : 'high'));
   const wholeIn = (el, min, max) => /^\d{1,3}$/.test(el.value.trim()) && Number(el.value) >= min && Number(el.value) <= max;
 
+  const backupUnavailable = (box) => box.replaceChildren(unavailable('設備備份介面尚未載入，請重新整理或聯絡管理者'));
+  const backupUi = typeof window.IocConfigBackup === 'function'
+    ? window.IocConfigBackup({ h, section, table, api, unavailable, canHandle: CAN_HANDLE, demo: CFG.demo, openSettings: () => setTab('settings') })
+    : { settings: backupUnavailable, governance: backupUnavailable };
+  let backupBox = null;
   let settingsSeq = 0;   // 連續觸發載入時，只採用最後一次的回應
   let netSettings = null; // 內部網段的設定（伺服器回的 network）
   let netBox = null;      // 「內部網段」那一塊。風險門檻存檔會重畫整頁，這一塊要沿用同一個節點，免得填到一半的網段被清掉
@@ -889,7 +897,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     root.replaceChildren(h('p', { class: 'note' }, '載入中…'));
     try {
       const r = await api('/ioc-settings.php', { action: 'get' });
-      if (seq === settingsSeq) { netSettings = r.network; siteSettings = r.sites; netBox = null; siteBox = null; renderSettings(r.risk); }   // 重新載入：各塊都用伺服器的最新值
+      if (seq === settingsSeq) { netSettings = r.network; siteSettings = r.sites; netBox = null; siteBox = null; backupBox = null; renderSettings(r.risk); }   // 重新載入：各塊都用伺服器的最新值
     } catch (e) {
       if (seq === settingsSeq) root.replaceChildren(unavailable(e.message));
     }
@@ -958,9 +966,10 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
       : h('p', { class: 'note' }, '還沒有人調整過門檻。');
     if (!netBox) { netBox = h('div'); renderNetworkSettings(netBox); }
     if (!siteBox) { siteBox = h('div'); renderSiteSettings(siteBox); }
+    if (!backupBox && CAN_HANDLE) { backupBox = h('div'); backupUi.settings(backupBox); }
     root.replaceChildren(h('section', { class: 'grid even' },
       section('風險等級門檻', '用來把整體風險分數分成低、中、高', form),
-      section('異動紀錄', '最近 10 筆，誰在什麼時候改的', history)), netBox, siteBox);
+      section('異動紀錄', '最近 10 筆，誰在什麼時候改的', history)), netBox, siteBox, backupBox);
     if (focusSave && CAN_HANDLE) save.focus();
   }
 

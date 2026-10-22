@@ -28,7 +28,9 @@ rm -f "$LIBRENMS_DIR"/html/ioc-portal.php \
       "$LIBRENMS_DIR"/html/ioc-cases.php \
       "$LIBRENMS_DIR"/html/ioc-settings.php \
       "$LIBRENMS_DIR"/html/ioc-identity.php \
-      "$LIBRENMS_DIR"/html/ioc-network.php
+      "$LIBRENMS_DIR"/html/ioc-network.php \
+      "$LIBRENMS_DIR"/html/ioc-backup.php \
+      "$LIBRENMS_DIR"/html/js/ioc-config-backup.js
 rm -rf "$LIBRENMS_DIR"/includes/ioc      # IOC 入口函式庫（事件案與設定的資料表 ioc_* 與讀取用的 Graylog 帳號會保留，見文末）
 rm -f "$LIBRENMS_DIR"/includes/html/graphs/application/oracle-l1hweb_*.inc.php
 rm -f "$LIBRENMS_DIR"/includes/polling/applications/oracle-l1hweb.inc.php
@@ -36,6 +38,10 @@ rm -f "$LIBRENMS_DIR"/includes/html/pages/device/apps/oracle-l1hweb.inc.php
 rm -f "$LIBRENMS_DIR"/includes/html/pages/apps/oracle-l1hweb.inc.php
 
 say "移除 sudoers"
+# 只停止本模組的背景服務，備份資料與專用帳號保留。
+for unit in ioc-config-backup.timer ioc-config-backup.service ioc-config-backup-oxidized.service; do
+    systemctl disable --now "$unit" >/dev/null 2>&1 || true
+done
 rm -f /etc/sudoers.d/oracle-admin
 
 say "移除 snmpd managed block"

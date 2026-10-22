@@ -447,3 +447,27 @@ function ioc_overview(bool $demo, string $level): array
     $overview['landscape'] = (new LandscapeService())->build($fleet, $cases, $open, $latest, $trend, $overview['coverage'], $thresholds, $sitesWarning);
     return $overview;
 }
+
+
+/** 組態備份設備目錄：先驗管理者，再讀可信的 LibreNMS 設備，瀏覽器不能指定任意目的位址。 */
+function ioc_backup_devices(?string $level): array
+{
+    Access::requireHandler($level, '只有管理者可以管理設備組態備份');
+    try {
+        $rows = DB::table('devices')->where('disabled', 0)->where('ignore', 0)
+            ->whereIn('type', ['network', 'firewall', 'wireless', 'loadbalancer'])
+            ->orderBy('device_id')->get(['device_id', 'hostname', 'sysName', 'display', 'overwrite_ip', 'ip']);
+        $devices = [];
+        foreach ($rows as $r) {
+            $host = Fleet::deviceIp($r->overwrite_ip, $r->ip, $r->hostname);
+            if ($host === null) {
+                $host = (string) $r->hostname;
+            }
+            $devices[] = ['device_id' => (int) $r->device_id,
+                'name' => (string) ($r->display ?: ($r->sysName ?: $r->hostname)), 'host' => $host];
+        }
+        return $devices;
+    } catch (\Throwable $e) {
+        throw new \Ioc\IocError('無法讀取 LibreNMS 設備清單，請稍後重試');
+    }
+}

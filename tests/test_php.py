@@ -205,9 +205,9 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
         """簡報有、但沒有資料來源的頁面要顯示成停用（尚未提供），不能放個能點的空白頁或假數字。"""
         src = (ROOT / "librenms" / "html" / "ioc-portal.php").read_text(encoding="utf-8")
         nav = re.search(r"const NAV = \[(.*?)\n  \];", src, re.S).group(1)
-        for key in ("risk", "config", "audit", "reports"):
+        for key in ("risk", "audit", "reports"):
             self.assertRegex(nav, r"key: '%s'[^}]*off: true" % key, key)
-        for key in ("overview", "cases", "security", "network", "settings", "identity"):
+        for key in ("overview", "cases", "security", "network", "settings", "identity", "config"):
             self.assertNotRegex(nav, r"key: '%s'[^}]*off: true" % key, key)
             self.assertIn('id="view-%s"' % key, src, key)
 

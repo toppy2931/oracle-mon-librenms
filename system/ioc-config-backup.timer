@@ -1,0 +1,11 @@
+[Unit]
+Description=Check IOC configuration backup tasks every minute
+
+[Timer]
+OnBootSec=1min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Unit=ioc-config-backup.service
+
+[Install]
+WantedBy=timers.target
