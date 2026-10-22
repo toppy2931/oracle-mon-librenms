@@ -209,7 +209,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     <main id="view-network" hidden></main>
     <main id="view-settings" hidden></main>
     <main id="view-identity" hidden></main>
-    <footer>日誌來自 Graylog（唯讀帳號），設備來自 LibreNMS，站點依設定頁的站點網段歸類（沒有符合時用 LibreNMS 的「位置」），事件案存在 LibreNMS 資料庫。灰色的「尚未提供」項目還沒有資料來源，不會顯示假數字。</footer>
+    <footer>日誌來自 Graylog（唯讀帳號），設備來自 LibreNMS，站點以設定頁的站點與網段為準（還沒設定任何站點時才用 LibreNMS 的「位置」），事件案存在 LibreNMS 資料庫。灰色的「尚未提供」項目還沒有資料來源，不會顯示假數字。</footer>
   </div>
 </div>
 <div class="toast" id="toast" role="status"></div>
@@ -574,8 +574,10 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
       // 沒座標的站點不在圖上；不說的話會被誤認為那些站點不存在或沒問題（上面的計數與排行都有算進去）
       d.has_locations && noCoord > 0 ? h('p', { class: 'note warn' }, '另有 ' + noCoord + ' 個站點沒有座標，沒有畫在圖上；上面的計數與下方的排行有算進去。') : null,
       d.unlocated > 0 ? h('p', { class: 'note warn' }, d.configured
-        ? '另有 ' + d.unlocated + ' 台設備沒有歸屬站點（IP 不在任何站點的網段內，也沒有有效的 LibreNMS 位置），不屬於任何站點。'
+        ? '另有 ' + d.unlocated + ' 台設備沒有歸屬站點（IP 不在任何站點的網段內），不屬於任何站點。'
         : '另有 ' + d.unlocated + ' 台設備沒有有效的位置（未指定，或是 Unknown 這類 SNMP 預設值），不屬於任何站點。') : null,
+      // 設定了站點後，LibreNMS 的位置不再當站點：沒歸進任何站點的設備身上的位置要列出來，不然那些設備像是憑空消失
+      d.unassigned_locations && d.unassigned_locations.length ? h('p', { class: 'note warn' }, '這些 LibreNMS 位置的設備，IP 不在任何站點的網段內，所以沒有歸屬站點（站點以設定頁為準；要納入請到「設定」頁新增站點與網段）：' + d.unassigned_locations.join('、')) : null,
       // 設定了卻沒有設備歸進去的站點不會出現在上面，要說明（多半是網段填錯）
       d.empty_sites && d.empty_sites.length ? h('p', { class: 'note warn' }, '設定頁的這些站點已經算在站點數裡，但目前沒有任何設備歸進去，所以不在上面的健康分佈裡（請檢查網段有沒有填對）：' + d.empty_sites.join('、')) : null,
       h('p', { class: 'note' }, '站點異常等級看離線設備的比例：<25% 輕微、<50% 中度、≥50% 嚴重。散佈圖沒有底圖（離線環境不載入外部地圖）。'),
@@ -620,7 +622,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
       h('section', { class: 'grid three' },
         section('整體風險概況', '分數越高越好', renderRisk(L.risk)),
         section('近 30 日新建事件案', '依嚴重性', renderTrend(L.trend)),
-        section('站點分佈', '依設定頁的站點網段，沒有符合的設備依 LibreNMS 的位置', renderSites(L.sites))),
+        section('站點分佈', '以設定頁的站點與網段為準（還沒設定時依 LibreNMS 的位置）', renderSites(L.sites))),
       h('section', { class: 'grid even' },
         section('站點健康度排行', '離線設備比例高的在前', renderRanking(L.ranking)),
         section('最新事件', '事件案，最近更新的在前', renderLatest(L.latest_cases))),
@@ -1058,7 +1060,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
       }
     } },
       h('p', { class: 'note', style: 'margin-top:0' }, '總覽用這裡的設定把設備歸到站點：設備的 IP 落在某個站點的網段內，就屬於那個站點（網段重疊時，前綴長的優先）；'
-        + '沒有符合的設備，才用 LibreNMS 設備上設定的「位置」當站點。網段一行一個，寫成 172.16.1.0/24 這樣（前綴長度 8～32，每個站點最多 '
+        + '設定了站點之後，站點就只由這裡決定：IP 不在任何站點網段內的設備不屬於任何站點，LibreNMS 設備上設定的「位置」不再當站點（還沒有設定任何站點時才用位置）。網段一行一個，寫成 172.16.1.0/24 這樣（前綴長度 8～32，每個站點最多 '
         + L.max_nets + ' 個網段，最多 ' + L.max_sites + ' 個站點）。只支援 IPv4；同一個網段只能屬於一個站點。'),
       list, empty, when,
       CAN_HANDLE

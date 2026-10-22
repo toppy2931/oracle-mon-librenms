@@ -149,9 +149,6 @@ test('站點：用 IP 找站點——最長前綴優先；不是 IPv4 或沒有�
         assertSame(null, $s->siteOf($no), $no);
     }
     assertSame(null, (new Sites())->siteOf('172.16.1.5'));
-    assertSame('總部', $s->canonicalName('總部'));
-    assertSame('HQ', siSites([['HQ', '10.0.0.0/8']])->canonicalName('hq'), '位置與站點同名（不分大小寫）時用設定的寫法');
-    assertSame(null, $s->canonicalName('不存在'));
 });
 
 test('站點：資料庫存的格式——來回一致；被手動改壞的值（格式、排序、未整理、重複、預設名稱）都讀不回來', function () {
@@ -175,30 +172,41 @@ test('站點：設定名稱 site.<id>——只有 1～999999 的整數 id 是站
 
 // ── Fleet：站點歸屬與設備 IP ────────────────────────────────────────
 
-test('Fleet：設備 IP 落在站點網段就歸該站點，網段優先於 LibreNMS 位置；沒符合的回頭用位置，兩者都沒有才是未歸屬', function () {
+test('Fleet：設定了站點，站點就只由設定的網段決定——LibreNMS 位置不再當站點，沒符合網段的設備一律未歸屬', function () {
+    // 使用者：「站點數請以設定的內容為主要依據」。VM 上設了台南、台中兩個站點，LibreNMS 另有位置「台中機房」的設備，站點數卻變成 3
     $sites = siSites([['總部', '172.16.1.0/24'], ['分部', "172.16.2.0/24\n10.9.0.0/16"]]);
     $f = new Fleet([
         dev('a', 'server', 1, null, ['ip' => '172.16.1.10']),
-        dev('b', 'server', 0, '北區所', ['ip' => '172.16.1.11']),     // 網段優先於位置
-        dev('c', 'server', 1, '總部', ['ip' => '8.8.8.8']),           // 沒符合網段，位置與站點同名：合併
-        dev('d', 'server', 1, '北區所', ['ip' => '8.8.4.4']),         // 沒符合：用位置
+        dev('b', 'server', 0, '北區所', ['ip' => '172.16.1.11']),     // 網段決定：總部（位置不管）
+        dev('c', 'server', 1, '總部', ['ip' => '8.8.8.8']),           // 位置和站點同名也不算：IP 不在網段內就是未歸屬
+        dev('d', 'server', 1, '台中機房', ['ip' => '8.8.4.4']),       // LibreNMS 位置不是設定頁的站點
         dev('e', 'server', 1, null, ['ip' => '10.9.3.3']),
-        dev('f', 'server', 1, null),                                   // 沒有 IP 也沒有位置
-        dev('g', 'server', 1, 'Unknown', ['ip' => '1.1.1.1']),        // SNMP 預設值不是站點
+        dev('f', 'server', 1, null),                                   // 沒有 IP
+        dev('g', 'server', 1, 'Unknown', ['ip' => '1.1.1.1']),        // SNMP 預設值
     ], 'UTC', $sites);
-    assertSame(['分部' => 1, '北區所' => 1, '總部' => 3], array_column($f->sites(), 'devices', 'name'));
-    assertSame(2, $f->unlocated());
+    assertSame(['分部' => 1, '總部' => 2], array_column($f->sites(), 'devices', 'name'), '站點只有設定的那兩個，沒有「北區所」「台中機房」');
+    assertSame(4, $f->unlocated());
     $hq = array_values(array_filter($f->sites(), static fn ($s) => $s['name'] === '總部'))[0];
-    assertSame([3, 2, 1], [$hq['devices'], $hq['up'], $hq['down']], '網段與位置的設備合併計算');
+    assertSame([2, 1, 1], [$hq['devices'], $hq['up'], $hq['down']]);
     assertSame('總部', $f->siteOfHost('a'));
     assertSame('總部', $f->siteOfHost('B.EXAMPLE'), '事件案的主機也用網段歸站點');
+    assertSame(null, $f->siteOfHost('c'));
     assertSame(null, $f->siteOfHost('f'));
     assertSame([true, []], [$f->hasConfiguredSites(), $f->emptyConfiguredSites()]);
+    assertSame(['台中機房', '總部'], $f->unassignedLocations(), '沒歸屬的設備身上的有效位置（SNMP 預設值不算），畫面列出來提示：這些位置不是站點');
 });
 
-test('Fleet：位置與設定好的站點同名（不分大小寫）要合併成同一個站點，用設定的寫法', function () {
-    $f = new Fleet([dev('a', 'server', 1, null, ['ip' => '10.0.0.5']), dev('b', 'server', 1, 'hq', ['ip' => '8.8.8.8'])], 'UTC', siSites([['HQ', '10.0.0.0/24']]));
-    assertSame(['HQ' => 2], array_column($f->sites(), 'devices', 'name'));
+test('Fleet：站點數＝設定的站點數——不論有沒有設備歸進去，LibreNMS 位置都不會讓站點變多', function () {
+    $sites = siSites([['台南公司', '172.16.1.0/24'], ['台中公司', '172.16.17.0/24']]);
+    $f = new Fleet([dev('a', 'server', 1, '機房', ['ip' => '172.16.1.254']), dev('b', 'server', 1, '台中機房', ['ip' => '172.16.9.9'])], 'UTC', $sites);
+    assertSame(['台南公司'], array_column($f->sites(), 'name'));
+    assertSame(['台中公司'], $f->emptyConfiguredSites());
+    assertSame(2, count($f->sites()) + count($f->emptyConfiguredSites()), '有設備的站點＋沒設備的站點＝設定的 2 個');
+    assertSame(['台中機房'], $f->unassignedLocations());
+    // 沒設定站點時才是 LibreNMS 位置，也沒有「未歸屬的位置」提示
+    $none = new Fleet([dev('a', 'server', 1, '機房', ['ip' => '172.16.1.254']), dev('b', 'server', 1, '台中機房', ['ip' => '172.16.9.9'])]);
+    assertSame(['台中機房', '機房'], array_column($none->sites(), 'name'));
+    assertSame([], $none->unassignedLocations());
 });
 
 test('Fleet：沒設定站點時行為與只有 LibreNMS 位置時完全一樣（設備有 IP 也不影響）', function () {
@@ -217,7 +225,7 @@ test('Fleet：設定了站點卻沒有設備歸進去——不列為站點（0 �
 });
 
 test('Fleet：站點的座標沿用設備在 LibreNMS 位置上的座標；只靠網段定義、設備沒有座標就沒有座標', function () {
-    $f = new Fleet([dev('a', 'server', 1, null, ['ip' => '10.0.0.5']), dev('b', 'server', 1, '總部', ['ip' => '8.8.8.8', 'lat' => 25.1, 'lng' => 121.5])],
+    $f = new Fleet([dev('a', 'server', 1, null, ['ip' => '10.0.0.5']), dev('b', 'server', 1, '總部', ['ip' => '10.0.0.6', 'lat' => 25.1, 'lng' => 121.5])],
         'UTC', siSites([['總部', '10.0.0.0/24'], ['分部', '10.1.0.0/24']]));
     assertSame([25.1, 121.5], [$f->sites()[0]['lat'] ?? null, $f->sites()[0]['lng'] ?? null], '同一站點裡有座標的設備提供座標');
     $g = new Fleet([dev('x', 'server', 1, null, ['ip' => '10.1.0.9'])], 'UTC', siSites([['分部', '10.1.0.0/24']]));
@@ -251,8 +259,9 @@ test('總覽：有自訂站點時的說明文字（未歸屬、全部歸屬、�
     $o = siBuild(new Fleet([dev('a', 'server', 1, null, ['ip' => '172.16.1.5']), dev('b')], 'UTC', $sites));
     $k = lsKpi($o)['sites'];
     // 站點數＝有設備的站點（總部）＋設定了卻沒有設備歸進去的站點（空站）：要和設定頁自訂的 2 個站點對得起來
-    assertSame([2, 'good', '其中 1 個還沒有設備歸進去（空站）；另有 1 台設備沒有歸屬站點（IP 不在任何站點的網段內，也沒有有效的 LibreNMS 位置）'], [$k['value'], $k['state'], $k['sub']]);
+    assertSame([2, 'good', '其中 1 個還沒有設備歸進去（空站）；另有 1 台設備沒有歸屬站點（IP 不在任何站點的網段內）'], [$k['value'], $k['state'], $k['sub']]);
     assertSame([true, ['空站'], null, 1], [$o['sites']['data']['configured'], $o['sites']['data']['empty_sites'], $o['sites']['data']['warning'], $o['sites']['data']['unlocated']]);
+    assertSame([], $o['sites']['data']['unassigned_locations'], '沒歸屬的設備沒有 LibreNMS 位置，沒有位置提示');
     assertSame(1, count($o['sites']['data']['items']), '分佈與健康等級只算有設備的站點');
     assertSame([0, 'good'], [lsKpi($o)['high_sites']['value'], lsKpi($o)['high_sites']['state']], '高風險站點的計算不含沒有設備的站點（沒有設備不是「正常」也不是「異常」）');
     assertSame(['normal' => 1, 'minor' => 0, 'moderate' => 0, 'severe' => 0], $o['sites']['data']['counts'], '空站不算在「正常」那一格');
@@ -276,6 +285,22 @@ test('總覽：有自訂站點時的說明文字（未歸屬、全部歸屬、�
     assertSame([null, 'unknown'], [$nk['high_sites']['value'], $nk['high_sites']['state']], '沒有任何站點有設備，高風險站點算不出來');
     assertSame(true, $none['ranking']['ok'], '排行仍列出設定的站點（都是尚無設備）');
     assertSame([['空站', true], ['總部', true]], array_map(static fn ($r) => [$r['name'], $r['empty']], $none['ranking']['data']));
+});
+
+test('總覽：站點數以設定的站點為準（VM 實際情況：設了台南、台中兩個站點，LibreNMS 另有位置「台中機房」的設備，站點數仍是 2）', function () {
+    $sites = siSites([['台南公司', '172.16.1.0/24'], ['台中公司', '172.16.17.0/24']]);
+    $o = siBuild(new Fleet([
+        dev('a', 'server', 1, '機房', ['ip' => '172.16.1.254']),
+        dev('b', 'server', 0, null, ['ip' => '172.16.1.31']),
+        dev('c', 'server', 1, '台中機房', ['ip' => '172.16.9.9']),      // LibreNMS 位置，IP 不在任何站點網段內
+        dev('d', 'server', 1, 'Unknown', ['ip' => '127.0.0.1']),
+    ], 'UTC', $sites));
+    $k = lsKpi($o)['sites'];
+    assertSame([2, '其中 1 個還沒有設備歸進去（台中公司）；另有 2 台設備沒有歸屬站點（IP 不在任何站點的網段內）'], [$k['value'], $k['sub']], '站點數是設定的 2 個，不是 3');
+    assertSame(['台南公司'], array_column($o['sites']['data']['items'], 'name'), '分佈裡沒有「機房」「台中機房」這種 LibreNMS 位置');
+    assertSame(['台南公司', '台中公司'], array_column($o['ranking']['data'], 'name'));
+    assertSame(['台中機房'], $o['sites']['data']['unassigned_locations'], '站點區塊要說明「台中機房」這個位置的設備為什麼沒有歸屬');
+    assertSame(2, $o['sites']['data']['unlocated']);
 });
 
 test('總覽：沒有自訂站點時，有站點的畫面文字不變（只談 LibreNMS 位置），站點區塊的附加欄位是空的', function () {
