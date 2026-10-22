@@ -6,10 +6,11 @@ namespace Ioc;
 /**
  * LibreNMS 設備清單的彙整：資產數、站點、可用率。
  *
- * 「站點」決定的順序：1) 設備的 IP 落在設定頁自訂站點（Sites）的網段裡 → 該站點（重疊取最長前綴）；
- * 2) 否則是 LibreNMS 設備的「位置」（Location，設備設定裡指定；與設定好的站點同名就合併，不分大小寫）。
- * 兩者都沒有的設備不屬於任何站點，另外計數並在畫面提醒，不能假裝成某個站點（缺資料就說缺，OPS-006）。
- * 沒設定任何站點時（$sites 是 null 或空的），行為與只有 LibreNMS 位置時完全一樣。
+ * 「站點」以設定頁自訂的站點（Sites）為主要依據（使用者：「站點數請以設定的內容為主要依據」）：
+ *  - 設定了站點：設備的 IP 落在某站點的網段裡 → 該站點（重疊取最長前綴）；沒有符合的設備不屬於任何站點，
+ *    LibreNMS 的「位置」不再當站點（不然站點數會多出設定頁沒有的站點，和設定對不起來）。
+ *  - 還沒設定任何站點（$sites 是 null 或空的）：站點是 LibreNMS 設備的「位置」（Location，設備設定裡指定）。
+ * 不屬於任何站點的設備另外計數並在畫面提醒，不能假裝成某個站點（缺資料就說缺，OPS-006）。
  * 站點的異常等級只看設備：該站點離線設備的比例（0＝正常，<25%＝輕微，<50%＝中度，其餘＝嚴重）。
  */
 final class Fleet
@@ -50,7 +51,7 @@ final class Fleet
      *        type、status（1＝正常）、reason、last_polled、location（沒有則 null 或空字串）、lat、lng、avail_1d、avail_7d、
      *        ip（IPv4 字串，算不出來是 null；見 deviceIp()）
      * @param string $sourceTz last_polled 這類沒帶時區的時間屬於哪個時區（LibreNMS 是主機本地時間）
-     * @param Sites|null $sites 設定頁自訂的站點；null＝沒有（只用 LibreNMS 位置）
+     * @param Sites|null $sites 設定頁自訂的站點；null＝沒有（站點就是 LibreNMS 位置）
      */
     public function __construct(array $rows, string $sourceTz = 'UTC', ?Sites $sites = null)
     {
@@ -63,10 +64,11 @@ final class Fleet
             }
             $loc = self::realLocation((string) ($r['location'] ?? ''));
             $ip  = self::ipv4($r['ip'] ?? null);
-            // 網段優先；沒符合才用 LibreNMS 的位置，位置與設定好的站點同名時用設定的寫法（兩邊才會合併成同一個站點）
-            $site = ($ip === null ? null : $this->sites->siteOf($ip)) ?? ($loc === null ? null : ($this->sites->canonicalName($loc) ?? $loc));
+            // 設定了站點就只看網段；還沒設定任何站點才用 LibreNMS 的位置
+            $site = $this->sites->isEmpty() ? $loc : ($ip === null ? null : $this->sites->siteOf($ip));
             $this->devices[] = [
                 'site'        => $site,
+                'location'    => $loc,
                 'name'        => (string) ($r['name'] ?? ''),
                 'aliases'     => array_values(array_filter(array_map(static fn ($a) => strtolower(trim((string) $a)), (array) ($r['aliases'] ?? [])))),
                 'group'       => self::group((string) ($r['type'] ?? '')),
@@ -91,7 +93,7 @@ final class Fleet
     /**
      * LibreNMS 設備的 IPv4 位址，依序：使用者指定的 overwrite_ip → devices.ip（resolver 解析的結果，資料庫存的是
      * inet_pton 的二進位，用查詢建構器讀到的是原始位元組：4 位元組是 IPv4，16 位元組是 IPv6 略過，因為站點網段只認 IPv4）→
-     * hostname 本身若是 IPv4。都沒有（IPv6、沒解析過、hostname 是網域名稱）回傳 null，這台設備就只能靠 LibreNMS 位置歸站點。
+     * hostname 本身若是 IPv4。都沒有（IPv6、沒解析過、hostname 是網域名稱）回傳 null：設定了站點時，這台設備就歸不進任何站點。
      *
      * @param mixed $packedIp devices.ip 的原始值
      */
@@ -176,16 +178,38 @@ final class Fleet
         return ['total' => $this->total(), 'up' => $this->up(), 'down_list' => $down];
     }
 
-    /** 沒有歸屬站點的設備台數（IP 不在任何站點的網段內，也沒有有效的 LibreNMS 位置）。 */
+    /** 沒有歸屬站點的設備台數（設定了站點時：IP 不在任何站點的網段內；沒設定時：沒有有效的 LibreNMS 位置）。 */
     public function unlocated(): int
     {
         return count(array_filter($this->devices, static fn ($d) => $d['site'] === null));
     }
 
-    /** 設定頁有沒有自訂站點（畫面的說明文字要跟著換：有自訂站點時，「站點」不再只是 LibreNMS 的位置）。 */
+    /** 設定頁有沒有自訂站點（畫面的說明文字要跟著換：有自訂站點時，站點就只由設定決定，不再是 LibreNMS 的位置）。 */
     public function hasConfiguredSites(): bool
     {
         return !$this->sites->isEmpty();
+    }
+
+    /**
+     * 設定了站點時，沒有歸屬站點的設備身上有哪些有效的 LibreNMS 位置（沒設定站點時是空的：位置本身就是站點）。
+     * 位置不再當站點，這些設備才會「消失」在站點分佈裡；畫面列出名稱，提示要納入就到設定頁新增站點與網段。
+     *
+     * @return string[]
+     */
+    public function unassignedLocations(): array
+    {
+        if ($this->sites->isEmpty()) {
+            return [];
+        }
+        $out = [];
+        foreach ($this->devices as $d) {
+            if ($d['site'] === null && $d['location'] !== null) {
+                $out[$d['location']] = true;
+            }
+        }
+        $names = array_keys($out);
+        sort($names);
+        return $names;
     }
 
     /**

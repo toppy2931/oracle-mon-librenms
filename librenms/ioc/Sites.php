@@ -5,7 +5,8 @@ namespace Ioc;
 
 /**
  * 「站點」：管理者在設定頁自訂的「名稱＋一到多個 IPv4 網段」。設備的 IP 落在某站點的網段裡，就歸到那個站點
- * （重疊時最長前綴優先）；沒有符合的設備再回頭用 LibreNMS 的位置（Fleet 負責）。
+ * （重疊時最長前綴優先）。設定了站點之後，站點就只由這裡決定（沒有符合的設備不屬於任何站點，LibreNMS 的位置不再當站點）；
+ * 還沒有任何站點時才用 LibreNMS 的位置（Fleet 負責）。
  *
  * 這個類別只管：驗證管理者送來的清單、資料表裡存的格式、用 IP 找站點。不碰資料庫與權限（SettingsService 負責）。
  *
@@ -69,18 +70,6 @@ final class Sites
         foreach ($this->lookup as [$base, $mask, , $name]) {
             if (($n & $mask) === $base) {
                 return $name;
-            }
-        }
-        return null;
-    }
-
-    /** 設定好的站點裡，名稱和 $name 相同（不分大小寫）的那個站點的名稱；沒有回傳 null。LibreNMS 位置要合併進同名站點時用。 */
-    public function canonicalName(string $name): ?string
-    {
-        $key = mb_strtolower($name);
-        foreach ($this->list as $s) {
-            if (mb_strtolower($s['name']) === $key) {
-                return $s['name'];
             }
         }
         return null;

@@ -58,8 +58,9 @@ final class LandscapeService
             ['key' => $key, 'label' => $label, 'value' => null, 'state' => 'unknown', 'sub' => $why, 'na' => $na];
         $noFleet = 'LibreNMS 的設備資料無法讀取';
 
-        // 1) 站點數＝有設備的站點＋設定了卻還沒有設備歸進去的站點：要和設定頁自訂的站點對得起來。後者沒有健康等級可言，
-        //    所以不在分佈與高風險站點的計算裡，在這張卡片與排行（標「尚無設備」）另外交代
+        // 1) 站點數以設定頁自訂的站點為依據（設定了站點，站點就只由設定決定，LibreNMS 位置不再當站點；沒設定時才是位置）：
+        //    ＝有設備的站點＋設定了卻還沒有設備歸進去的站點，所以等於設定的站點數。後者沒有健康等級可言，
+        //    不在分佈與高風險站點的計算裡，在這張卡片與排行（標「尚無設備」）另外交代
         $empty = $fleet === null ? [] : $fleet->emptyConfiguredSites();
         if ($fleet === null) {
             $sites = $unknown('sites', '站點數', $noFleet);
@@ -75,7 +76,7 @@ final class LandscapeService
             $note = $empty === [] ? '' : sprintf('其中 %d 個還沒有設備歸進去（%s）；', count($empty), implode('、', $empty));
             $sites = ['key' => 'sites', 'label' => '站點數', 'value' => count($fleet->sites()) + count($empty), 'state' => $sitesWarning === null ? 'good' : 'warn',
                 'sub' => $note . ($un > 0
-                    ? ($cfg ? sprintf('另有 %d 台設備沒有歸屬站點（IP 不在任何站點的網段內，也沒有有效的 LibreNMS 位置）', $un)
+                    ? ($cfg ? sprintf('另有 %d 台設備沒有歸屬站點（IP 不在任何站點的網段內）', $un)
                             : sprintf('另有 %d 台設備沒有有效位置（未指定，或是 Unknown 這類預設值）', $un))
                     : ($cfg ? '各設備都已歸屬站點' : '各設備都已指定位置')) . self::warnSuffix($sitesWarning)];
         }
@@ -197,7 +198,7 @@ final class LandscapeService
             return '還沒有納管任何設備';
         }
         return $fleet->hasConfiguredSites()
-            ? '已經設定了站點，但沒有任何設備的 IP 落在站點的網段內，設備也沒有有效的 LibreNMS 位置（請檢查「設定」頁的網段有沒有填對）'
+            ? '已經設定了站點，但沒有任何設備的 IP 落在站點的網段內（請檢查「設定」頁的網段有沒有填對）'
             : 'LibreNMS 的設備都還沒有有效的位置（沒指定，或只有 Unknown 這類 SNMP 預設值；到設備設定 → 位置 指定，或到「設定」頁新增站點與網段）';
     }
 
@@ -223,6 +224,7 @@ final class LandscapeService
             'has_locations' => count(array_filter($sites, static fn ($s) => $s['lat'] !== null && $s['lng'] !== null)) > 0,
             'configured'    => $fleet->hasConfiguredSites(),
             'empty_sites'   => $fleet->emptyConfiguredSites(),
+            'unassigned_locations' => $fleet->unassignedLocations(),
             'warning'       => $sitesWarning,
         ]];
     }
