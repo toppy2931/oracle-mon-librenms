@@ -101,9 +101,11 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
     const deviceInfo = (entry) => catalogDevice(entry.device_id) || {
       device_id: entry.device_id, name: entry.name || '已移除設備', host: entry.host || '位址未提供',
     };
+    const isDraft = (entry) => entry && entry.draft === true;
     const captureEditor = () => {
       if (!selected || !editorFields) return;
-      selected.device_id = Number(editorFields.select.value);
+      // 已儲存設備的識別不能由編輯表單變更；移除後再新增才可改用別台設備。
+      if (isDraft(selected)) selected.device_id = Number(editorFields.select.value);
       selected.model = editorFields.model.value;
       selected.username = editorFields.username.value;
       selected.password = editorFields.password.value;
@@ -133,11 +135,15 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
       const current = selected;
       const choices = catalog.slice();
       if (current.device_id && !choices.some((d) => Number(d.device_id) === Number(current.device_id))) choices.push(deviceInfo(current));
-      const select = h('select', { 'aria-label': '選擇設備', required: true, style: 'width:100%' }, h('option', { value: '' }, '請選擇設備'),
+      const selectingNewDevice = isDraft(current);
+      const select = h('select', {
+        'aria-label': '選擇設備', required: true, disabled: !selectingNewDevice,
+        style: 'width:100%'
+      }, h('option', { value: '' }, '請選擇設備'),
         choices.map((d) => h('option', {
           value: String(d.device_id),
-          // 已設定的設備不可再次加入；保留目前編輯的那筆以便修改。
-          disabled: entries.some((entry) => entry !== current && Number(entry.device_id) === Number(d.device_id)),
+          // 已設定設備一律不可再選；只有尚未儲存的新增列能挑選尚未納管的設備。
+          disabled: entries.some((entry) => Number(entry.device_id) === Number(d.device_id) && (!selectingNewDevice || entry !== current)),
         }, d.name + '（' + d.host + '）')));
       select.value = current.device_id ? String(current.device_id) : '';
       const model = h('select', { 'aria-label': '設備品牌', style: 'width:100%' }, models.map(([v, title]) => h('option', { value: v }, title)));
@@ -202,6 +208,7 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
           h('legend', null, 'SSH 主機身分驗證'), hostKeyStatus(), !(candidate && (candidate.trusted || candidate.status === 'trusted')) && scan, hostKeyMessage));
       };
       select.addEventListener('change', () => {
+        if (!selectingNewDevice) return;
         // 立即同步選擇結果，讓表格在儲存前就能顯示正確名稱與位址。
         const nextDeviceId = select.value ? Number(select.value) : null;
         if (Number(current.device_id) !== nextDeviceId) {
@@ -215,7 +222,11 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
       }); updatePasswordRule();
       editorFields = { select, model, username, password, active };
       editor.replaceChildren(h('fieldset', { style: 'border:1px solid var(--line);border-radius:10px;margin:12px 0;padding:12px' },
-        h('legend', null, '設備備份設定'), label('設備', select), label('設備品牌／系統', model),
+        h('legend', null, '設備備份設定'), label('設備', select),
+        selectingNewDevice
+          ? note('新增模式：只能選擇尚未納入備份的設備。')
+          : note('此設備已儲存，設備名稱與連線位址已固定；如需更換設備，請先移除此筆後再新增。'),
+        label('設備品牌／系統', model),
         h('div', { class: 'grid even' }, label('備份帳號', username), label('備份密碼', password)),
         label('納入備份', active), note('使用 SSH 加密連線，連接埠為 22。請使用可讀取完整設定的專用帳號。'), hostKeyArea));
       drawHostKey();
@@ -225,7 +236,7 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
     const add = h('button', { class: 'btn', type: 'button', onclick: () => {
       captureEditor();
       if (entries.length >= 50) return;
-      selected = { device_id: null, model: 'fortios', username: '', password: '', password_set: false, enabled: true };
+      selected = { device_id: null, model: 'fortios', username: '', password: '', password_set: false, enabled: true, draft: true };
       entries.push(selected); drawDevices(); drawEditor();
     } }, '＋ 加入設備');
     const validationMessage = () => {
@@ -253,7 +264,7 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
           device_id: Number(entry.device_id), model: entry.model, username: entry.username,
           password: entry.password, port: 22, enabled: entry.enabled,
         })) } });
-        entries.forEach((entry) => { entry.password = ''; });
+        entries.forEach((entry) => { entry.password = ''; delete entry.draft; });
         if (editorFields) editorFields.password.value = '';
         renderSettings(box, r);
       } catch (e) {
