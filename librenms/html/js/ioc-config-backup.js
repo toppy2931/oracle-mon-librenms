@@ -139,9 +139,6 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
         ? table(['時間', '操作者', '操作', '說明'], b.audit.map((a) => [time(a.occurred_at), a.actor,
           ({ save: '儲存備份設定', test: '要求測試備份', run: '要求立即備份', scheduled: '排程備份' })[a.action] || '備份操作', a.detail]))
         : note('目前沒有備份管理操作紀錄。')));
-    if (b.runs.some((r) => r.status === 'queued')) {
-      setTimeout(() => { if (tokens.get(root) === renderToken && root.isConnected && !root.hidden && !(root.closest && root.closest('[hidden]'))) load(root, (r) => renderGovernance(root, r)); }, 5000);
-    }
   }
   function settings(box) { return load(box, (r) => renderSettings(box, r)); }
 

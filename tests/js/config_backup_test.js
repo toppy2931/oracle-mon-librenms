@@ -17,7 +17,7 @@ const walk = (node) => node instanceof Element ? [node, ...node.children.flatMap
 const text = (node) => node instanceof Element ? node.children.map(text).join(' ') : String(node || '');
 const payload = () => ({ backup: { settings: { enabled: false, interval_hours: 24, devices: [{ device_id: 7, name: '機房防火牆', host: '192.0.2.1', model: 'fortios', username: 'backup', port: 22, enabled: true, password_set: true }] }, engine: { state: 'pending_apply', message: '設定已儲存，等待工具套用' }, runs: [], changes: [] }, devices: [{ device_id: 7, name: '機房防火牆', host: '192.0.2.1' }] });
 function create(api, opts = {}) {
-  const ctx = { window: {}, setTimeout: () => 0 };
+  const ctx = { window: {}, setTimeout: opts.setTimeout || (() => 0) };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, '../../librenms/html/js/ioc-config-backup.js'), 'utf8'), ctx);
   return ctx.window.IocConfigBackup(Object.assign({ h, section: (title, sub, kids) => h('section', null, title, sub, kids), table: (heads, rows) => h('table', null, heads, rows), api, unavailable: (s) => h('p', null, s), canHandle: true, demo: false, openSettings() {} }, opts));
 }
@@ -59,6 +59,17 @@ test('已排入的工作不顯示成備份成功；差異以文字節點呈現',
   const pre = walk(root).find((e) => e.tag === 'pre'); assert.equal(pre.children[0], '+ <script>alert(1)</script>');
   assert.equal(walk(root).filter((e) => e.tag === 'script').length, 0);
   assert.ok(walk(root).filter((e) => e.tag === 'button' && e.disabled).length === 2);
+});
+
+test('等待中的備份不自動重新整理整個管理頁', async () => {
+  const p = payload();
+  p.backup.engine = { state: 'ready', message: '備份服務已就緒' };
+  p.backup.runs = [{ device_name: 'fw', kind: 'manual', status: 'queued', requested_at: '2026-10-22 01:00:00' }];
+  let timers = 0;
+  const root = h('div');
+  await create(async () => p, { setTimeout: () => { timers++; return 0; } }).governance(root);
+  assert.equal(timers, 0);
+  assert.ok(text(root).includes('重新整理備份狀態'));
 });
 test('介接不可用時顯示原因與重新讀取入口', async () => {
   const root = h('div'); await create(async () => { throw Error('備份工具尚未安裝'); }).settings(root);
