@@ -626,10 +626,25 @@ test('內網可視性：目的 IP 補查只限清單上的來源與埠，被擋�
               'src_ip:("10.0.0.5" OR "10.0.0.6")', 'dstport:(445 OR 3389)'] as $part) {
         assertTrue(strpos($probe['q'], $part) !== false, '探測補查要有 ' . $part . ' ／ ' . $probe['q']);
     }
-    foreach (['log_type:firewall AND event_action:fw_deny', $internal('src_ip') . ' AND ' . $internal('dst_ip'), 'src_ip:("10.0.0.8" OR "10.0.0.11")', 'dstport:(445 OR 22)'] as $part) {
+    foreach (['log_type:firewall AND cat:"traffic:forward" AND event_action:fw_deny', $internal('src_ip') . ' AND ' . $internal('dst_ip'), 'src_ip:("10.0.0.8" OR "10.0.0.11")', 'dstport:(445 OR 22)'] as $part) {
         assertTrue(strpos($deny['q'], $part) !== false, '被擋下補查要有 ' . $part . ' ／ ' . $deny['q']);
     }
     assertSame([['count'], NetworkVisibilityService::LIST_LIMIT, nvIso(NV_NOW - 86400), nvIso(NV_NOW)], [$probe['metrics'], $probe['limit'], $probe['from'], $probe['to']], '一樣用絕對的 24 小時範圍');
+});
+
+test('內網可視性：「被擋下」只看轉送流量——每一個 fw_deny 查詢都限定 cat:traffic:forward（連到防火牆本身、送到網段廣播位址的 traffic:local deny 不算異常）', function () {
+    // monitor-vm 實測：兩端都在內部網段的日誌全是 traffic:local，「172.16.1.50 → 172.16.1.255:9900」被擋 576 次是對網段廣播位址的封包
+    $src = nvSource();
+    nvBuild($src);
+    $denies = array_values(array_filter($src->calls, static fn ($c) => strpos($c['q'], 'event_action:fw_deny') !== false));
+    assertTrue(count($denies) >= 3, '主查詢、前期 SMB、目的 IP 補查都有被擋下的查詢');
+    foreach ($denies as $c) {
+        assertTrue(strpos($c['q'], 'cat:"traffic:forward"') !== false, '被擋下的查詢要限定轉送流量：' . $c['q']);
+        assertTrue(strpos($c['q'], 'cat:"traffic:forward" AND event_action:fw_deny') !== false, $c['q']);
+    }
+    // 建立事件案帶的證據查詢維持原本的範圍（調查時看到同一來源同一埠的所有紀錄比較完整）
+    $d = nvBuild(nvSource());
+    assertSame('src_ip:"10.0.0.8" AND dstport:445 AND event_action:fw_deny', $d['anomalies']['data']['items'][0]['evidence_query']);
 });
 
 test('內網可視性：目的 IP 補查的查詢次數——只有一類才一次，沒有異常就不查', function () {

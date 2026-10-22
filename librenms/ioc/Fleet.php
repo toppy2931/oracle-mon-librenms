@@ -212,7 +212,8 @@ final class Fleet
     }
 
     /**
-     * 站點（有歸屬的設備，依站點名稱分組；沒有設備歸進去的站點不列），依名稱排序。
+     * 站點（有歸屬的設備，依站點名稱分組），依名稱排序。這裡只有「有設備」的站點，健康等級才有意義；
+     * 設定了卻沒有設備歸進去的站點在 emptyConfiguredSites()，站點數要兩邊加起來（LandscapeService 負責）。
      *
      * @return array<int,array{name:string,devices:int,up:int,down:int,level:string,level_label:string,lat:?float,lng:?float,issues:string}>
      */
@@ -264,7 +265,8 @@ final class Fleet
     }
 
     /**
-     * 站點健康度排行：最糟的在前面（等級、離線台數、名稱）。
+     * 站點健康度排行：最糟的在前面（等級、離線台數、名稱）。設定了卻沒有設備歸進去的站點排在最後（empty＝true、沒有等級可言，
+     * 畫面標「尚無設備」）：站點數要和設定頁的站點對得起來，不能讓人以為設定的站點消失了。
      *
      * @return array<int,array<string,mixed>>
      */
@@ -274,6 +276,10 @@ final class Fleet
         usort($sites, static function ($a, $b) {
             return [self::LEVEL_RANK[$b['level']], $b['down'], $a['name']] <=> [self::LEVEL_RANK[$a['level']], $a['down'], $b['name']];
         });
+        foreach ($this->emptyConfiguredSites() as $name) {
+            $sites[] = ['name' => $name, 'devices' => 0, 'up' => 0, 'down' => 0, 'lat' => null, 'lng' => null,
+                        'level' => 'normal', 'level_label' => self::LEVELS['normal'], 'issues' => '沒有設備歸進去', 'empty' => true];
+        }
         $out = [];
         foreach (array_slice($sites, 0, $limit) as $i => $s) {
             $out[] = ['rank' => $i + 1] + $s;

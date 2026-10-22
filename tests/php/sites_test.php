@@ -250,19 +250,32 @@ test('總覽：有自訂站點時的說明文字（未歸屬、全部歸屬、�
     $sites = siSites([['總部', '172.16.1.0/24'], ['空站', '203.0.113.0/24']]);
     $o = siBuild(new Fleet([dev('a', 'server', 1, null, ['ip' => '172.16.1.5']), dev('b')], 'UTC', $sites));
     $k = lsKpi($o)['sites'];
-    assertSame([1, 'good', '另有 1 台設備沒有歸屬站點（IP 不在任何站點的網段內，也沒有有效的 LibreNMS 位置）'], [$k['value'], $k['state'], $k['sub']]);
+    // 站點數＝有設備的站點（總部）＋設定了卻沒有設備歸進去的站點（空站）：要和設定頁自訂的 2 個站點對得起來
+    assertSame([2, 'good', '其中 1 個還沒有設備歸進去（空站）；另有 1 台設備沒有歸屬站點（IP 不在任何站點的網段內，也沒有有效的 LibreNMS 位置）'], [$k['value'], $k['state'], $k['sub']]);
     assertSame([true, ['空站'], null, 1], [$o['sites']['data']['configured'], $o['sites']['data']['empty_sites'], $o['sites']['data']['warning'], $o['sites']['data']['unlocated']]);
+    assertSame(1, count($o['sites']['data']['items']), '分佈與健康等級只算有設備的站點');
+    assertSame([0, 'good'], [lsKpi($o)['high_sites']['value'], lsKpi($o)['high_sites']['state']], '高風險站點的計算不含沒有設備的站點（沒有設備不是「正常」也不是「異常」）');
+    assertSame(['normal' => 1, 'minor' => 0, 'moderate' => 0, 'severe' => 0], $o['sites']['data']['counts'], '空站不算在「正常」那一格');
+    // 排行：有設備的在前，沒有設備的排最後、標 empty（畫面是灰色的「尚無設備」，不是「正常」）
+    $rank = $o['ranking']['data'];
+    assertSame([['總部', false, 1], ['空站', true, 0]], array_map(static fn ($r) => [$r['name'], $r['empty'] ?? false, $r['devices']], $rank));
+    assertSame([1, 2], array_column($rank, 'rank'));
 
     $all = lsKpi(siBuild(new Fleet([dev('a', 'server', 1, null, ['ip' => '172.16.1.5'])], 'UTC', $sites)))['sites'];
-    assertSame('各設備都已歸屬站點', $all['sub']);
+    assertSame([2, '其中 1 個還沒有設備歸進去（空站）；各設備都已歸屬站點'], [$all['value'], $all['sub']]);
+    $one = lsKpi(siBuild(new Fleet([dev('a', 'server', 1, null, ['ip' => '172.16.1.5'])], 'UTC', siSites([['總部', '172.16.1.0/24']]))))['sites'];
+    assertSame([1, '各設備都已歸屬站點'], [$one['value'], $one['sub']], '沒有空站點時不多說');
 
+    // 設定了站點，但沒有任何設備歸進去：站點數是設定的數量（不是「無法取得」或 0），但不是綠色，並說明去檢查網段
     $none = siBuild(new Fleet([dev('a', 'server', 1, null, ['ip' => '8.8.8.8'])], 'UTC', $sites));
     $nk = lsKpi($none);
-    assertSame([null, 'unknown', '尚未設定'], [$nk['sites']['value'], $nk['sites']['state'], $nk['sites']['na']]);
+    assertSame([2, 'warn', null], [$nk['sites']['value'], $nk['sites']['state'], $nk['sites']['na'] ?? null]);
     assertTrue(mb_strpos($nk['sites']['sub'], '已經設定了站點') !== false && mb_strpos($nk['sites']['sub'], '請檢查') !== false, $nk['sites']['sub']);
-    assertSame(false, $none['sites']['ok']);
+    assertSame(false, $none['sites']['ok'], '健康分佈沒有任何有設備的站點可畫');
     assertTrue(mb_strpos($none['sites']['error'], '已經設定了站點') !== false);
-    assertSame(false, $none['ranking']['ok']);
+    assertSame([null, 'unknown'], [$nk['high_sites']['value'], $nk['high_sites']['state']], '沒有任何站點有設備，高風險站點算不出來');
+    assertSame(true, $none['ranking']['ok'], '排行仍列出設定的站點（都是尚無設備）');
+    assertSame([['空站', true], ['總部', true]], array_map(static fn ($r) => [$r['name'], $r['empty']], $none['ranking']['data']));
 });
 
 test('總覽：沒有自訂站點時，有站點的畫面文字不變（只談 LibreNMS 位置），站點區塊的附加欄位是空的', function () {
@@ -277,7 +290,8 @@ test('總覽：沒有任何站點可顯示時，站點數、高風險站點、�
     $w = '站點設定讀不到，暫時只依 LibreNMS 的位置分站點：原因';
     $four = static function (array $o): array {
         $k = lsKpi($o);
-        return [$k['sites']['sub'], $k['high_sites']['sub'], $o['sites']['error'], $o['ranking']['error']];
+        // 有自訂站點但都沒有設備時，排行仍列出設定的站點（尚無設備），所以沒有 error；其他情況四處都有
+        return array_values(array_filter([$k['sites']['sub'], $k['high_sites']['sub'], $o['sites']['error'] ?? null, $o['ranking']['error'] ?? null], static fn ($t) => $t !== null));
     };
     // 沒有自訂站點、設備都沒有有效位置：只談 LibreNMS 位置，並指向設定頁
     foreach ($four(siBuild(new Fleet([dev('a'), dev('b')]))) as $text) {
@@ -287,7 +301,9 @@ test('總覽：沒有任何站點可顯示時，站點數、高風險站點、�
         assertTrue(substr($text, -strlen('；' . $w)) === '；' . $w, '警告要帶到每一處：' . $text);
     }
     // 有自訂站點但網段沒對上
-    foreach ($four(siBuild(new Fleet([dev('a', 'server', 1, null, ['ip' => '8.8.8.8'])], 'UTC', siSites([['總部', '172.16.1.0/24']])))) as $text) {
+    $unmatched = $four(siBuild(new Fleet([dev('a', 'server', 1, null, ['ip' => '8.8.8.8'])], 'UTC', siSites([['總部', '172.16.1.0/24']]))));
+    assertSame(3, count($unmatched), '站點數、高風險站點、站點分佈各一句（排行改列出尚無設備的站點）');
+    foreach ($unmatched as $text) {
         assertTrue(mb_strpos($text, '已經設定了站點') !== false && mb_strpos($text, '請檢查') !== false, $text);
     }
     // 沒有任何設備

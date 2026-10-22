@@ -11,7 +11,8 @@ namespace Ioc;
  *  - Top Talkers：內部來源依位元組數排名（前 5 名）。
  *  - 異常連線與異常 SMB：沒有基線可比，只能用規則。規則（提案版，常數在下面，要調就改常數與測試）：
  *      橫向探測：同一個內部來源、同一個目的埠，在 24 小時內連到 ≥ PROBE_MIN 個不同的內部主機；
- *      被擋下：內部對內部的連線被防火牆擋下（已經算橫向探測的同一來源同一埠不重複列）。
+ *      被擋下：內部對內部的「轉送流量」（cat 是 traffic:forward）被防火牆擋下（已經算橫向探測的同一來源同一埠不重複列）；
+ *        FortiGate 自己收發的 traffic:local（連到防火牆本身、送到網段廣播位址的封包）不算，見 deniedForward()。
  *    異常 SMB ＝ 目的埠 445 的異常；數量是「被標記的內部來源數」，並與前一個 24 小時比較。
  *  - IDS 告警：FortiGate 的 IPS／異常偵測日誌（cat 是 utm:ips、utm:anomaly）。沒有收到就明講「尚未接入」，不放數字。
  *
@@ -257,7 +258,7 @@ final class NetworkVisibilityService
         $metrics = ['card:dst_ip', 'count', 'latest:timestamp'];
         $probe = $this->logs->aggregateBetween($this->q($this->fwd() . ' AND ' . $both . ' AND ' . $this->quiet()),
             $from, $to, ['src_ip', self::F_PORT], $metrics, self::GROUP_LIMIT);
-        $deny = $this->logs->aggregateBetween($this->q('log_type:firewall AND event_action:fw_deny AND ' . $both . ' AND ' . $this->quiet()),
+        $deny = $this->logs->aggregateBetween($this->q($this->deniedForward() . ' AND ' . $both . ' AND ' . $this->quiet()),
             $from, $to, ['src_ip', self::F_PORT], $metrics, self::GROUP_LIMIT);
         // 有資料、但每一列的目的埠都是缺值：日誌根本沒有 dstport 欄位。不能照常算下去：每一筆都會歸到「沒有連接埠」，
         // 445 永遠對不上，異常 SMB 會顯示成綠色的 0（OPS-006）
@@ -297,7 +298,7 @@ final class NetworkVisibilityService
     private function withDestinations(array $nets, array $items, string $from, string $to): array
     {
         $error = null;
-        $bases = ['probe' => $this->fwd(), 'blocked' => 'log_type:firewall AND event_action:fw_deny'];
+        $bases = ['probe' => $this->fwd(), 'blocked' => $this->deniedForward()];
         foreach ($bases as $kind => $base) {
             $rows = array_filter($items, static fn ($a) => $a['kind'] === $kind);
             if ($rows === []) {
@@ -381,7 +382,7 @@ final class NetworkVisibilityService
             $metrics = ['card:dst_ip', 'count', 'latest:timestamp'];
             $probe = $this->logs->aggregateBetween($this->q($this->fwd() . ' AND ' . $both . ' AND ' . $port),
                 $from, $to, ['src_ip', self::F_PORT], $metrics, self::GROUP_LIMIT);
-            $deny = $this->logs->aggregateBetween($this->q('log_type:firewall AND event_action:fw_deny AND ' . $both . ' AND ' . $port),
+            $deny = $this->logs->aggregateBetween($this->q($this->deniedForward() . ' AND ' . $both . ' AND ' . $port),
                 $from, $to, ['src_ip', self::F_PORT], $metrics, self::GROUP_LIMIT);
             return self::smbSources($this->findAnomalies($nets, $probe, $deny));
         } catch (GraylogUnavailable $e) {
@@ -560,6 +561,16 @@ final class NetworkVisibilityService
     private function fwd(): string
     {
         return 'log_type:firewall AND ' . self::F_CAT . ':"' . self::FORWARD . '"';
+    }
+
+    /**
+     * 被防火牆擋下的「轉送流量」。一定要限定 traffic:forward：FortiGate 自己收發的流量（traffic:local）也是 deny，
+     * 例如送到網段廣播位址（172.16.1.255:9900）或連到防火牆本身的封包——那不是內部主機之間的橫向連線，
+     * 算進來會是天天出現、沒有人要處理的誤報（monitor-vm 實測：兩端都在內部網段的日誌全是 traffic:local，沒有 forward）。
+     */
+    private function deniedForward(): string
+    {
+        return $this->fwd() . ' AND event_action:fw_deny';
     }
 
     /** 兩端都在內部網段。 @param string[] $nets */
