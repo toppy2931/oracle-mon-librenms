@@ -75,7 +75,9 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
     const editor = h('div');
     let selected = entries[0] || null;
     let editorFields = null;
-    const deviceInfo = (entry) => catalog.find((d) => d.device_id === entry.device_id) || {
+    // API 與表單資料可能分別來自 JSON；統一轉為數字後再比對，避免已選設備被誤判成「已移除設備」。
+    const catalogDevice = (deviceId) => catalog.find((d) => Number(d.device_id) === Number(deviceId));
+    const deviceInfo = (entry) => catalogDevice(entry.device_id) || {
       device_id: entry.device_id, name: entry.name || '已移除設備', host: entry.host || '位址未提供',
     };
     const captureEditor = () => {
@@ -107,9 +109,13 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
       if (!selected) { editorFields = null; editor.replaceChildren(note('請按「加入設備」或在表格選擇「編輯」。')); return; }
       const current = selected;
       const choices = catalog.slice();
-      if (current.device_id && !choices.some((d) => d.device_id === current.device_id)) choices.push(deviceInfo(current));
+      if (current.device_id && !choices.some((d) => Number(d.device_id) === Number(current.device_id))) choices.push(deviceInfo(current));
       const select = h('select', { 'aria-label': '選擇設備', required: true, style: 'width:100%' }, h('option', { value: '' }, '請選擇設備'),
-        choices.map((d) => h('option', { value: String(d.device_id) }, d.name + '（' + d.host + '）')));
+        choices.map((d) => h('option', {
+          value: String(d.device_id),
+          // 已設定的設備不可再次加入；保留目前編輯的那筆以便修改。
+          disabled: entries.some((entry) => entry !== current && Number(entry.device_id) === Number(d.device_id)),
+        }, d.name + '（' + d.host + '）')));
       select.value = current.device_id ? String(current.device_id) : '';
       const model = h('select', { 'aria-label': '設備品牌', style: 'width:100%' }, models.map(([v, title]) => h('option', { value: v }, title)));
       model.value = current.model || 'fortios';
@@ -172,7 +178,18 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
         hostKeyArea.replaceChildren(h('fieldset', { style: 'border:1px solid var(--line);border-radius:10px;margin:12px 0;padding:12px' },
           h('legend', null, 'SSH 主機身分驗證'), hostKeyStatus(), !(candidate && (candidate.trusted || candidate.status === 'trusted')) && scan, hostKeyMessage));
       };
-      select.addEventListener('change', () => { updatePasswordRule(); candidate = null; drawHostKey(); }); updatePasswordRule();
+      select.addEventListener('change', () => {
+        // 立即同步選擇結果，讓表格在儲存前就能顯示正確名稱與位址。
+        const nextDeviceId = select.value ? Number(select.value) : null;
+        if (Number(current.device_id) !== nextDeviceId) {
+          // 密碼只可沿用同一台既有設備；改選設備後必須重新輸入。
+          current.password = '';
+          current.password_set = false;
+          password.value = '';
+        }
+        current.device_id = nextDeviceId;
+        updatePasswordRule(); candidate = null; drawDevices(); drawHostKey();
+      }); updatePasswordRule();
       editorFields = { select, model, username, password, active };
       editor.replaceChildren(h('fieldset', { style: 'border:1px solid var(--line);border-radius:10px;margin:12px 0;padding:12px' },
         h('legend', null, '設備備份設定'), label('設備', select), label('設備品牌／系統', model),
@@ -188,13 +205,27 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
       selected = { device_id: null, model: 'fortios', username: '', password: '', password_set: false, enabled: true };
       entries.push(selected); drawDevices(); drawEditor();
     } }, '＋ 加入設備');
+    const validationMessage = () => {
+      const selectedIds = new Set();
+      for (const entry of entries) {
+        const id = Number(entry.device_id);
+        if (!Number.isInteger(id) || id < 1) return '請先為每一筆新增設備選擇 LibreNMS 中的設備，再儲存。';
+        if (!catalogDevice(id)) return '選擇的設備目前不在 LibreNMS 設備目錄中，請重新選擇後再儲存。';
+        if (selectedIds.has(id)) return '同一台設備只能加入一次，請移除重複的設備列後再儲存。';
+        selectedIds.add(id);
+      }
+      return '';
+    };
     const form = h('form', { onsubmit: async (event) => {
-      event.preventDefault(); save.disabled = true; add.disabled = true;
+      event.preventDefault();
+      captureEditor();
+      const error = validationMessage();
+      if (error) { message.replaceChildren(unavailable(error)); return; }
+      save.disabled = true; add.disabled = true;
       const fields = Array.from(form.querySelectorAll('input, select, button'));
       fields.forEach((el) => { el.disabled = true; });
       message.replaceChildren(note('正在儲存並確認工具設定…'));
       try {
-        captureEditor();
         const r = await request('save', { settings: { enabled: enabled.checked, interval_hours: Number(interval.value), devices: entries.map((entry) => ({
           device_id: Number(entry.device_id), model: entry.model, username: entry.username,
           password: entry.password, port: 22, enabled: entry.enabled,

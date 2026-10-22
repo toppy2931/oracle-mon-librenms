@@ -30,6 +30,13 @@ header("Content-Security-Policy: frame-ancestors 'self'");
 // 此頁會載入獨立 IOC 前端模組；禁止 HTML 回應快取，避免部署後仍引用舊版模組。
 header('Cache-Control: no-store, max-age=0');
 
+// 靜態 JS 可被瀏覽器或反向代理個別快取；以內容雜湊做版本，部署新檔後一定會請求新網址。
+// 不使用檔案時間，避免安裝工具保留 mtime 時仍載入舊快取。
+$config_backup_js = __DIR__ . '/js/ioc-config-backup.js';
+$config_backup_js_version = is_readable($config_backup_js)
+    ? substr(hash_file('sha256', $config_backup_js), 0, 16)
+    : 'missing';
+
 $config = json_encode([
     'level'  => $level,
     'user'   => (string) Auth::user()->username,
@@ -218,7 +225,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
 <div class="toast" id="toast" role="status"></div>
 
 <script type="application/json" id="ioc-config"><?= $config ?></script>
-<script src="/js/ioc-config-backup.js?v=4"></script>
+<script src="/js/ioc-config-backup.js?v=<?= htmlspecialchars($config_backup_js_version, ENT_QUOTES, 'UTF-8') ?>"></script>
 <script>
 (() => {
   'use strict';

@@ -65,6 +65,23 @@ test('備份設定以設備表格集中管理，可加入、編輯與移除單�
   remove.onclick();
   assert.ok(text(root).includes('尚未加入備份設備') === false);
 });
+test('新增列選擇設備後立即顯示正確名稱與位址，未選設備不可儲存', async () => {
+  const calls = [];
+  const p = payload();
+  p.devices.push({ device_id: 8, name: '分點防火牆', host: '192.0.2.8' });
+  const root = h('div'); const ui = create(async (url, body) => { calls.push(body); return p; });
+  await ui.settings(root);
+  button(root, '＋ 加入設備').onclick();
+  const form = walk(root).find((e) => e.tag === 'form');
+  await form.onsubmit({ preventDefault() {} });
+  assert.equal(calls.some((call) => call.action === 'save'), false);
+  assert.ok(text(root).includes('請先為每一筆新增設備選擇 LibreNMS 中的設備'));
+
+  const select = findLabel(root, '選擇設備');
+  select.value = '8'; select.listeners.change();
+  assert.ok(text(root).includes('分點防火牆'));
+  assert.ok(text(root).includes('192.0.2.8'));
+});
 test('新增設備必須先掃描並由管理者勾選確認 SSH 指紋，才會送出信任要求', async () => {
   const calls = []; const root = h('div');
   const ui = create(async (url, body) => {
