@@ -115,6 +115,8 @@ class Worker:
             CREATE TABLE IF NOT EXISTS audit (
                 id INTEGER PRIMARY KEY, occurred_at TEXT, actor TEXT, action TEXT,
                 detail TEXT);
+            CREATE INDEX IF NOT EXISTS runs_device_id_id ON runs(device_id,id);
+            CREATE INDEX IF NOT EXISTS versions_device_id_id ON versions(device_id,id);
         ''')
 
     def close(self):
@@ -280,9 +282,11 @@ class Worker:
                 break
 
     def redact(self, content):
-        for device in self.settings()['devices']:
-            if device['password']:
-                content = content.replace(device['password'], '[已遮罩]')
+        secrets = set(self.get_meta('redaction_secrets', []))
+        secrets.update(d['password'] for d in self.settings()['devices'])
+        for secret in sorted(secrets, key=len, reverse=True):
+            if secret:
+                content = content.replace(secret, '[已遮罩]')
         content = re.sub(r'-----BEGIN [^-]*PRIVATE KEY-----.*?(?:-----END [^-]*PRIVATE KEY-----|\Z)', '[私密金鑰已遮罩]', content, flags=re.S | re.I)
         pattern = re.compile(r'password|passwd|passphrase|\bpsk\b|\bkey\b|secret|community|private.?key|pre.?shared|token|credential|auth(?:entication)?[- _]?(?:key|pass)', re.I)
         return '\n'.join('[敏感設定已遮罩]' if pattern.search(line) else line for line in content.splitlines()) + '\n'
@@ -303,8 +307,8 @@ class Worker:
         if prior:
             diff = list(difflib.unified_diff(self.redact(prior['content']).splitlines(), self.redact(content).splitlines(),
                                            fromfile='前次設定', tofile='本次設定', lineterm=''))
-            added = sum(line.startswith('+') and not line.startswith('+++') for line in diff)
-            removed = sum(line.startswith('-') and not line.startswith('---') for line in diff)
+            added = sum(line.startswith('+') for line in diff[2:])
+            removed = sum(line.startswith('-') for line in diff[2:])
             displayed = '\n'.join(diff)
             if not displayed:
                 displayed = '內容雜湊已變更；差異位於被遮罩的敏感設定。'
@@ -354,7 +358,53 @@ class Worker:
         for change in changes:
             change['diff'] = self.redact(change['diff']).rstrip('\n').encode('utf-8')[:8200].decode('utf-8', errors='ignore')
         audit = [dict(row) for row in self.db.execute('SELECT id,occurred_at,actor,action,detail FROM audit ORDER BY id DESC LIMIT 50')]
-        return {'settings': self.public_settings(), 'engine': engine, 'runs': runs, 'changes': changes, 'audit': audit}
+        return {'settings': self.public_settings(), 'engine': engine, 'runs': runs, 'changes': changes, 'audit': audit, 'history_devices': self.history_devices()}
+
+    @staticmethod
+    def identifier(value, allow_zero=False):
+        if type(value) is not int or not (0 if allow_zero else 1) <= value <= 2147483647:
+            raise BackupError('validation', '識別碼或分頁位置不正確')
+        return value
+
+    def history_devices(self):
+        devices = {d['device_id']: {'device_id': d['device_id'], 'name': d['name'], 'configured': True}
+                   for d in self.settings()['devices']}
+        for row in self.db.execute('SELECT device_id,device_name FROM runs WHERE id IN (SELECT MAX(id) FROM runs GROUP BY device_id) ORDER BY device_id'):
+            devices.setdefault(row['device_id'], {'device_id': row['device_id'], 'name': row['device_name'], 'configured': False})
+        return list(devices.values())
+
+    def history(self, request):
+        ident = self.identifier(request.get('device_id'))
+        offset = self.identifier(request.get('offset', 0), allow_zero=True)
+        if ident not in {d['device_id'] for d in self.history_devices()}:
+            raise BackupError('validation', '找不到此設備的備份紀錄')
+        runs = [dict(r) for r in self.db.execute('SELECT id,device_id,device_name,kind,status,requested_at,completed_at,message,version_id FROM runs WHERE device_id=? ORDER BY id DESC LIMIT 20 OFFSET ?', (ident, offset))]
+        versions = [dict(r) for r in self.db.execute('SELECT id,device_id,created_at,digest FROM versions WHERE device_id=? ORDER BY id DESC LIMIT 20 OFFSET ?', (ident, offset))]
+        return {'device_id': ident, 'offset': offset, 'limit': 20, 'runs': runs, 'versions': versions,
+                'total_runs': self.db.execute('SELECT COUNT(*) FROM runs WHERE device_id=?', (ident,)).fetchone()[0],
+                'total_versions': self.db.execute('SELECT COUNT(*) FROM versions WHERE device_id=?', (ident,)).fetchone()[0]}
+
+    def compare(self, request):
+        ident = self.identifier(request.get('device_id'))
+        first = self.identifier(request.get('from_version_id'))
+        second = self.identifier(request.get('to_version_id'))
+        versions = [self.db.execute('SELECT * FROM versions WHERE device_id=? AND id=?', (ident, version)).fetchone()
+                    for version in [first, second]]
+        if any(v is None for v in versions):
+            raise BackupError('validation', '版本不存在或不屬於同一設備')
+        before, after = versions
+        lines = list(difflib.unified_diff(self.redact(before['content']).splitlines(), self.redact(after['content']).splitlines(),
+                                        fromfile='版本 ' + str(first), tofile='版本 ' + str(second), lineterm=''))
+        added = sum(line.startswith('+') for line in lines[2:])
+        removed = sum(line.startswith('-') for line in lines[2:])
+        changed = before['digest'] != after['digest']
+        diff = '\n'.join(lines) or ('內容雜湊已變更；差異位於被遮罩的敏感設定。' if changed else '兩個版本的內容相同。')
+        truncated = len(diff.encode('utf-8')) > 12000
+        if truncated:
+            diff = diff.encode('utf-8')[:12000].decode('utf-8', errors='ignore') + '\n[差異過長，已截斷]'
+        return {'device_id': ident, 'from_version_id': first, 'to_version_id': second,
+                'from_created_at': before['created_at'], 'to_created_at': after['created_at'],
+                'diff': diff, 'added': added, 'removed': removed, 'changed': changed, 'truncated': truncated}
 
     def cached_engine(self):
         engine = self.get_meta('engine', {'backend': 'oxidized', 'endpoint': ENGINE_URL,
@@ -370,17 +420,21 @@ class Worker:
         return engine
 
     def dispatch(self, request):
-        if not isinstance(request, dict) or request.get('action') not in {'settings', 'status', 'save', 'test', 'run', 'tick'}:
+        if not isinstance(request, dict) or request.get('action') not in {'settings', 'status', 'save', 'test', 'run', 'tick', 'history', 'compare'}:
             raise BackupError('validation', '不支援的組態備份操作')
         action = request['action']
-        actor = safe_text(request.get('actor', 'system'), '操作者', 255, allow_empty=action in {'settings', 'status'})
-        self.db.execute('BEGIN' if action in {'settings', 'status'} else 'BEGIN IMMEDIATE')
+        actor = safe_text(request.get('actor', 'system'), '操作者', 255, allow_empty=action in {'settings', 'status', 'history', 'compare'})
+        self.db.execute('BEGIN' if action in {'settings', 'status', 'history', 'compare'} else 'BEGIN IMMEDIATE')
         try:
             engine = self.cached_engine()
             if action == 'save':
                 settings = self.validate(request.get('settings'))
                 if self.db.execute("SELECT 1 FROM runs WHERE status='queued'").fetchone():
                     raise BackupError('busy', '仍有備份執行中，請完成後再修改設定')
+                secrets = set(self.get_meta('redaction_secrets', []))
+                secrets.update(d['password'] for d in self.settings()['devices'])
+                secrets.update(d['password'] for d in settings['devices'])
+                self.put_meta('redaction_secrets', sorted(secrets))
                 self.put_meta('settings', settings)
                 self.generate()
                 engine.update(state='pending_apply', applied=False, message='設定已儲存，等待背景程序套用；尚未啟用備份')
@@ -416,6 +470,10 @@ class Worker:
                                 break
                     self.dispatch_pending(nodes)
             result = self.response(engine)
+            if action == 'history':
+                result['history'] = self.history(request)
+            if action == 'compare':
+                result['comparison'] = self.compare(request)
             self.db.commit()
             return result
         except Exception:

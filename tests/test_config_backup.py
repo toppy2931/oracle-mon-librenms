@@ -66,6 +66,70 @@ class BackupTests(unittest.TestCase):
             self.engine.content = content
         return self.call('tick')
 
+    def test_history_paginates_all_runs_and_versions_after_device_removal(self):
+        self.save()
+        for n in range(25):
+            self.worker.store_version({'device_id': 7, 'device_name': 'router'}, 'hostname r' + str(n))
+            self.worker.db.execute("INSERT INTO runs(device_id,device_name,status) VALUES(7,'router','success')")
+        self.settings['devices'] = []
+        self.call('save', settings=self.settings)
+        result = self.call('history', device_id=7, offset=20)
+        history = result['history']
+        self.assertEqual((25, 25, 5, 5), (history['total_runs'], history['total_versions'], len(history['runs']), len(history['versions'])))
+        self.assertFalse(result['history_devices'][0]['configured'])
+        self.assertNotIn('content', history['versions'][0])
+        self.assertEqual([], self.call('history', device_id=7, offset=40)['history']['versions'])
+
+    def test_compare_arbitrary_versions_masks_rotated_and_removed_credentials(self):
+        self.settings['devices'][0]['password'] = 'uniqueOldValue'
+        self.save()
+        self.worker.store_version({'device_id': 7, 'device_name': 'router'}, 'hostname old\nremark uniqueOldValue')
+        self.settings['devices'][0]['password'] = 'uniqueNewValue'
+        self.call('save', settings=self.settings)
+        self.worker.store_version({'device_id': 7, 'device_name': 'router'}, 'hostname middle')
+        self.worker.store_version({'device_id': 7, 'device_name': 'router'}, 'hostname new\nremark uniqueNewValue')
+        self.settings['devices'] = []
+        self.call('save', settings=self.settings)
+        result = self.call('compare', device_id=7, from_version_id=1, to_version_id=3)['comparison']
+        self.assertTrue(result['changed'])
+        self.assertIn('-hostname old', result['diff'])
+        self.assertIn('+hostname new', result['diff'])
+        self.assertNotIn('uniqueOldValue', result['diff'])
+        self.assertNotIn('uniqueNewValue', result['diff'])
+        self.assertFalse(self.call('compare', device_id=7, from_version_id=1, to_version_id=1)['comparison']['changed'])
+        self.worker.store_version({'device_id': 8, 'device_name': 'other'}, 'hostname other')
+        with self.assertRaises(backup.BackupError):
+            self.call('compare', device_id=7, from_version_id=1, to_version_id=4)
+
+    def test_diff_counts_content_that_resembles_diff_headers(self):
+        run = {'device_id': 7, 'device_name': 'router'}
+        self.worker.store_version(run, '--old banner\nunchanged\n')
+        self.worker.store_version(run, '++new banner\nunchanged\n')
+        compared = self.call('compare', device_id=7, from_version_id=1, to_version_id=2)['comparison']
+        self.assertEqual((1, 1), (compared['added'], compared['removed']))
+        automatic = self.call('status')['changes'][0]
+        self.assertEqual((1, 1), (automatic['added'], automatic['removed']))
+
+    def test_large_comparison_is_truncated_with_complete_change_counts(self):
+        run = {'device_id': 7, 'device_name': 'router'}
+        before = ''.join('interface ethernet' + str(n) + ' description original\n' for n in range(35000))
+        self.worker.store_version(run, before)
+        self.worker.store_version(run, before.replace('original', 'modified'))
+        result = self.call('compare', device_id=7, from_version_id=1, to_version_id=2)['comparison']
+        self.assertTrue(result['truncated'])
+        self.assertEqual((35000, 35000), (result['added'], result['removed']))
+        self.assertLess(len(result['diff'].encode()), 12500)
+
+    def test_history_and_comparison_reject_invalid_identifiers(self):
+        for value in [True, '7', 0, -1, 2147483648, None]:
+            with self.subTest(value=value), self.assertRaises(backup.BackupError):
+                self.call('history', device_id=value)
+        for offset in [True, '0', -1, 2147483648]:
+            with self.subTest(offset=offset), self.assertRaises(backup.BackupError):
+                self.call('history', device_id=7, offset=offset)
+        with self.assertRaises(backup.BackupError):
+            self.call('compare', device_id=7, from_version_id=999, to_version_id=1000)
+
     def test_settings_never_return_password(self):
         out = self.save()
         self.assertNotIn('private-secret', json.dumps(out))

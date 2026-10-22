@@ -107,6 +107,31 @@ final class ConfigBackupService
         return $this->deviceAction('run', $deviceId, $actor);
     }
 
+    public function history(int $deviceId, int $offset, ?string $level): array
+    {
+        $this->authorize($level);
+        $this->identifier($deviceId);
+        $this->identifier($offset, true);
+        return $this->request(['action' => 'history', 'actor' => '', 'device_id' => $deviceId, 'offset' => $offset]);
+    }
+
+    public function compare(int $deviceId, int $from, int $to, ?string $level): array
+    {
+        $this->authorize($level);
+        foreach ([$deviceId, $from, $to] as $id) {
+            $this->identifier($id);
+        }
+        return $this->request(['action' => 'compare', 'actor' => '', 'device_id' => $deviceId,
+            'from_version_id' => $from, 'to_version_id' => $to]);
+    }
+
+    private function identifier(int $id, bool $allowZero = false): void
+    {
+        if ($id < ($allowZero ? 0 : 1) || $id > 2147483647) {
+            throw new ValidationError(['識別碼或分頁位置不正確']);
+        }
+    }
+
     private function authorize(?string $level): void
     {
         Access::requireHandler($level, '只有管理者可以管理設備組態備份');
@@ -258,7 +283,7 @@ final class ConfigBackupService
                 'detail' => $actions[$row['action']],
             ];
         }
-        return [
+        $result = [
             'settings' => [
                 'enabled' => $settings['enabled'],
                 'interval_hours' => $settings['interval_hours'],
@@ -274,6 +299,45 @@ final class ConfigBackupService
             'changes' => $changes,
             'audit' => $audit,
         ];
+        $result['history_devices'] = [];
+        foreach (is_array($data['history_devices'] ?? null) ? $data['history_devices'] : [] as $row) {
+            if (is_array($row)) {
+                $result['history_devices'][] = ['device_id' => (int) ($row['device_id'] ?? 0),
+                    'name' => $this->text($row['name'] ?? ''), 'configured' => ($row['configured'] ?? false) === true];
+            }
+        }
+        if (isset($data['history']) && is_array($data['history'])) {
+            $history = $data['history'];
+            // Reuse the existing run whitelist and local status messages.
+            $runData = $data;
+            unset($runData['history'], $runData['comparison']);
+            $runData['runs'] = array_slice(is_array($history['runs'] ?? null) ? $history['runs'] : [], 0, 20);
+            $versions = [];
+            foreach (array_slice(is_array($history['versions'] ?? null) ? $history['versions'] : [], 0, 20) as $row) {
+                if (is_array($row)) {
+                    $versions[] = ['id' => (int) ($row['id'] ?? 0), 'device_id' => (int) ($row['device_id'] ?? 0),
+                        'created_at' => $this->text($row['created_at'] ?? ''),
+                        'digest' => preg_match('/\A[a-f0-9]{64}\z/', (string) ($row['digest'] ?? '')) ? $row['digest'] : ''];
+                }
+            }
+            $result['history'] = ['device_id' => (int) ($history['device_id'] ?? 0),
+                'offset' => max(0, (int) ($history['offset'] ?? 0)), 'limit' => 20,
+                'total_runs' => max(0, (int) ($history['total_runs'] ?? 0)),
+                'total_versions' => max(0, (int) ($history['total_versions'] ?? 0)),
+                'runs' => $this->sanitize($runData)['runs'], 'versions' => $versions];
+        }
+        if (isset($data['comparison']) && is_array($data['comparison'])) {
+            $comparison = $data['comparison'];
+            $result['comparison'] = ['device_id' => (int) ($comparison['device_id'] ?? 0),
+                'from_version_id' => (int) ($comparison['from_version_id'] ?? 0),
+                'to_version_id' => (int) ($comparison['to_version_id'] ?? 0),
+                'from_created_at' => $this->text($comparison['from_created_at'] ?? ''),
+                'to_created_at' => $this->text($comparison['to_created_at'] ?? ''),
+                'diff' => $this->redactDiff($comparison['diff'] ?? ''),
+                'added' => max(0, (int) ($comparison['added'] ?? 0)), 'removed' => max(0, (int) ($comparison['removed'] ?? 0)),
+                'changed' => ($comparison['changed'] ?? false) === true, 'truncated' => ($comparison['truncated'] ?? false) === true];
+        }
+        return $result;
     }
 
     private function text($value): string

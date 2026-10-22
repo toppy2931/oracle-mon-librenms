@@ -413,7 +413,7 @@ FortiGate CEF 格式的 `key=value` 內容用 **6 個獨立 Grok pattern Extract
 
 ## IOC 組態治理與設備備份（2026-10-22 新增；尚未 VM 驗收）
 
-- UI 模組 `librenms/html/js/ioc-config-backup.js` 放 IOC 設定頁，結果放組態治理頁；`ioc-backup.php` 全部 admin-only，先 `ioc_begin(true)` 與 `Access::requireHandler` 才讀設備或呼叫 helper。設備位址以 LibreNMS 目錄覆蓋瀏覽器輸入。範例模式介面不連正式備份。
+- UI 模組 `librenms/html/js/ioc-config-backup.js` 集中於 IOC「組態備份」專屬管理頁，一般設定頁只保留入口；`ioc-backup.php` 全部 admin-only，先 `ioc_begin(true)` 與 `Access::requireHandler` 才讀設備或呼叫 helper。設備位址以 LibreNMS 目錄覆蓋瀏覽器輸入。範例模式介面不連正式備份。
 - 這是既有 IOC 唯讀／自有資料表架構之外的新增受限操作：PHP → 固定 sudo helper `manage-config-backup.sh` → 降權 `oracle-backup` → Python worker。不能讓 PHP 直接寫設定檔、傳任意 shell／URL／路徑。憑證只走 stdin，不能放 argv、錯誤或稽核紀錄。
 - 專用狀態在 `/var/lib/oracle-mon/config-backup`（700）；SQLite 保存政策、憑證、原始版本、差異、稽核，檔案 600。不是 LibreNMS 資料庫的一部分，主機備份需另外包含它。`remove_secret=false` 保存採集原文，Web 僅回遮罩差異；這不是靜態加密，也不承諾所有設備可完整還原。
 - REST 僅 `127.0.0.1:8879`，但沒有本機使用者認證，僅可用於可信專用 VM，不能公開反代。詳見 [組態備份維運指引](docs/ioc/config-backup-worker.md)。

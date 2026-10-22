@@ -187,3 +187,43 @@ test('組態備份：五十台設備的多位元組合法上限可完整傳遞',
     assertSame(128, mb_strlen($captured['settings']['devices'][0]['name'], 'UTF-8'));
     assertSame(str_repeat('😀', 512), $captured['settings']['devices'][49]['password']);
 });
+
+
+test('組態備份：歷史與比較先拒絕非管理者及無效識別碼', function () {
+    $calls = 0;
+    $svc = cbService(function () use (&$calls) { $calls++; return cbReply(); });
+    assertThrows(AccessDenied::class, fn() => $svc->history(7, 0, Access::VIEWER));
+    assertThrows(AccessDenied::class, fn() => $svc->compare(7, 1, 2, null));
+    foreach ([0, -1, 2147483648] as $id) {
+        assertThrows(ValidationError::class, fn() => $svc->history($id, 0, Access::HANDLER));
+        assertThrows(ValidationError::class, fn() => $svc->compare(7, $id, 2, Access::HANDLER));
+    }
+    assertThrows(ValidationError::class, fn() => $svc->history(7, -1, Access::HANDLER));
+    assertSame(0, $calls);
+});
+
+test('組態備份：歷史允許已移除設備且不回傳原始內容', function () {
+    $requests = [];
+    $reply = cbReply();
+    $reply['data']['history_devices'] = [['device_id'=>99,'name'=>'舊設備','configured'=>false,'password'=>'hidden']];
+    $reply['data']['history'] = ['device_id'=>99,'offset'=>20,'total_runs'=>25,'total_versions'=>21,
+        'runs'=>[['id'=>1,'status'=>'failed','message'=>'hidden']],
+        'versions'=>[['id'=>1,'device_id'=>99,'created_at'=>'now','digest'=>str_repeat('a',64),'content'=>'hidden']]];
+    $svc=cbService(function($r) use (&$requests,$reply) { $requests[]=$r; return $reply; });
+    $result=$svc->history(99,20,Access::HANDLER);
+    assertSame(99,$requests[0]['device_id']);
+    assertSame(20,$result['history']['offset']);
+    assertSame(25,$result['history']['total_runs']);
+    assertTrue(strpos(json_encode($result),'hidden')===false);
+});
+
+test('組態備份：比較傳遞任意版本並遮罩敏感差異', function () {
+    $request=null;$reply=cbReply();
+    $reply['data']['comparison']=['device_id'=>7,'from_version_id'=>2,'to_version_id'=>5,
+        'diff'=>"+hostname branch\n+password hidden",'changed'=>true,'truncated'=>false,'content'=>'hidden'];
+    $svc=cbService(function($r) use (&$request,$reply) {$request=$r;return $reply;});
+    $result=$svc->compare(7,2,5,Access::HANDLER);
+    assertSame(2,$request['from_version_id']);assertSame(5,$request['to_version_id']);
+    assertTrue(strpos($result['comparison']['diff'],'+hostname branch')!==false);
+    assertTrue(strpos(json_encode($result),'hidden')===false);
+});

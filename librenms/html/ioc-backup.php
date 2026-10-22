@@ -16,7 +16,7 @@ try {
         ioc_fail(400, '內容不是合法的 JSON');
     }
     $action = $in['action'] ?? '';
-    if (!is_string($action) || !in_array($action, ['get', 'save', 'test', 'run'], true)) {
+    if (!is_string($action) || !in_array($action, ['get', 'save', 'test', 'run', 'history', 'compare'], true)) {
         ioc_fail(400, '不認得的動作');
     }
     $devices = ioc_backup_devices($level);
@@ -32,6 +32,21 @@ try {
     }
     if (!is_int($in['device_id'] ?? null) || $in['device_id'] < 1) {
         ioc_fail(400, '請選擇有效的設備');
+    }
+    if ($action === 'history') {
+        $offset = $in['offset'] ?? 0;
+        if (!is_int($offset) || $offset < 0 || $offset > 2147483647) {
+            ioc_fail(400, '分頁位置不正確');
+        }
+        ioc_json(['backup' => $svc->history($in['device_id'], $offset, $level), 'devices' => $devices]);
+    }
+    if ($action === 'compare') {
+        foreach (['from_version_id', 'to_version_id'] as $field) {
+            if (!is_int($in[$field] ?? null) || $in[$field] < 1 || $in[$field] > 2147483647) {
+                ioc_fail(400, '請選擇有效的備份版本');
+            }
+        }
+        ioc_json(['backup' => $svc->compare($in['device_id'], $in['from_version_id'], $in['to_version_id'], $level), 'devices' => $devices]);
     }
     $data = $action === 'test' ? $svc->test($in['device_id'], $actor, $level) : $svc->run($in['device_id'], $actor, $level);
     ioc_json(['backup' => $data, 'devices' => $devices]);

@@ -2,7 +2,7 @@
 
 ## 範圍與信任邊界
 
-本模組供 IOC 設定頁管理設備、帳號及固定間隔排程；組態治理頁顯示工作、差異與稽核。第一版使用獨立受管 Oxidized，不修改既有 LibreNMS、Oxidized 或 RANCID 設定。支援 ios、fortios、junos、routeros，僅 SSH 22；每份政策最多 50 台，間隔 1 至 168 小時。實際設備相容性必須在隔離測試設備驗收。
+本模組在 IOC「組態備份」專屬管理頁集中管理設備、帳號、固定間隔排程、備份紀錄與版本比較；一般設定頁只保留入口。第一版使用獨立受管 Oxidized，不修改既有 LibreNMS、Oxidized 或 RANCID 設定。支援 ios、fortios、junos、routeros，僅 SSH 22；每份政策最多 50 台，間隔 1 至 168 小時。實際設備相容性必須在隔離測試設備驗收。
 
 設定頁不直接連線設備。PHP 經 root 白名單 helper 降權至 `oracle-backup`，與 Oxidized、排程使用相同專用帳號。所有請求走標準輸入 JSON，不以命令列傳遞密碼。
 
@@ -82,3 +82,17 @@ Web 不接收原始內容，只收到差異預覽。已知設備密碼、密碼�
 - [Oxidized CLI](https://github.com/ytti/oxidized/blob/master/lib/oxidized/cli.rb)：home-dir，沒有 one-shot 參數。
 - [Oxidized-web API](https://github.com/ytti/oxidized-web/blob/master/lib/oxidized/web/webapp.rb)：reload、next、nodes、fetch；String 以 lines 陣列輸出 JSON，worker 會串接回原內容。
 - [Oxidized output](https://github.com/ytti/oxidized/blob/master/docs/Outputs.md)：file 儲存與 clean_obsolete_nodes 風險；此模組明確關閉清理。
+
+## 專屬管理頁與歷史查詢
+
+組態備份頁提供設備查詢、設備與排程設定、歷史紀錄及任選兩個版本比較。歷史查詢包含已移除備份政策但仍保有紀錄的設備，管理者可依設備分頁查閱，不受首頁最近 50 筆限制。每頁 20 筆；工作紀錄與內容版本各自顯示總筆數。備份內容未改變時沿用既有版本，因此執行次數不等於版本代數。
+
+API 仍使用 POST、CSRF 與 admin 權限：
+
+- `history`：`device_id` 正整數、`offset` 非負整數（預設 0）；`backup.history` 回傳執行紀錄、版本摘要、總筆數及分頁資訊。
+- `compare`：`device_id`、`from_version_id`、`to_version_id` 皆為正整數；兩個版本必須屬於同一設備。`backup.comparison` 回傳來源與目標版本時間、遮罩差異、新增／刪除行數及截斷旗標。
+- `backup.history_devices` 提供可查歷史的設備，`configured` 區分目前仍有設定的設備。
+
+歷史查詢直接讀取本模組 SQLite，不需要備份引擎上線，也不會派送備份。版本列表不包含原始內容。比較從較舊或較新的指定來源往目標方向呈現，敏感內容保持遮罩；過長差異明確提示截斷。正式 VM 的頁面、權限與實際資料驗收仍須部署後進行。
+
+為避免更換密碼或移除設備後，歷史差異重新顯示已知秘密，受保護資料庫另保留曾設定的備份密碼供遮罩使用；這些資料不回傳 Web，與原始備份採相同存取保護。升級前已遺失的舊密碼無法回溯補齊，仍使用敏感欄位模式遮罩。

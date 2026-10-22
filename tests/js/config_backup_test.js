@@ -78,3 +78,75 @@ test('儲存期間暫停整個表單，避免使用者的修改被完成回覆�
   finish(payload()); await saving;
   assert.ok(walk(root).find((e) => e.tag === 'form'));
 });
+const findLabel = (root, label) => walk(root).find((e) => e.attrs['aria-label'] === label);
+const button = (root, title) => walk(root).find((e) => e.tag === 'button' && text(e) === title);
+const historyPayload = (offset = 0, device = 7) => {
+  const p = payload();
+  p.backup.history = { device_id: device, offset, limit: 20, total_runs: 21, total_versions: 21, runs: [], versions: [{ id: offset ? 1 : 21, device_id: device, created_at: '2026-10-22 01:00:00' }] };
+  return p;
+};
+test('管理頁切換保留未儲存的設定表單，設備可依位址搜尋', async () => {
+  const root = h('div'); await create(async () => payload()).governance(root);
+  const search = findLabel(root, '搜尋已設定設備'); search.value = 'no-match'; search.listeners.input();
+  assert.ok(text(root).includes('沒有符合條件'));
+  await button(root, '備份設定').onclick();
+  const password = walk(root).find((e) => e.type === 'password'); password.value = 'unsaved';
+  button(root, '設備與狀態').onclick(); await button(root, '備份設定').onclick();
+  assert.equal(walk(root).find((e) => e.type === 'password'), password);
+  assert.equal(password.value, 'unsaved');
+});
+test('歷史翻頁保留版本選擇並傳送指定代數，比較輸出為純文字', async () => {
+  const calls = []; const root = h('div');
+  await create(async (url, body) => {
+    calls.push(body);
+    if (body.action === 'history') return historyPayload(body.offset);
+    if (body.action === 'compare') { const p = payload(); p.backup.comparison = { from_version_id: 21, to_version_id: 1, changed: true, added: 1, removed: 0, diff: '+ <script>bad</script>', truncated: true }; return p; }
+    return payload();
+  }).governance(root);
+  await button(root, '備份歷史與比較').onclick();
+  const picker = findLabel(root, '查詢備份設備'); picker.value = '7'; await picker.listeners.change();
+  const from = findLabel(root, '比較起始版本'); from.value = '21'; from.listeners.change();
+  await button(root, '下一頁').onclick();
+  assert.equal(from.value, '21'); assert.ok(text(from).includes('#21') && text(from).includes('#1'));
+  const to = findLabel(root, '比較結束版本'); to.value = '1'; to.listeners.change();
+  await button(root, '比較兩個版本').listeners.click();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), { action: 'compare', device_id: 7, from_version_id: 21, to_version_id: 1 });
+  assert.ok(text(root).includes('已截斷')); assert.equal(walk(root).filter((e) => e.tag === 'script').length, 0);
+  assert.ok(walk(root).some((e) => e.tag === 'pre' && text(e) === '+ <script>bad</script>'));
+  picker.value = ''; await picker.listeners.change();
+  assert.equal(from.value, ''); assert.equal(to.value, ''); assert.ok(button(root, '比較兩個版本').disabled);
+});
+test('切換設備後忽略舊歷史回應', async () => {
+  let finish; const delayed = new Promise((resolve) => { finish = resolve; });
+  const root = h('div'); await create(async (url, body) => body.action === 'history' ? delayed : payload()).governance(root);
+  await button(root, '備份歷史與比較').onclick();
+  const picker = findLabel(root, '查詢備份設備'); picker.value = '7'; const pending = picker.listeners.change();
+  picker.value = ''; await picker.listeners.change(); finish(historyPayload()); await pending;
+  assert.ok(text(root).includes('請先選擇')); assert.ok(!text(findLabel(root, '比較起始版本')).includes('#21'));
+});
+test('重新整理歷史更新新增設備並保留同設備的版本選取', async () => {
+  let updated = false; const root = h('div');
+  await create(async (url, body) => {
+    if (body.action === 'history') return historyPayload();
+    const p = payload(); p.backup.history_devices = [{ device_id: 7, name: '原設備', configured: true }];
+    if (updated) p.backup.history_devices.push({ device_id: 8, name: '新增設備', configured: true });
+    return p;
+  }).governance(root);
+  await button(root, '備份歷史與比較').onclick();
+  const picker = findLabel(root, '查詢備份設備'); picker.value = '7'; await picker.listeners.change();
+  const from = findLabel(root, '比較起始版本'); from.value = '21'; from.listeners.change();
+  updated = true; await button(root, '重新整理設備與歷史').onclick();
+  assert.ok(text(picker).includes('新增設備')); assert.equal(picker.value, '7'); assert.equal(from.value, '21');
+});
+test('比較等待期間切換設備，不顯示前一台設備的比較結果', async () => {
+  let finish; const delayed = new Promise((resolve) => { finish = resolve; });
+  const root = h('div'); await create(async (url, body) => body.action === 'history' ? historyPayload(body.offset) : body.action === 'compare' ? delayed : payload()).governance(root);
+  await button(root, '備份歷史與比較').onclick();
+  const picker = findLabel(root, '查詢備份設備'); picker.value = '7'; await picker.listeners.change();
+  const from = findLabel(root, '比較起始版本'); from.value = '21'; from.listeners.change();
+  await button(root, '下一頁').onclick(); const to = findLabel(root, '比較結束版本'); to.value = '1'; to.listeners.change();
+  const pending = button(root, '比較兩個版本').listeners.click();
+  picker.value = ''; await picker.listeners.change();
+  const p = payload(); p.backup.comparison = { diff: '舊設備的比較結果', added: 1, removed: 0 }; finish(p); await pending;
+  assert.ok(!text(root).includes('舊設備的比較結果'));
+});

@@ -6,6 +6,9 @@ import json
 import os
 import sys
 import tempfile
+import sqlite3
+import hashlib
+from contextlib import closing
 from helpers import ROOT
 
 class ConfigBackupIntegrationTests(unittest.TestCase):
@@ -51,6 +54,33 @@ class ConfigBackupIntegrationTests(unittest.TestCase):
             self.assertEqual(code, 1)
             self.assertFalse(run['ok'])
             self.assertEqual(run['error']['code'], 'unavailable')
+
+    def test_cli_history_and_comparison_do_not_expose_raw_configuration(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = ROOT.__class__(folder) / 'private'
+            env = dict(os.environ, IOC_BACKUP_STATE_DIR=str(root), PYTHONDONTWRITEBYTECODE='1')
+            def call(body):
+                result = subprocess.run([sys.executable, '-X', 'utf8', '-B', str(ROOT/'system/ioc-config-backup.py')],
+                    input=json.dumps(body), text=True, encoding='utf-8', capture_output=True, env=env, timeout=10)
+                self.assertEqual(result.stderr, '')
+                self.assertNotIn('never-expose-this-password', result.stdout)
+                return result.returncode, json.loads(result.stdout)
+            self.assertEqual(call({'action': 'status'})[0], 0)
+            with closing(sqlite3.connect(root / 'state.sqlite3')) as db, db:
+                for ident, content in [(1, 'hostname old\npassword never-expose-this-password'),
+                                       (2, 'hostname new\npassword never-expose-this-password')]:
+                    db.execute('INSERT INTO versions(id,device_id,created_at,digest,content) VALUES(?,?,?,?,?)',
+                               (ident, 9, '2026-10-22T00:00:00+00:00', hashlib.sha256(content.encode()).hexdigest(), content))
+                    db.execute('INSERT INTO runs(device_id,device_name,kind,status,requested_at,version_id) VALUES(?,?,?,?,?,?)',
+                               (9, '已移除設備', 'manual', 'success', '2026-10-22T00:00:00+00:00', ident))
+            code, result = call({'action': 'history', 'device_id': 9, 'offset': 0})
+            self.assertEqual(code, 0)
+            self.assertEqual(result['data']['history']['total_versions'], 2)
+            self.assertNotIn('content', result['data']['history']['versions'][0])
+            code, result = call({'action': 'compare', 'device_id': 9, 'from_version_id': 1, 'to_version_id': 2})
+            self.assertEqual(code, 0)
+            self.assertIn('+hostname new', result['data']['comparison']['diff'])
+            self.assertEqual(call({'action': 'compare', 'device_id': 10, 'from_version_id': 1, 'to_version_id': 2})[0], 1)
 
     @unittest.skipUnless(shutil.which('node'), '需要 Node 執行介面行為測試')
     def test_ui_behaviors(self):
