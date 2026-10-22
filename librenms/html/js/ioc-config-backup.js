@@ -29,6 +29,34 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
         return h('span', { style }, line || ' ');
       }));
   };
+  // 將 unified diff 的變更區段對齊為左右兩欄；不要求後端回傳完整原始設定，降低敏感內容曝光範圍。
+  const sideBySideDiff = (diff, fallback, fromTitle, toTitle) => {
+    const source = String(diff || '');
+    if (!source) return h('div', { class: 'note' }, fallback);
+    const lines = source.split('\n');
+    const rows = [];
+    const lineStyle = (kind) => 'display:block;min-height:1.55em;padding:1px 7px;white-space:pre-wrap;overflow-wrap:anywhere;' +
+      (kind === 'removed' ? 'color:#fca5a5;background:rgba(220,38,38,.16)' : kind === 'added' ? 'color:#86efac;background:rgba(22,163,74,.16)' : '');
+    for (let index = 0; index < lines.length;) {
+      const line = lines[index];
+      if (line.startsWith('---') || line.startsWith('+++') || line.startsWith('@@') || line === '\\ No newline at end of file') { index++; continue; }
+      const removed = [], added = [];
+      while (index < lines.length && lines[index].startsWith('-') && !lines[index].startsWith('---')) removed.push(lines[index++]);
+      while (index < lines.length && lines[index].startsWith('+') && !lines[index].startsWith('+++')) added.push(lines[index++]);
+      if (removed.length || added.length) {
+        for (let row = 0; row < Math.max(removed.length, added.length); row++) rows.push([removed[row] || '', added[row] || '']);
+      } else {
+        rows.push([line, line]); index++;
+      }
+    }
+    if (!rows.length) return h('div', { class: 'note' }, fallback);
+    const cells = rows.flatMap(([before, after]) => [
+      h('span', { style: lineStyle(before.startsWith('-') ? 'removed' : '') }, before || ' '),
+      h('span', { style: lineStyle(after.startsWith('+') ? 'added' : '') }, after || ' '),
+    ]);
+    return h('div', { class: 'config-side-by-side', style: 'display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:0 12px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;max-height:600px;overflow:auto;background:var(--bg);padding:12px;border-radius:8px' },
+      h('strong', { style: 'padding:0 7px 8px;color:#fca5a5' }, fromTitle), h('strong', { style: 'padding:0 7px 8px;color:#86efac' }, toTitle), cells);
+  };
   const PAGE_SIZE = 10;
   // 所有本機清單共用同一個分頁器；資料仍以純 DOM 呈現，避免把設備資料當成 HTML 插入。
   const paginationControls = (total, size, state, change) => {
@@ -400,7 +428,9 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
         const c = r.backup.comparison;
         comparison.replaceChildren(note('版本 #' + c.from_version_id + '（' + time(c.from_created_at) + '） → #' + c.to_version_id + '（' + time(c.to_created_at) + '）'),
           note('新增 ' + c.added + ' 行、刪除 ' + c.removed + ' 行。' + (c.truncated ? '內容過長，已截斷預覽。' : '')),
-          diffLegend(), diffContent(c.diff, c.changed ? '原始內容不同，但可顯示的差異已遮罩。' : '兩個版本的內容相同。', '600px'));
+          diffLegend(), note('左右欄只顯示有差異的設定區段；紅色為起始版本中已移除的內容，綠色為結束版本新增的內容。'),
+          sideBySideDiff(c.diff, c.changed ? '原始內容不同，但可顯示的差異已遮罩。' : '兩個版本的內容相同。',
+            '起始版本 #' + c.from_version_id, '結束版本 #' + c.to_version_id));
       } catch (e) { if (requestSequence === comparisonSequence) comparison.replaceChildren(unavailable(e.message)); }
       finally { if (requestSequence === comparisonSequence) compare.disabled = false; }
     });

@@ -276,6 +276,10 @@ test('歷史翻頁保留版本選擇並傳送指定代數，比較輸出為純�
   const diffLine = walk(root).find((e) => e.tag === 'span' && text(e) === '+ <script>bad</script>');
   assert.ok(diffLine && diffLine.style.includes('color:#86efac'));
   assert.ok(text(root).includes('綠色＝新增設定'));
+  assert.ok(walk(root).some((e) => e.class === 'config-side-by-side'));
+  assert.ok(text(root).includes('起始版本 #21'));
+  assert.ok(text(root).includes('結束版本 #1'));
+  assert.ok(text(root).includes('左右欄只顯示有差異的設定區段'));
   picker.value = ''; await picker.listeners.change();
   assert.equal(from.value, ''); assert.equal(to.value, ''); assert.ok(button(root, '比較兩個版本').disabled);
 });
