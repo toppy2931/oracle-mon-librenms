@@ -19,6 +19,8 @@ class ConfigBackupIntegrationTests(unittest.TestCase):
         self.assertLess(gate,src.index('ioc_backup_devices('))
         self.assertLess(gate,src.index('ConfigBackupService('))
         self.assertIn('262144',src)
+        self.assertIn('host_key_scan', src)
+        self.assertIn('host_key_confirm', src)
 
     def test_module_is_local_and_secrets_never_use_html(self):
         src=(ROOT/'librenms/html/js/ioc-config-backup.js').read_text(encoding='utf-8')

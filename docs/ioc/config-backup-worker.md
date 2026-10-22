@@ -44,13 +44,23 @@ Web 不接收原始內容，只收到差異預覽。已知設備密碼、密碼�
 
 差異以設備模型輸出做換行正規化，尚未增加跨廠牌的時間戳忽略規則；不同設備的雜訊需真實樣本後設定。每份預覽約 8 KiB，過長明確標示截斷。備份與稽核目前不自動清除，啟用前應規劃容量、監控剩餘空間與保存政策。
 
+## SSH 主機身分確認
+
+新增設備後，管理者不需要登入 VM 手動編輯 `known_hosts`。在「備份設定」選擇已儲存的設備，按「掃描 SSH 主機指紋」，再到設備主控台或管理介面取得 SSH ED25519 指紋進行核對；**只有兩者完全一致**時才可勾選確認並信任。
+
+候選指紋採一次性 token，十分鐘後失效；設備位址變更也必須重新掃描。確認後系統才以 `oracle-backup` 身分、700/600 權限寫入專用 `known_hosts`。若已存在不同指紋，系統拒絕覆寫，避免設備替換或中間人攻擊被自動接受。Oxidized 持續使用 `secure=true`，未知主機金鑰不會自動信任。
+
 ## 閘道契約
 
-輸入 `{action,actor,settings,device_id}`。動作為 `settings/status/save/test/run/tick`，Web 不可直接暴露 tick。輸入 JSON 上限 256 KiB。排程另可執行 `--tick`，不接受其他命令列參數。
+輸入 `{action,actor,settings,device_id}`。動作為 `settings/status/save/test/run/tick/host_key_scan/host_key_confirm`，Web 不可直接暴露 tick。輸入 JSON 上限 256 KiB。排程另可執行 `--tick`，不接受其他命令列參數。
 
 `settings`：`{enabled,interval_hours,devices:[{device_id,name,host,model,username,password,port,enabled}]}`。
 
 `password` 空白或省略保留相同 device_id 已存密碼，首次必填。username 上限 128 字元、password 512 字元、actor 255 字元。來源為 Oxidized CSV，輸入不得含控制字元、`|`、Ruby 插值起始 `#{`。主機支援 IP 或安全 DNS 名稱；拒絕直接輸入 loopback、link-local、multicast、unspecified。DNS 解析及 SSH 連線仍屬可信管理端的設備納管權限，不是任意多租戶 SSRF 隔離措施。
+
+`host_key_scan`：僅限已儲存的設備，固定使用本機 `ssh-keyscan` 取得 ED25519 候選公開金鑰，回傳 host、演算法、SHA256 指紋與短效 token；取得候選值不代表信任。
+
+`host_key_confirm`：需傳回相同的 device_id、token 與 fingerprint；背景程序只在 token 尚未逾期、設備位址未變且指紋完全相同時，寫入專用信任清單。
 
 成功 `{ok:true,data:{settings,engine,runs,changes,audit}}`，exit 0。失敗 `{ok:false,error:{code,message}}`，exit 1，不回 traceback 或工具原始錯誤。
 
@@ -66,7 +76,7 @@ Web 不接收原始內容，只收到差異預覽。已知設備密碼、密碼�
 
 1. 建立無登入 shell 的 `oracle-backup` system user；安裝 worker 與 root 擁有的 helper；建立專用狀態目錄 700。一般 `librenms` 帳號不得寫 helper、worker 或狀態目錄。
 2. 在專用 VM 安裝相容的 Oxidized 與 oxidized-web（本模組依官方目前 extensions 設定，oxidized-web 至少 0.16.0）；確認 `oxidized` 在 service PATH。此 repo 不執行 gem 安裝、不下載相依套件。
-3. 以維護方式核對設備 SSH 主機金鑰指紋，提供 `oracle-backup` 的 `known_hosts`。設定保持 `input.ssh.secure=true`，不自動信任未知主機金鑰，不以關閉驗證解決連線問題。
+3. 在 IOC「備份設定」完成設備端 SSH 指紋核對與明確信任；設定保持 `input.ssh.secure=true`，不自動信任未知主機金鑰，不以關閉驗證解決連線問題。
 4. 部署三個 systemd unit，先不啟用；在 IOC 儲存設備設定，產生受管 config 後，才另行授權啟動 daemon 與 timer。不得對既有 Oxidized 啟用相同設備週期排程。
 5. 確認 REST 僅回環監聽，再驗證 pending → ready、手動 queued → success、設定變更、無變更、錯誤密碼、設備離線、逾時與重啟恢復。
 6. 核對 admin/global-read HTTP 權限、CSRF 與密碼不回傳，確認沒有將 REST 公開。最後才安排正式設備啟用。

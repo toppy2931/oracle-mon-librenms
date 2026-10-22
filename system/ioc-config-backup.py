@@ -1,14 +1,18 @@
 #!/usr/bin/env python3
 """IOC 組態備份閘道：受保護狀態、受管 Oxidized、排程與版本比較。"""
+import base64
 import difflib
 import hashlib
+import hmac
 import ipaddress
 import json
 import os
 from pathlib import Path
 import re
+import secrets
 import sqlite3
 import stat
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -140,10 +144,28 @@ class Worker:
     def settings(self):
         return self.get_meta('settings', {'enabled': False, 'interval_hours': 24, 'devices': []})
 
+    def trusted_hosts(self):
+        ssh_dir = self.root / '.ssh'
+        secure_path(ssh_dir, True)
+        known_hosts = ssh_dir / 'known_hosts'
+        secure_path(known_hosts)
+        if not known_hosts.exists():
+            return set()
+        try:
+            content = known_hosts.read_text(encoding='ascii')
+        except (OSError, UnicodeError):
+            raise BackupError('unsafe_state', '無法安全讀取 SSH 信任清單') from None
+        if len(content.encode('ascii')) > 1024 * 1024:
+            raise BackupError('unsafe_state', 'SSH 信任清單內容過大')
+        return {line.split(maxsplit=1)[0] for line in content.splitlines()
+                if line.strip() and not line.lstrip().startswith('#') and len(line.split()) >= 3}
+
     def public_settings(self):
         settings = self.settings()
+        trusted = self.trusted_hosts()
         settings['devices'] = [{**{k: v for k, v in d.items() if k != 'password'},
-                                'password_set': bool(d.get('password'))} for d in settings['devices']]
+                                'password_set': bool(d.get('password')),
+                                'host_key_trusted': d['host'] in trusted} for d in settings['devices']]
         return settings
 
     def validate(self, submitted):
@@ -274,6 +296,103 @@ end
     def audit(self, actor, action, detail):
         self.db.execute('INSERT INTO audit(occurred_at,actor,action,detail) VALUES(?,?,?,?)',
                         (utcnow(), actor, action, detail))
+
+    def configured_device(self, ident):
+        ident = self.identifier(ident)
+        device = next((item for item in self.settings()['devices'] if item['device_id'] == ident), None)
+        if not device:
+            raise BackupError('validation', '請先儲存此設備的備份設定，再確認 SSH 身分指紋')
+        return device
+
+    @staticmethod
+    def parse_ed25519_host_key(raw, expected_host):
+        """Only accept the single canonical key line that will be trusted later."""
+        if not isinstance(raw, bytes) or len(raw) > 8192:
+            raise BackupError('host_key_scan_failed', '無法取得有效的 SSH 主機身分指紋')
+        try:
+            lines = [line.strip() for line in raw.decode('ascii').splitlines()
+                     if line.strip() and not line.lstrip().startswith('#')]
+        except UnicodeDecodeError:
+            raise BackupError('host_key_scan_failed', '無法取得有效的 SSH 主機身分指紋') from None
+        if len(lines) != 1:
+            raise BackupError('host_key_scan_failed', '設備未提供唯一的 SSH ED25519 主機金鑰')
+        parts = lines[0].split()
+        if len(parts) != 3 or parts[0] != expected_host or parts[1] != 'ssh-ed25519':
+            raise BackupError('host_key_scan_failed', '設備回傳的 SSH 主機金鑰格式不正確')
+        try:
+            blob = base64.b64decode(parts[2], validate=True)
+            if len(blob) != 51 or blob[:4] != b'\x00\x00\x00\x0b' or blob[4:15] != b'ssh-ed25519' or blob[15:19] != b'\x00\x00\x00\x20':
+                raise ValueError()
+        except (ValueError, base64.binascii.Error):
+            raise BackupError('host_key_scan_failed', '設備回傳的 SSH 主機金鑰格式不正確') from None
+        fingerprint = 'SHA256:' + base64.b64encode(hashlib.sha256(blob).digest()).decode('ascii').rstrip('=')
+        return {'host': expected_host, 'algorithm': parts[1], 'key': parts[2], 'fingerprint': fingerprint}
+
+    def scan_host_key(self, ident, actor):
+        device = self.configured_device(ident)
+        try:
+            completed = subprocess.run(
+                ['/usr/bin/ssh-keyscan', '-T', '4', '-t', 'ed25519', '--', device['host']],
+                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                timeout=5, check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            raise BackupError('host_key_scan_failed', '無法連線至設備取得 SSH 身分指紋') from None
+        candidate = self.parse_ed25519_host_key(completed.stdout, device['host'])
+        token = secrets.token_urlsafe(24)
+        expires_at = time.time() + 600
+        candidates = self.get_meta('host_key_candidates', {})
+        if not isinstance(candidates, dict):
+            candidates = {}
+        candidates[str(device['device_id'])] = {**candidate, 'token': token, 'expires_at': expires_at}
+        self.put_meta('host_key_candidates', candidates)
+        self.audit(actor, 'host_key_scan', '設備識別碼：' + str(device['device_id']) + '；等待確認 SSH 指紋')
+        return {key: candidate[key] for key in ('host', 'algorithm', 'fingerprint')} | {
+            'device_id': device['device_id'], 'token': token,
+            'expires_at': datetime.fromtimestamp(expires_at, timezone.utc).isoformat(), 'trusted': False,
+        }
+
+    def confirm_host_key(self, ident, token, fingerprint, actor):
+        device = self.configured_device(ident)
+        if not isinstance(token, str) or len(token) > 128 or not isinstance(fingerprint, str) or len(fingerprint) > 128:
+            raise BackupError('validation', 'SSH 身分指紋確認資料格式不正確')
+        candidates = self.get_meta('host_key_candidates', {})
+        candidate = candidates.get(str(device['device_id'])) if isinstance(candidates, dict) else None
+        if not isinstance(candidate, dict) or not isinstance(candidate.get('expires_at'), (int, float)) or candidate['expires_at'] < time.time():
+            raise BackupError('host_key_expired', 'SSH 身分指紋確認已逾時，請重新取得')
+        required = ('host', 'algorithm', 'key', 'fingerprint', 'token')
+        if any(not isinstance(candidate.get(key), str) for key in required) or candidate['host'] != device['host']:
+            raise BackupError('host_key_expired', '設備資料已變更，請重新取得 SSH 身分指紋')
+        if not hmac.compare_digest(candidate['token'], token) or not hmac.compare_digest(candidate['fingerprint'], fingerprint):
+            raise BackupError('host_key_mismatch', '確認的 SSH 身分指紋與候選值不符')
+        verified = self.parse_ed25519_host_key(
+            (candidate['host'] + ' ' + candidate['algorithm'] + ' ' + candidate['key']).encode('ascii'), device['host'])
+        ssh_dir = self.root / '.ssh'
+        secure_path(ssh_dir, True)
+        ssh_dir.mkdir(exist_ok=True, mode=0o700)
+        if os.name == 'posix':
+            os.chmod(ssh_dir, 0o700)
+        known_hosts = ssh_dir / 'known_hosts'
+        secure_path(known_hosts)
+        try:
+            existing = known_hosts.read_text(encoding='ascii') if known_hosts.exists() else ''
+        except (OSError, UnicodeError):
+            raise BackupError('unsafe_state', '無法安全讀取 SSH 信任清單') from None
+        if len(existing.encode('ascii')) > 1024 * 1024:
+            raise BackupError('unsafe_state', 'SSH 信任清單內容過大')
+        line = verified['host'] + ' ' + verified['algorithm'] + ' ' + verified['key']
+        matching = [saved.strip() for saved in existing.splitlines()
+                    if saved.strip() and not saved.lstrip().startswith('#') and saved.split(maxsplit=1)[0] == device['host']]
+        if matching and line not in matching:
+            raise BackupError('host_key_conflict', '此設備已有不同的 SSH 身分指紋，為安全起見未覆寫')
+        already_trusted = line in matching
+        if not already_trusted:
+            self.write_private(known_hosts, existing + ('' if not existing or existing.endswith('\n') else '\n') + line + '\n')
+        candidates.pop(str(device['device_id']), None)
+        self.put_meta('host_key_candidates', candidates)
+        self.audit(actor, 'host_key_confirm', '設備識別碼：' + str(device['device_id']) + '；已確認 SSH 指紋')
+        return {'device_id': device['device_id'], 'host': verified['host'], 'algorithm': verified['algorithm'],
+                'fingerprint': verified['fingerprint'], 'trusted': True, 'already_trusted': already_trusted}
 
     def queue(self, device_id, kind):
         device = next((d for d in self.settings()['devices'] if d['device_id'] == device_id), None)
@@ -446,7 +565,7 @@ end
         return engine
 
     def dispatch(self, request):
-        if not isinstance(request, dict) or request.get('action') not in {'settings', 'status', 'save', 'test', 'run', 'tick', 'history', 'compare'}:
+        if not isinstance(request, dict) or request.get('action') not in {'settings', 'status', 'save', 'test', 'run', 'tick', 'history', 'compare', 'host_key_scan', 'host_key_confirm'}:
             raise BackupError('validation', '不支援的組態備份操作')
         action = request['action']
         actor = safe_text(request.get('actor', 'system'), '操作者', 255, allow_empty=action in {'settings', 'status', 'history', 'compare'})
@@ -476,6 +595,11 @@ end
                     raise BackupError('validation', '請指定設備識別碼')
                 self.queue(ident, 'test' if action == 'test' else 'manual')
                 self.audit(actor, action, '設備識別碼：' + str(ident))
+            host_key = None
+            if action == 'host_key_scan':
+                host_key = self.scan_host_key(request.get('device_id'), actor)
+            if action == 'host_key_confirm':
+                host_key = self.confirm_host_key(request.get('device_id'), request.get('token'), request.get('fingerprint'), actor)
             if action == 'tick':
                 # 以交易成功的資料庫設定重建，修復前次寫檔中斷造成的不一致。
                 self.generate()
@@ -502,6 +626,8 @@ end
                 result['history'] = self.history(request)
             if action == 'compare':
                 result['comparison'] = self.compare(request)
+            if host_key is not None:
+                result['host_key'] = host_key
             self.db.commit()
             return result
         except Exception:

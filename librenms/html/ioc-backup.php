@@ -16,7 +16,7 @@ try {
         ioc_fail(400, '內容不是合法的 JSON');
     }
     $action = $in['action'] ?? '';
-    if (!is_string($action) || !in_array($action, ['get', 'save', 'test', 'run', 'history', 'compare'], true)) {
+    if (!is_string($action) || !in_array($action, ['get', 'save', 'test', 'run', 'history', 'compare', 'host_key_scan', 'host_key_confirm'], true)) {
         ioc_fail(400, '不認得的動作');
     }
     $devices = ioc_backup_devices($level);
@@ -47,6 +47,15 @@ try {
             }
         }
         ioc_json(['backup' => $svc->compare($in['device_id'], $in['from_version_id'], $in['to_version_id'], $level), 'devices' => $devices]);
+    }
+    if ($action === 'host_key_scan') {
+        ioc_json(['backup' => $svc->scanHostKey($in['device_id'], $actor, $level), 'devices' => $devices]);
+    }
+    if ($action === 'host_key_confirm') {
+        if (!is_string($in['token'] ?? null) || !is_string($in['fingerprint'] ?? null)) {
+            ioc_fail(400, '請確認 SSH 身分指紋');
+        }
+        ioc_json(['backup' => $svc->confirmHostKey($in['device_id'], $in['token'], $in['fingerprint'], $actor, $level), 'devices' => $devices]);
     }
     $data = $action === 'test' ? $svc->test($in['device_id'], $actor, $level) : $svc->run($in['device_id'], $actor, $level);
     ioc_json(['backup' => $data, 'devices' => $devices]);

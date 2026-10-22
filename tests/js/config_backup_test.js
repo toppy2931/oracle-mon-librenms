@@ -55,9 +55,9 @@ test('備份設定以設備表格集中管理，可加入、編輯與移除單�
   const root = h('div'); const ui = create(async () => payload());
   await ui.settings(root);
   assert.ok(walk(root).some((e) => e.tag === 'table' && text(e).includes('備份帳號')));
-  assert.equal(walk(root).filter((e) => e.tag === 'fieldset').length, 1);
+  assert.equal(walk(root).filter((e) => e.tag === 'fieldset').length, 2);
   button(root, '＋ 加入設備').onclick();
-  assert.equal(walk(root).filter((e) => e.tag === 'fieldset').length, 1);
+  assert.equal(walk(root).filter((e) => e.tag === 'fieldset').length, 2);
   const select = findLabel(root, '選擇設備'); select.value = '7'; select.listeners.change();
   const password = walk(root).find((e) => e.type === 'password');
   assert.equal(password.required, true);
@@ -65,14 +65,69 @@ test('備份設定以設備表格集中管理，可加入、編輯與移除單�
   remove.onclick();
   assert.ok(text(root).includes('尚未加入備份設備') === false);
 });
+test('新增設備必須先掃描並由管理者勾選確認 SSH 指紋，才會送出信任要求', async () => {
+  const calls = []; const root = h('div');
+  const ui = create(async (url, body) => {
+    calls.push(body);
+    if (body.action === 'host_key_scan') {
+      const p = payload();
+      p.backup.host_key = { device_id: 7, host: '192.0.2.1', algorithm: 'ssh-ed25519', fingerprint: 'SHA256:verified-on-device', token: 'one-time-candidate', expires_at: '2026-10-22T21:00:00Z', trusted: false };
+      return p;
+    }
+    if (body.action === 'host_key_confirm') {
+      const p = payload();
+      p.backup.host_key = { device_id: 7, host: '192.0.2.1', key_type: 'ssh-ed25519', fingerprint: 'SHA256:verified-on-device', trusted: true, status: 'trusted' };
+      return p;
+    }
+    return payload();
+  });
+  await ui.settings(root);
+  const scan = button(root, '掃描 SSH 主機指紋');
+  await scan.listeners.click();
+  assert.ok(text(root).includes('SHA256:verified-on-device'));
+  assert.ok(text(root).includes('設備端核對'));
+  const trust = button(root, '確認後信任此主機金鑰');
+  assert.equal(trust.disabled, true);
+  assert.equal(calls.some((c) => c.action === 'host_key_confirm'), false);
+  const confirm = walk(root).find((e) => e.tag === 'label' && text(e).includes('我已在設備端核對')).children.find((e) => e instanceof Element && e.type === 'checkbox');
+  confirm.checked = true; confirm.listeners.change();
+  assert.equal(trust.disabled, false);
+  await trust.listeners.click();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), { action: 'host_key_confirm', device_id: 7, token: 'one-time-candidate', fingerprint: 'SHA256:verified-on-device' });
+  assert.ok(text(root).includes('已驗證 SSH 主機身分'));
+});
+test('掃描結果沒有一次性候選憑證時，不提供信任按鈕', async () => {
+  const root = h('div');
+  await create(async (url, body) => {
+    const p = payload();
+    if (body.action === 'host_key_scan') p.backup.host_key = { device_id: 7, fingerprint: 'SHA256:incomplete' };
+    return p;
+  }).settings(root);
+  await button(root, '掃描 SSH 主機指紋').listeners.click();
+  assert.equal(button(root, '確認後信任此主機金鑰'), undefined);
+  assert.ok(text(root).includes('沒有提供可供核對'));
+});
 test('已排入的工作不顯示成備份成功；差異以文字節點呈現', async () => {
   const p = payload(); p.backup.runs = [{ device_name: 'fw', kind: 'test', status: 'queued', requested_at: '2026-10-22 01:00:00' }];
   p.backup.changes = [{ device_name: 'fw', detected_at: '2026-10-22 01:00:00', added: 1, removed: 1, diff: '+ <script>alert(1)</script>' }];
   const root = h('div'); await create(async () => p).governance(root);
   assert.ok(text(root).includes('等待設備備份完成'));
-  const pre = walk(root).find((e) => e.tag === 'pre'); assert.equal(pre.children[0], '+ <script>alert(1)</script>');
+  const diffLine = walk(root).find((e) => e.tag === 'span' && text(e) === '+ <script>alert(1)</script>');
+  assert.equal(diffLine.children[0], '+ <script>alert(1)</script>');
   assert.equal(walk(root).filter((e) => e.tag === 'script').length, 0);
   assert.ok(walk(root).filter((e) => e.tag === 'button' && e.disabled).length === 2);
+});
+
+test('組態差異以綠紅色與圖例清楚標示新增和刪除行', async () => {
+  const p = payload();
+  p.backup.changes = [{ device_name: 'fw', detected_at: '2026-10-22 01:00:00', added: 1, removed: 1, diff: '+新增設定\n-刪除設定\n unchanged' }];
+  const root = h('div'); await create(async () => p).governance(root);
+  const added = walk(root).find((e) => e.tag === 'span' && text(e) === '+新增設定');
+  const removed = walk(root).find((e) => e.tag === 'span' && text(e) === '-刪除設定');
+  assert.ok(added.style.includes('color:#86efac'));
+  assert.ok(removed.style.includes('color:#fca5a5'));
+  assert.ok(text(root).includes('綠色＝新增設定'));
+  assert.ok(text(root).includes('紅色＝刪除設定'));
 });
 
 test('等待中的備份不自動重新整理整個管理頁', async () => {
@@ -137,7 +192,9 @@ test('歷史翻頁保留版本選擇並傳送指定代數，比較輸出為純�
   await button(root, '比較兩個版本').listeners.click();
   assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), { action: 'compare', device_id: 7, from_version_id: 21, to_version_id: 1 });
   assert.ok(text(root).includes('已截斷')); assert.equal(walk(root).filter((e) => e.tag === 'script').length, 0);
-  assert.ok(walk(root).some((e) => e.tag === 'pre' && text(e) === '+ <script>bad</script>'));
+  const diffLine = walk(root).find((e) => e.tag === 'span' && text(e) === '+ <script>bad</script>');
+  assert.ok(diffLine && diffLine.style.includes('color:#86efac'));
+  assert.ok(text(root).includes('綠色＝新增設定'));
   picker.value = ''; await picker.listeners.change();
   assert.equal(from.value, ''); assert.equal(to.value, ''); assert.ok(button(root, '比較兩個版本').disabled);
 });

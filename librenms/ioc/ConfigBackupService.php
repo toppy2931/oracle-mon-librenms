@@ -107,6 +107,28 @@ final class ConfigBackupService
         return $this->deviceAction('run', $deviceId, $actor);
     }
 
+    /** 取得候選值不代表信任；仍須由管理者比對設備端指紋後明確確認。 */
+    public function scanHostKey(int $deviceId, string $actor, ?string $level): array
+    {
+        $this->authorize($level);
+        return $this->deviceAction('host_key_scan', $deviceId, $actor);
+    }
+
+    public function confirmHostKey(int $deviceId, string $token, string $fingerprint, string $actor, ?string $level): array
+    {
+        $this->authorize($level);
+        $this->actor($actor);
+        if (strlen($token) > 128 || strlen($fingerprint) > 128
+            || !preg_match('/\ASHA256:[A-Za-z0-9+\/]{43}\z/D', $fingerprint)) {
+            throw new ValidationError(['SSH 身分指紋確認資料格式不正確']);
+        }
+        if (!isset($this->devices[$deviceId])) {
+            throw new ValidationError(['請選擇現有設備']);
+        }
+        return $this->request(['action' => 'host_key_confirm', 'actor' => $actor,
+            'device_id' => $deviceId, 'token' => $token, 'fingerprint' => $fingerprint]);
+    }
+
     public function history(int $deviceId, int $offset, ?string $level): array
     {
         $this->authorize($level);
@@ -173,6 +195,10 @@ final class ConfigBackupService
                 'unsafe_state' => '備份設定儲存位置不安全，請聯絡管理者',
                 'invalid_response' => '備份工具回應不完整，請稍後再試',
                 'invalid_backup' => '未取得完整設備設定，請確認備份權限',
+                'host_key_scan_failed' => '無法取得設備的 SSH 身分指紋，請確認設備連線與 SSH 服務',
+                'host_key_expired' => 'SSH 身分指紋確認已逾時或設備資料已變更，請重新取得',
+                'host_key_mismatch' => 'SSH 身分指紋確認不符，未變更信任設定',
+                'host_key_conflict' => '此設備已有不同的 SSH 身分指紋，為安全起見未覆寫',
                 'state_error' => '無法讀取備份紀錄，請聯絡管理者',
             ];
             throw new IocError($messages[$code] ?? '設備備份服務無法完成要求，請確認設定與服務狀態');
@@ -204,6 +230,7 @@ final class ConfigBackupService
                 'port' => (int) ($row['port'] ?? 22),
                 'enabled' => ($row['enabled'] ?? false) === true,
                 'password_set' => ($row['password_set'] ?? false) === true,
+                'host_key_trusted' => ($row['host_key_trusted'] ?? false) === true,
             ];
         }
         $state = $engine['state'] ?? 'unavailable';
@@ -270,6 +297,8 @@ final class ConfigBackupService
             'test' => '要求測試備份',
             'run' => '要求立即備份',
             'scheduled' => '排程備份',
+            'host_key_scan' => '取得 SSH 身分指紋',
+            'host_key_confirm' => '確認 SSH 身分指紋',
         ];
         foreach (array_slice(is_array($data['audit'] ?? null) ? $data['audit'] : [], 0, 50) as $row) {
             if (!is_array($row) || !is_string($row['action'] ?? null) || !isset($actions[$row['action']])) {
@@ -299,6 +328,31 @@ final class ConfigBackupService
             'changes' => $changes,
             'audit' => $audit,
         ];
+        if (isset($data['host_key']) && is_array($data['host_key'])) {
+            $hostKey = $data['host_key'];
+            $fingerprint = $hostKey['fingerprint'] ?? '';
+            if (!is_string($fingerprint) || !preg_match('/\ASHA256:[A-Za-z0-9+\/]{43}\z/D', $fingerprint)) {
+                throw new IocError('SSH 身分指紋回應格式不正確，請稍後再試');
+            }
+            if (($hostKey['algorithm'] ?? '') !== 'ssh-ed25519') {
+                throw new IocError('SSH 身分指紋演算法不受支援，請重新取得');
+            }
+            $result['host_key'] = [
+                'device_id' => (int) ($hostKey['device_id'] ?? 0),
+                'host' => $this->text($hostKey['host'] ?? ''),
+                'algorithm' => 'ssh-ed25519',
+                'fingerprint' => $fingerprint,
+                'trusted' => ($hostKey['trusted'] ?? false) === true,
+                'already_trusted' => ($hostKey['already_trusted'] ?? false) === true,
+            ];
+            if (isset($hostKey['token'])) {
+                if (!is_string($hostKey['token']) || !preg_match('/\A[A-Za-z0-9_-]{20,128}\z/D', $hostKey['token'])) {
+                    throw new IocError('SSH 身分指紋確認資料格式不正確，請重新取得');
+                }
+                $result['host_key']['token'] = $hostKey['token'];
+                $result['host_key']['expires_at'] = $this->text($hostKey['expires_at'] ?? '');
+            }
+        }
         $result['history_devices'] = [];
         foreach (is_array($data['history_devices'] ?? null) ? $data['history_devices'] : [] as $row) {
             if (is_array($row)) {

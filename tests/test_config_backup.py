@@ -6,8 +6,11 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import base64
+import struct
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from helpers import load_module
@@ -388,6 +391,37 @@ class BackupTests(unittest.TestCase):
         self.assertIn('|iocfortios|', router)
         self.assertIn('class IocFortiOS < FortiOS', model)
         self.assertIn('exec true', model)
+
+    def test_host_key_requires_explicit_fingerprint_confirmation(self):
+        self.save()
+        blob = struct.pack('>I', 11) + b'ssh-ed25519' + struct.pack('>I', 32) + b'x' * 32
+        key = base64.b64encode(blob).decode('ascii')
+        line = '192.168.10.1 ssh-ed25519 ' + key + '\n'
+        with patch.object(backup.subprocess, 'run', return_value=SimpleNamespace(stdout=line.encode('ascii'))) as scan:
+            candidate = self.call('host_key_scan', device_id=7)['host_key']
+        self.assertEqual(['/usr/bin/ssh-keyscan', '-T', '4', '-t', 'ed25519', '--', '192.168.10.1'], scan.call_args.args[0])
+        self.assertFalse(candidate['trusted'])
+        self.assertFalse(self.call('status')['settings']['devices'][0]['host_key_trusted'])
+        confirmed = self.call('host_key_confirm', device_id=7, token=candidate['token'],
+                              fingerprint=candidate['fingerprint'])['host_key']
+        self.assertTrue(confirmed['trusted'])
+        self.assertTrue(self.call('status')['settings']['devices'][0]['host_key_trusted'])
+        known = (self.worker.root / '.ssh' / 'known_hosts').read_text(encoding='ascii')
+        self.assertEqual(line, known)
+
+    def test_host_key_does_not_overwrite_a_different_trusted_key(self):
+        self.save()
+        (self.worker.root / '.ssh').mkdir(mode=0o700)
+        known_hosts = self.worker.root / '.ssh' / 'known_hosts'
+        known_hosts.write_text('192.168.10.1 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIEstaleKeyShouldNotBeTrusted=\n', encoding='ascii')
+        known_hosts.chmod(0o600)
+        blob = struct.pack('>I', 11) + b'ssh-ed25519' + struct.pack('>I', 32) + b'x' * 32
+        line = '192.168.10.1 ssh-ed25519 ' + base64.b64encode(blob).decode('ascii') + '\n'
+        with patch.object(backup.subprocess, 'run', return_value=SimpleNamespace(stdout=line.encode('ascii'))):
+            candidate = self.call('host_key_scan', device_id=7)['host_key']
+        with self.assertRaises(backup.BackupError) as error:
+            self.call('host_key_confirm', device_id=7, token=candidate['token'], fingerprint=candidate['fingerprint'])
+        self.assertEqual('host_key_conflict', error.exception.code)
 
     def test_save_during_run_rejected(self):
         self.save()

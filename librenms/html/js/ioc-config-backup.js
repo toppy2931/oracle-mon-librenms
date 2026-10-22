@@ -13,6 +13,22 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
   };
   const note = (s) => h('p', { class: 'note' }, s);
   const label = (title, input) => h('label', { style: 'display:block;margin:8px 0' }, h('span', null, title), input);
+  const diffLegend = () => h('div', { role: 'note', style: 'display:flex;gap:12px;flex-wrap:wrap;margin:10px 0;padding:10px 12px;border:1px solid var(--line);border-radius:8px' },
+    h('strong', null, '差異標示：'),
+    h('span', { style: 'color:#86efac;font-weight:700' }, '＋ 綠色＝新增設定'),
+    h('span', { style: 'color:#fca5a5;font-weight:700' }, '－ 紅色＝刪除設定'),
+    h('span', { class: 'note' }, '未標色的行是版本資訊或未變更內容。'));
+  const diffContent = (diff, fallback, maxHeight) => {
+    if (!diff) return h('pre', { style: 'white-space:pre-wrap;overflow-wrap:anywhere;max-height:' + maxHeight + ';overflow:auto' }, fallback);
+    const lines = String(diff).split('\n');
+    return h('div', { class: 'config-diff', style: 'font-family:ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre-wrap;overflow-wrap:anywhere;max-height:' + maxHeight + ';overflow:auto;background:var(--bg);padding:12px;border-radius:8px' },
+      lines.map((line) => {
+        const added = line.startsWith('+') && !line.startsWith('+++');
+        const removed = line.startsWith('-') && !line.startsWith('---');
+        const style = added ? 'display:block;color:#86efac;background:rgba(22,163,74,.16);padding:1px 6px' : removed ? 'display:block;color:#fca5a5;background:rgba(220,38,38,.16);padding:1px 6px' : 'display:block;padding:1px 6px';
+        return h('span', { style }, line || ' ');
+      }));
+  };
   const request = (action, extra) => api(endpoint, Object.assign({ action }, extra || {}));
   const engineNotice = (engine) => note(engine && engine.message ? engine.message : '備份工具尚未安裝或無法連線，請聯絡管理者完成安裝。');
 
@@ -41,6 +57,20 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
     if (![1, 6, 12, 24, 48, 168].includes(settings.interval_hours)) interval.append(h('option', { value: String(settings.interval_hours) }, '每 ' + settings.interval_hours + ' 小時'));
     interval.value = String(settings.interval_hours);
     const entries = settings.devices.map((d) => Object.assign({ password: '' }, d));
+    // SSH 主機金鑰必須逐台確認，絕不可因為新增設備而自動信任。
+    // 後端契約：host_key_scan 回傳 backup.host_key（device_id、host、algorithm、fingerprint、token、expires_at、trusted），
+    // host_key_confirm 只接受已掃描的一次性 token 與原始 fingerprint；前端的勾選代表管理者已完成設備端核對。
+    const hostKeyStates = new Map();
+    const reportedHostKeys = b.host_keys || b.host_key_states || [];
+    (Array.isArray(reportedHostKeys) ? reportedHostKeys : Object.values(reportedHostKeys)).forEach((state) => {
+      if (state && state.device_id) hostKeyStates.set(Number(state.device_id), state);
+    });
+    entries.forEach((entry) => {
+      if (entry.host_key) hostKeyStates.set(Number(entry.device_id), entry.host_key);
+      if (entry.host_key_trusted === true) {
+        hostKeyStates.set(Number(entry.device_id), { trusted: true });
+      }
+    });
     const deviceTable = h('div');
     const editor = h('div');
     let selected = entries[0] || null;
@@ -59,8 +89,10 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
     const drawDevices = () => {
       const rows = entries.map((entry) => {
         const info = deviceInfo(entry);
+        const hostKey = hostKeyStates.get(Number(entry.device_id));
+        const trust = hostKey && (hostKey.trusted || hostKey.status === 'trusted') ? '已驗證' : '待確認';
         return [info.name, info.host, models.find(([value]) => value === entry.model)?.[1] || entry.model,
-          entry.username || '尚未設定', entry.enabled ? '已納入' : '已停用',
+          entry.username || '尚未設定', trust, entry.enabled ? '已納入' : '已停用',
           h('div', { class: 'toolbar' },
             h('button', { class: 'btn', type: 'button', onclick: () => { captureEditor(); selected = entry; drawEditor(); } }, '編輯'),
             h('button', { class: 'btn', type: 'button', onclick: () => {
@@ -69,7 +101,7 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
               drawDevices(); drawEditor();
             } }, '移除'))];
       });
-      deviceTable.replaceChildren(rows.length ? table(['設備', '連線位址', '品牌／系統', '備份帳號', '狀態', '操作'], rows) : note('尚未加入備份設備。'));
+      deviceTable.replaceChildren(rows.length ? table(['設備', '連線位址', '品牌／系統', '備份帳號', 'SSH 身分', '狀態', '操作'], rows) : note('尚未加入備份設備。'));
     };
     const drawEditor = () => {
       if (!selected) { editorFields = null; editor.replaceChildren(note('請按「加入設備」或在表格選擇「編輯」。')); return; }
@@ -92,12 +124,61 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
         password.required = !same || !current.password_set;
         password.placeholder = same && current.password_set ? '已設定；留白可沿用' : '請輸入此設備的密碼';
       };
-      select.addEventListener('change', updatePasswordRule); updatePasswordRule();
+      let candidate = null;
+      const hostKeyArea = h('div');
+      const hostKeyMessage = h('div', { role: 'status', 'aria-live': 'polite' });
+      const selectedHostKey = () => hostKeyStates.get(Number(select.value));
+      const hostKeyStatus = () => {
+        const state = candidate || selectedHostKey();
+        if (!select.value) return note('請先選擇設備，才能確認其 SSH 主機身分。');
+        if (state && (state.trusted || state.status === 'trusted')) {
+          return h('p', { style: 'color:#86efac;font-weight:700' }, '已驗證 SSH 主機身分' + (state.fingerprint ? '：' + state.fingerprint : '') + '。');
+        }
+        if (!candidate) return note('尚未確認 SSH 主機身分。建立備份前請先掃描並在設備端核對指紋。');
+        const confirm = h('input', { type: 'checkbox' });
+        const trust = h('button', { class: 'btn primary', type: 'button', disabled: true }, '確認後信任此主機金鑰');
+        confirm.addEventListener('change', () => { trust.disabled = !confirm.checked; });
+        trust.addEventListener('click', async () => {
+          trust.disabled = true;
+          hostKeyMessage.replaceChildren(note('正在儲存已核對的 SSH 主機金鑰…'));
+          try {
+            const r = await request('host_key_confirm', { device_id: Number(candidate.device_id), token: candidate.token, fingerprint: candidate.fingerprint });
+            const trusted = r.backup && r.backup.host_key ? r.backup.host_key : Object.assign({}, candidate, { trusted: true, status: 'trusted' });
+            hostKeyStates.set(Number(candidate.device_id), trusted);
+            candidate = trusted;
+            hostKeyMessage.replaceChildren(); drawDevices(); drawHostKey();
+          } catch (e) { hostKeyMessage.replaceChildren(unavailable(e.message)); trust.disabled = false; }
+        });
+        return h('div', { style: 'border:1px solid #fbbf24;border-radius:8px;padding:10px;margin-top:8px' },
+          h('strong', { style: 'color:#fcd34d' }, '請先在設備端核對，再決定是否信任'),
+          h('p', null, '設備：' + (candidate.host || deviceInfo(current).host)),
+          h('p', null, '金鑰類型：' + (candidate.key_type || candidate.algorithm || '未提供')),
+          h('p', { style: 'font-family:ui-monospace,SFMono-Regular,Menlo,monospace;overflow-wrap:anywhere' }, '指紋：' + (candidate.fingerprint || '未提供')),
+          note('請在 FortiGate 或設備主控台／管理介面取得 SSH 指紋，必須完全一致才可勾選。此操作不會自動信任或略過驗證。'),
+          label('我已在設備端核對以上指紋完全一致', confirm), trust);
+      };
+      const drawHostKey = () => {
+        const scan = h('button', { class: 'btn', type: 'button', disabled: !select.value }, '掃描 SSH 主機指紋');
+        scan.addEventListener('click', async () => {
+          scan.disabled = true; hostKeyMessage.replaceChildren(note('正在讀取設備的 SSH 主機指紋…'));
+          try {
+            const r = await request('host_key_scan', { device_id: Number(select.value) });
+            candidate = r.backup && r.backup.host_key;
+            if (!candidate || !candidate.fingerprint || !candidate.token) throw Error('備份服務沒有提供可供核對的 SSH 主機指紋，請重新掃描。');
+            candidate.device_id = Number(candidate.device_id || select.value);
+            hostKeyMessage.replaceChildren(); drawHostKey();
+          } catch (e) { hostKeyMessage.replaceChildren(unavailable(e.message)); scan.disabled = false; }
+        });
+        hostKeyArea.replaceChildren(h('fieldset', { style: 'border:1px solid var(--line);border-radius:10px;margin:12px 0;padding:12px' },
+          h('legend', null, 'SSH 主機身分驗證'), hostKeyStatus(), !(candidate && (candidate.trusted || candidate.status === 'trusted')) && scan, hostKeyMessage));
+      };
+      select.addEventListener('change', () => { updatePasswordRule(); candidate = null; drawHostKey(); }); updatePasswordRule();
       editorFields = { select, model, username, password, active };
       editor.replaceChildren(h('fieldset', { style: 'border:1px solid var(--line);border-radius:10px;margin:12px 0;padding:12px' },
         h('legend', null, '設備備份設定'), label('設備', select), label('設備品牌／系統', model),
         h('div', { class: 'grid even' }, label('備份帳號', username), label('備份密碼', password)),
-        label('納入備份', active), note('使用 SSH 加密連線，連接埠為 22。請使用可讀取完整設定的專用帳號。')));
+        label('納入備份', active), note('使用 SSH 加密連線，連接埠為 22。請使用可讀取完整設定的專用帳號。'), hostKeyArea));
+      drawHostKey();
     };
     drawDevices(); drawEditor();
     const save = h('button', { class: 'btn primary', type: 'submit' }, '儲存並套用備份設定');
@@ -164,7 +245,7 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
     const changes = b.changes.map((c) => h('details', { style: 'margin:12px 0' },
       h('summary', null, c.device_name + '｜' + time(c.detected_at) + '｜新增 ' + c.added + ' 行、刪除 ' + c.removed + ' 行'),
       note('這是兩次成功備份之間偵測到的差異，無法單靠備份判定實際修改者。敏感設定已遮罩；差異過長時會截斷。'),
-      h('pre', { style: 'white-space:pre-wrap;overflow-wrap:anywhere;background:var(--bg);padding:12px;max-height:480px;overflow:auto' }, c.diff || '這次只有敏感欄位或未顯示內容發生變更。')));
+      diffLegend(), diffContent(c.diff, '這次只有敏感欄位或未顯示內容發生變更。', '480px')));
     root.replaceChildren(h('div', { class: 'toolbar' },
       h('button', { class: 'btn', type: 'button', onclick: () => load(root, (r) => renderGovernance(root, r)) }, '重新整理備份狀態'),
       note('設備與排程請在本頁「備份設定」調整。')),
@@ -232,7 +313,7 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
         const c = r.backup.comparison;
         comparison.replaceChildren(note('版本 #' + c.from_version_id + '（' + time(c.from_created_at) + '） → #' + c.to_version_id + '（' + time(c.to_created_at) + '）'),
           note('新增 ' + c.added + ' 行、刪除 ' + c.removed + ' 行。' + (c.truncated ? '內容過長，已截斷預覽。' : '')),
-          h('pre', { style: 'white-space:pre-wrap;overflow-wrap:anywhere;max-height:600px;overflow:auto' }, c.diff || (c.changed ? '原始內容不同，但可顯示的差異已遮罩。' : '兩個版本的內容相同。')));
+          diffLegend(), diffContent(c.diff, c.changed ? '原始內容不同，但可顯示的差異已遮罩。' : '兩個版本的內容相同。', '600px'));
       } catch (e) { if (requestSequence === comparisonSequence) comparison.replaceChildren(unavailable(e.message)); }
       finally { if (requestSequence === comparisonSequence) compare.disabled = false; }
     });
