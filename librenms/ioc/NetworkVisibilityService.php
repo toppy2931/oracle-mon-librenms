@@ -33,6 +33,7 @@ final class NetworkVisibilityService
     public const TALKER_LIMIT  = 200;
     public const TALKERS       = 5;
     public const LIST_LIMIT    = 20;
+    public const DST_SAMPLE    = 3;       // 異常連線清單每一列最多列出幾個目的 IP（其餘寫「等 N 個」）
     public const PROBE_MIN     = 10;      // 連到這麼多個不同的內部主機才算橫向探測
     public const PROBE_MEDIUM  = 25;
     public const PROBE_HIGH    = 50;
@@ -271,13 +272,72 @@ final class NetworkVisibilityService
         foreach ($all as $a) {
             $levels[$a['level']]++;
         }
+        [$items, $dstError] = $this->withDestinations($nets, array_slice($all, 0, self::LIST_LIMIT), $from, $to);
         return [
-            'items'  => array_slice($all, 0, self::LIST_LIMIT),
-            'total'  => count($all),
-            'levels' => $levels,
-            'capped' => self::truncated($probe) || self::truncated($deny),
-            'smb'    => ['sources' => self::smbSources($all), 'previous' => $this->previousSmb($nets)],
+            'items'     => $items,
+            'dst_error' => $dstError,
+            'total'     => count($all),
+            'levels'    => $levels,
+            'capped'    => self::truncated($probe) || self::truncated($deny),
+            'smb'       => ['sources' => self::smbSources($all), 'previous' => $this->previousSmb($nets)],
         ];
+    }
+
+    /**
+     * 清單上的每一列補上目的主機 IP（最多 DST_SAMPLE 個，依連線筆數、再依位址排序）。
+     * 前面的分組只知道「連到幾個不同的目的」，所以對實際要列出的來源與埠再查一次：橫向探測類看轉送流量、
+     * 被擋下類只看被擋下的連線（兩類各最多一次查詢，沒有該類的列就不查）。
+     * 這只是補充資訊：補查失敗（逾時、Graylog 不接受三層分組）時 dst_ips 留空，畫面退回「N 個內部主機」，
+     * 不能讓原本能看的清單變成「無法取得」；失敗原因另外回傳，畫面要寫出來（不能默默少了 IP）。
+     *
+     * @param string[] $nets
+     * @param array<int,array<string,mixed>> $items
+     * @return array{0:array<int,array<string,mixed>>,1:?string} [補上目的 IP 的清單, 第一個失敗原因（沒有失敗是 null）]
+     */
+    private function withDestinations(array $nets, array $items, string $from, string $to): array
+    {
+        $error = null;
+        $bases = ['probe' => $this->fwd(), 'blocked' => 'log_type:firewall AND event_action:fw_deny'];
+        foreach ($bases as $kind => $base) {
+            $rows = array_filter($items, static fn ($a) => $a['kind'] === $kind);
+            if ($rows === []) {
+                continue;
+            }
+            // 來源位址已經過 IpNets::contains（嚴格 IPv4）、埠是整數，查詢裡沒有可注入的內容
+            $srcs  = array_values(array_unique(array_column($rows, 'src_ip')));
+            $ports = array_values(array_unique(array_column($rows, 'port')));
+            $q = $base . ' AND ' . $this->both($nets) . ' AND ' . $this->quiet()
+               . ' AND src_ip:("' . implode('" OR "', $srcs) . '") AND ' . self::F_PORT . ':(' . implode(' OR ', $ports) . ')';
+            try {
+                $found = $this->logs->aggregateBetween($this->q($q), $from, $to, ['src_ip', self::F_PORT, 'dst_ip'], ['count'], self::LIST_LIMIT);
+            } catch (GraylogUnavailable $e) {
+                $error ??= $e->getMessage();
+                continue;
+            }
+            $by = [];
+            foreach ($found as $r) {
+                $dst = (string) ($r['dst_ip'] ?? '');
+                if (!IpNets::contains($nets, $dst)) {
+                    continue;                // 空白、(Empty Value)、不在內部網段的目的不列
+                }
+                $key = (string) ($r['src_ip'] ?? '') . '|' . (int) ($r[self::F_PORT] ?? 0);
+                $by[$key][$dst] = ($by[$key][$dst] ?? 0) + (int) ($r['count'] ?? 0);
+            }
+            foreach (array_keys($rows) as $i) {
+                $c = $by[$items[$i]['src_ip'] . '|' . $items[$i]['port']] ?? [];
+                uksort($c, static fn ($a, $b) => $c[$b] <=> $c[$a] ?: strcmp($a, $b));
+                $items[$i]['dst_ips'] = array_slice(array_keys($c), 0, self::DST_SAMPLE);
+            }
+        }
+        if ($error === null) {
+            // 查詢成功卻有幾列一個目的也沒對上（例如那幾筆日誌缺目的埠：主查詢把缺值算成埠 0，但補查的 dstport:0 只比對得到真的寫了 0 的日誌）。
+            // 不能默默只顯示數量，讓人以為目的 IP 這個功能對那幾列壞了
+            $missing = count(array_filter($items, static fn ($a) => $a['distinct'] > 0 && $a['dst_ips'] === []));
+            if ($missing > 0) {
+                $error = sprintf('有 %d 列沒有查到目的 IP（例如那幾筆日誌缺目的埠欄位）', $missing);
+            }
+        }
+        return [$items, $error];
     }
 
     /** 分組結果裡有沒有任何一列的目的埠有值（全都是缺值＝日誌沒有這個欄位）。 @param array<int,array<string,mixed>> $rows */
@@ -378,6 +438,7 @@ final class NetworkVisibilityService
             'src_ip'   => $ip,
             'port'     => $port,
             'distinct' => $distinct,
+            'dst_ips'  => [],                    // 清單要列出的列才會補（withDestinations）
             'count'    => $count,
             'kind'     => $kind,
             'level'    => $level,

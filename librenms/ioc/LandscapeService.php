@@ -33,16 +33,17 @@ final class LandscapeService
      * @param array{ok:bool,data?:mixed,error?:string} $coverage OverviewService 算出來的資料涵蓋區塊
      * @param array{low:int,medium:int}|null $riskThresholds SettingsService::riskThresholds()；null＝讀取失敗（只顯示分數、不判定等級）。
      *        刻意沒有預設值：呼叫端漏傳就會是語法錯誤，不會悄悄套用預設門檻
+     * @param string|null $sitesWarning 站點設定讀不到時的原因（Fleet 因此只能用 LibreNMS 位置分站點）；畫面要寫出來，不能默默換結果
      * @return array<string,mixed>
      */
-    public function build(?Fleet $fleet, ?array $caseSummary, ?array $openBySeverity, ?array $latestCases, ?array $trendRows, array $coverage, ?array $riskThresholds): array
+    public function build(?Fleet $fleet, ?array $caseSummary, ?array $openBySeverity, ?array $latestCases, ?array $trendRows, array $coverage, ?array $riskThresholds, ?string $sitesWarning = null): array
     {
         return [
-            'kpi'          => $this->kpi($fleet, $caseSummary, $openBySeverity),
+            'kpi'          => $this->kpi($fleet, $caseSummary, $openBySeverity, $sitesWarning),
             'risk'         => $this->risk($fleet, $openBySeverity, $coverage, $riskThresholds),
             'trend'        => $trendRows === null ? $this->fail('事件案資料無法讀取') : ['ok' => true, 'data' => $this->trend($trendRows)],
-            'sites'        => $this->sites($fleet),
-            'ranking'      => $this->ranking($fleet),
+            'sites'        => $this->sites($fleet, $sitesWarning),
+            'ranking'      => $this->ranking($fleet, $sitesWarning),
             'latest_cases' => $latestCases === null ? $this->fail('事件案資料無法讀取') : ['ok' => true, 'data' => $this->latest($latestCases, $fleet)],
         ];
     }
@@ -50,7 +51,7 @@ final class LandscapeService
     // ── KPI ─────────────────────────────────────────────────────────────
 
     /** @return array<int,array<string,mixed>> */
-    private function kpi(?Fleet $fleet, ?array $caseSummary, ?array $openBySeverity): array
+    private function kpi(?Fleet $fleet, ?array $caseSummary, ?array $openBySeverity, ?string $sitesWarning): array
     {
         // $na：沒有值時卡片的大字。預設「無法取得」（讀取失敗）；不是失敗而是「還沒設定」時寫得更貼近原因
         $unknown = static fn (string $key, string $label, string $why, ?string $na = null): array =>
@@ -61,13 +62,15 @@ final class LandscapeService
         if ($fleet === null) {
             $sites = $unknown('sites', '站點數', $noFleet);
         } elseif ($fleet->sites() === []) {
-            $sites = $unknown('sites', '站點數', $fleet->total() === 0
-                ? '還沒有納管任何設備'
-                : 'LibreNMS 的設備都還沒有有效的位置（沒指定，或只有 Unknown 這類 SNMP 預設值；到設備設定 → 位置 指定）', '尚未設定');
+            $sites = $unknown('sites', '站點數', self::noSitesReason($fleet) . self::warnSuffix($sitesWarning), '尚未設定');
         } else {
             $un = $fleet->unlocated();
-            $sites = ['key' => 'sites', 'label' => '站點數', 'value' => count($fleet->sites()), 'state' => 'good',
-                'sub' => $un > 0 ? sprintf('另有 %d 台設備沒有有效位置（未指定，或是 Unknown 這類預設值）', $un) : '各設備都已指定位置'];
+            $cfg = $fleet->hasConfiguredSites();
+            $sites = ['key' => 'sites', 'label' => '站點數', 'value' => count($fleet->sites()), 'state' => $sitesWarning === null ? 'good' : 'warn',
+                'sub' => ($un > 0
+                    ? ($cfg ? sprintf('另有 %d 台設備沒有歸屬站點（IP 不在任何站點的網段內，也沒有有效的 LibreNMS 位置）', $un)
+                            : sprintf('另有 %d 台設備沒有有效位置（未指定，或是 Unknown 這類預設值）', $un))
+                    : ($cfg ? '各設備都已歸屬站點' : '各設備都已指定位置')) . self::warnSuffix($sitesWarning)];
         }
 
         // 2) 監控資產數
@@ -96,7 +99,7 @@ final class LandscapeService
 
         // 4) 高風險站點（簡報有「較昨日」，要有每日快照才算得出來，目前沒有，所以不寫）
         if ($fleet === null || $fleet->sites() === []) {
-            $high = $unknown('high_sites', '高風險站點', $fleet === null ? $noFleet : '尚無站點資料（設備還沒有有效的位置）', $fleet === null ? null : '尚未設定');
+            $high = $unknown('high_sites', '高風險站點', $fleet === null ? $noFleet : self::noSitesReason($fleet) . self::warnSuffix($sitesWarning), $fleet === null ? null : '尚未設定');
         } else {
             $c = $fleet->levelCounts();
             $high = ['key' => 'high_sites', 'label' => '高風險站點', 'value' => $c['severe'],
@@ -177,32 +180,54 @@ final class LandscapeService
 
     // ── 站點 ────────────────────────────────────────────────────────────
 
+    /**
+     * 沒有任何站點可顯示的原因（站點數、高風險站點、站點分佈、排行四處共用同一句，不會各說各話）：
+     * 沒有設備 → 沒納管；有自訂站點 → 網段沒對上；沒有自訂站點 → 只談 LibreNMS 位置，並指向「設定」頁（站點可以在那裡新增）。
+     */
+    private static function noSitesReason(Fleet $fleet): string
+    {
+        if ($fleet->total() === 0) {
+            return '還沒有納管任何設備';
+        }
+        return $fleet->hasConfiguredSites()
+            ? '已經設定了站點，但沒有任何設備的 IP 落在站點的網段內，設備也沒有有效的 LibreNMS 位置（請檢查「設定」頁的網段有沒有填對）'
+            : 'LibreNMS 的設備都還沒有有效的位置（沒指定，或只有 Unknown 這類 SNMP 預設值；到設備設定 → 位置 指定，或到「設定」頁新增站點與網段）';
+    }
+
+    private static function warnSuffix(?string $warning): string
+    {
+        return $warning === null ? '' : '；' . $warning;
+    }
+
     /** @return array<string,mixed> */
-    private function sites(?Fleet $fleet): array
+    private function sites(?Fleet $fleet, ?string $sitesWarning): array
     {
         if ($fleet === null) {
             return $this->fail('LibreNMS 的設備資料無法讀取');
         }
         $sites = $fleet->sites();
         if ($sites === []) {
-            return $this->fail($fleet->total() === 0 ? '還沒有納管任何設備' : 'LibreNMS 的設備都還沒有有效的位置（沒指定，或只有 Unknown 這類預設值），沒有站點可顯示');
+            return $this->fail(self::noSitesReason($fleet) . ($fleet->total() === 0 ? '' : '，沒有站點可顯示') . self::warnSuffix($sitesWarning));
         }
         return ['ok' => true, 'data' => [
             'items'         => $sites,
             'counts'        => $fleet->levelCounts(),
             'unlocated'     => $fleet->unlocated(),
             'has_locations' => count(array_filter($sites, static fn ($s) => $s['lat'] !== null && $s['lng'] !== null)) > 0,
+            'configured'    => $fleet->hasConfiguredSites(),
+            'empty_sites'   => $fleet->emptyConfiguredSites(),
+            'warning'       => $sitesWarning,
         ]];
     }
 
     /** @return array<string,mixed> */
-    private function ranking(?Fleet $fleet): array
+    private function ranking(?Fleet $fleet, ?string $sitesWarning): array
     {
         if ($fleet === null) {
             return $this->fail('LibreNMS 的設備資料無法讀取');
         }
         if ($fleet->sites() === []) {
-            return $this->fail('沒有站點資料（設備還沒有有效的位置）');
+            return $this->fail('沒有站點資料：' . self::noSitesReason($fleet) . self::warnSuffix($sitesWarning));
         }
         return ['ok' => true, 'data' => $fleet->ranking(self::RANKING_LIMIT)];
     }

@@ -26,10 +26,11 @@ use Ioc\OverviewService;
 use Ioc\PdoCaseRepo;
 use Ioc\PdoSettingsRepo;
 use Ioc\SettingsService;
+use Ioc\Sites;
 use Ioc\UnavailableLogSource;
 
 const IOC_READER_CONF = '/etc/oracle-mon/graylog-reader.conf';
-const IOC_OVERVIEW_CACHE = 'ioc:overview:v3:';     // 後面接 live 或 demo；總覽的伺服器端快取（20 秒）。內容形狀改了就要升版號
+const IOC_OVERVIEW_CACHE = 'ioc:overview:v4:';     // 後面接 live 或 demo；總覽的伺服器端快取（20 秒）。內容形狀改了就要升版號
 const IOC_NETWORK_CACHE = 'ioc:network:v1:';       // 同上，內網可視性的快取（60 秒，查詢次數多）；內部網段的設定一改就要清掉
 
 /** 內部網段的設定有異動就讓內網可視性的快取失效，否則 60 秒內畫面還是用舊網段算的。 */
@@ -347,17 +348,22 @@ function ioc_pick($input, array $keys): array
 }
 
 /**
- * LibreNMS 的設備（含站點＝設備的「位置」、可用率）。讀不到回傳 null（總覽會標示「無法取得」，不是 0 台）。
+ * LibreNMS 的設備（含站點、可用率）。站點：設備 IP 落在設定頁自訂站點的網段內 → 該站點，否則是設備的「位置」。
+ * 讀不到回傳 null（總覽會標示「無法取得」，不是 0 台）。
  * devices.last_polled 是主機本地時間（LibreNMS 要求 PHP 與資料庫時區一致），不是 UTC，Fleet 會照這個時區轉換。
+ * devices.ip 是 varbinary(16)：用查詢建構器讀到的是原始位元組，轉成文字由 Fleet::deviceIp 處理。
+ *
+ * @param Sites|null $sites 設定頁自訂的站點；null＝沒有或讀不到（呼叫端要自己說明原因）
  */
-function ioc_fleet(): ?Fleet
+function ioc_fleet(?Sites $sites = null): ?Fleet
 {
     try {
         $rows = DB::table('devices')
             ->leftJoin('locations', 'locations.id', '=', 'devices.location_id')
             ->where('devices.disabled', 0)->where('devices.ignore', 0)
             ->get(['devices.device_id', 'devices.hostname', 'devices.sysName', 'devices.display', 'devices.type', 'devices.status',
-                   'devices.status_reason', 'devices.last_polled', 'locations.location as location_name', 'locations.lat', 'locations.lng']);
+                   'devices.status_reason', 'devices.last_polled', 'devices.ip', 'devices.overwrite_ip',
+                   'locations.location as location_name', 'locations.lat', 'locations.lng']);
     } catch (\Throwable $e) {
         error_log('[ioc] devices: ' . $e->getMessage());
         return null;
@@ -385,13 +391,14 @@ function ioc_fleet(): ?Fleet
             'reason'      => $r->status_reason,
             'last_polled' => $r->last_polled,
             'location'    => $r->location_name,
+            'ip'          => Fleet::deviceIp($r->overwrite_ip, $r->ip, $r->hostname),
             'lat'         => $r->lat,
             'lng'         => $r->lng,
             'avail_1d'    => $avail[$id][86400] ?? null,
             'avail_7d'    => $avail[$id][604800] ?? null,
         ];
     }
-    return new Fleet($out, date_default_timezone_get());
+    return new Fleet($out, date_default_timezone_get(), $sites);
 }
 
 /** @return array<string,mixed> */
@@ -402,7 +409,18 @@ function ioc_overview(bool $demo, string $level): array
     } catch (GraylogUnavailable $e) {
         $logs = new UnavailableLogSource($e->getMessage());   // 例如還沒建立唯讀帳號：日誌區塊標示尚未設定，其他照常
     }
-    $fleet = ioc_fleet();
+    $sites        = null;
+    $sitesWarning = null;
+    try {
+        $sites = ioc_settings()->sites($level);
+    } catch (\Ioc\AccessDenied $e) {
+        throw $e;
+    } catch (\Throwable $e) {
+        error_log('[ioc] sites: ' . $e->getMessage());
+        // 站點設定讀不到：設備只能依 LibreNMS 位置分站點。畫面一定要寫出來，不能默默換一套結果
+        $sitesWarning = '站點設定讀不到，暫時只依 LibreNMS 的位置分站點：' . ($e instanceof \Ioc\IocError ? $e->getMessage() : '設定資料表還沒建立？');
+    }
+    $fleet = ioc_fleet($sites);
     try {
         $svc    = ioc_service();
         $cases  = $svc->summary($level);
@@ -426,6 +444,6 @@ function ioc_overview(bool $demo, string $level): array
         $nets = null;                             // 讀不到內部網段：「防火牆阻擋的來源」分不出內外，該區塊標「無法取得」，不套預設網段
     }
     $overview = (new OverviewService($logs, $demo, null, $nets))->build($fleet === null ? null : $fleet->legacy(), $cases);
-    $overview['landscape'] = (new LandscapeService())->build($fleet, $cases, $open, $latest, $trend, $overview['coverage'], $thresholds);
+    $overview['landscape'] = (new LandscapeService())->build($fleet, $cases, $open, $latest, $trend, $overview['coverage'], $thresholds, $sitesWarning);
     return $overview;
 }

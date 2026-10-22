@@ -20,7 +20,7 @@
    │         │ fetch（X-CSRF-Token）
    │         ├─► /ioc-data.php   總覽資料（GET，快取 20 秒）
    │         ├─► /ioc-cases.php  事件案 API（POST；含 evidence：事件詳情的證據時間軸，唯讀查 Graylog）
-   │         ├─► /ioc-settings.php  設定 API（POST；風險等級門檻、內部網段）
+   │         ├─► /ioc-settings.php  設定 API（POST；風險等級門檻、內部網段、站點與網段）
    │         ├─► /ioc-network.php  內網可視性 API（POST；admin 與 global-read 都能看，唯讀：東西向流量、Top Talkers、異常連線、IDS，查 Graylog，快取 60 秒）
    │         └─► /ioc-identity.php  身分與稽核 API（POST；只有 admin：帳號統計、稽核軌跡、主機遠端登入、帳號盤點紀錄）
    │                │
@@ -142,7 +142,7 @@ cd /opt/oracle-mon-librenms && git pull && sudo ./update.sh
 sudo -u librenms php /opt/oracle-mon-librenms/system/ioc-db-selftest.php
 ```
 
-預期 18 項 PASS，最後印「全部通過（測試資料已清除）」。其中 1 項驗證事件案新欄位（`ALTER` 補的欄位）能寫入並讀回；**最後 2 項（身分與稽核）是只讀**，用跟網頁一樣的 PHP 身分（librenms）實際讀 `users`、角色、雙因子、`authlog`、`/var/log/oracle-admin.log`，其中管理操作紀錄檔如果 librenms 讀不到會在這裡失敗並指出檔案（修法：`sudo chmod 640 /var/log/oracle-admin.log && sudo chgrp librenms /var/log/oracle-admin.log`）；6 項是設定（門檻）、帳號盤點與內部網段：全部在一個永遠 rollBack 的交易裡跑，正式的風險等級門檻與異動紀錄不會被改到（網頁看不到測試值，程式中途被砍也不會留下），最後一項確認回復後與測試前一樣。
+預期 20 項 PASS，最後印「全部通過（測試資料已清除）」。其中 1 項驗證事件案新欄位（`ALTER` 補的欄位）能寫入並讀回；**「設備與站點」1 項與最後 2 項（身分與稽核）是只讀**（設備那項第一次對真實 LibreNMS 讀 `devices.ip`、`devices.overwrite_ip`：`ip` 是二進位欄位，失敗時訊息會指出欄位）；站點那 1 項（在設定的交易裡）會實際 `INSERT`、更新、`DELETE` 一個站點，並第一次對真實 MariaDB 跑 `SELECT … FOR UPDATE` 與異動紀錄的前綴篩選（`LIKE … ESCAPE '!'`），**正式的站點在交易裡會被整份取代掉，但整個交易最後一定 rollBack，不會動到**；用跟網頁一樣的 PHP 身分（librenms）實際讀 `users`、角色、雙因子、`authlog`、`/var/log/oracle-admin.log`，其中管理操作紀錄檔如果 librenms 讀不到會在這裡失敗並指出檔案（修法：`sudo chmod 640 /var/log/oracle-admin.log && sudo chgrp librenms /var/log/oracle-admin.log`）；7 項是設定（門檻）、帳號盤點、內部網段與站點：全部在一個永遠 rollBack 的交易裡跑，正式的風險等級門檻與異動紀錄不會被改到（網頁看不到測試值，程式中途被砍也不會留下），最後一項確認回復後與測試前一樣。
 
 **2. 唯讀帳號**（需要 `/etc/oracle-mon/graylog-api.conf` 有 admin 帳密與 `GRAYLOG_FIREWALL_STREAMS`）：
 
@@ -169,8 +169,9 @@ python3 /opt/oracle-mon-librenms/system/graylog-reader.py status
 - 左側「身分與稽核」（只有 admin 看得到）：上方 5 張卡（啟用中的帳號、管理者、雙因子、久未登入、帳號盤點）、角色分布甜甜圈圖、治理檢查；久未登入的名單下面有註明登入紀錄最早到哪天；填帳號盤點紀錄按儲存，卡片變成「今天」、稽核軌跡多一筆「修改設定：帳號盤點…」；稽核軌跡有你剛剛的登入與管理操作，可依類別與結果篩選；「主機的遠端登入」在最近 24 小時沒收到 Linux／Windows 日誌時寫「沒有收到日誌（還沒接入，或已經中斷了）」。`global-read` 登入後導覽沒有這一項，直接打 `/ioc-identity.php` 回 403
 - 左側「設定」頁：admin 能改風險等級門檻（儲存前會預覽等級、中等風險不能大於低風險），儲存後到「總覽」確認風險等級與說明文字用新門檻、「異動紀錄」多一筆；`global-read` 看得到但輸入框是停用的，直接打 `/ioc-settings.php` 的 `save` 回 403。看完把門檻改回原值
 - **內網可視性的位元組數來自新的標準欄位 `net_bytes`**，要先讓 IOC 的防火牆 pipeline 套用新規則：`sudo ./update.sh` 會自動 `apply`（先用 `python3 /opt/oracle-mon-librenms/system/graylog-pipelines.py plan` 看唯讀的計畫：預期只有「規則 ioc-fw-bytes：新增」與「Pipeline IOC Normalize - Firewall：更新」）。套用後約 1～2 分鐘，到 Graylog 搜尋 `_exists_:net_bytes` 應該有新日誌（連線結束的 `close` 等），`net_bytes` 是數字。**只有套用之後進來的日誌才有這個欄位**，所以內網可視性的流量那三塊一開始只有幾分鐘的資料，趨勢前面幾格寫「沒有位元組數資料」，24 小時後才完整
-- 左側「內網可視性」（admin 與 `global-read` 都看得到，全部唯讀）：先看 4 張 KPI（東西向流量佔比、異常 SMB 來源、異常連線、IDS 告警）是不是有值或有明確的原因；東西向趨勢 6 格、Top Talkers 前 5 名的位元組數大小合理；異常連線清單的每一筆（來源 → 目的、行為、風險）對得上你知道的內網狀況（例如掃描器、備份主機會被標成橫向探測，這是預期的，確認後可以忽略）。**這一頁是第一次對真實的 FortiGate 日誌跑 `sum`、`card` 與前綴萬用字元查詢，任何區塊寫「無法取得：Graylog 回應 HTTP 400…」就是查詢語法與 Graylog 版本不合，把訊息貼回來**。IDS 告警在 monitor-vm 上有數字（2026-10-21 實測 26，較前一個 24 小時 +13%：這台 FortiGate 有送 IPS／異常偵測日誌）；沒有 IPS 日誌的站點才寫「尚未接入」。`global-read` 沒有「建立事件案」按鈕
+- 左側「內網可視性」（admin 與 `global-read` 都看得到，全部唯讀）：先看 4 張 KPI（東西向流量佔比、異常 SMB 來源、異常連線、IDS 告警）是不是有值或有明確的原因；東西向趨勢 6 格、Top Talkers 前 5 名的位元組數大小合理；異常連線清單的每一筆（來源 → 目的、行為、風險）對得上你知道的內網狀況（例如掃描器、備份主機會被標成橫向探測，這是預期的，確認後可以忽略）。**這一頁是第一次對真實的 FortiGate 日誌跑 `sum`、`card` 與前綴萬用字元查詢，任何區塊寫「無法取得：Graylog 回應 HTTP 400…」就是查詢語法與 Graylog 版本不合，把訊息貼回來**。IDS 告警在 monitor-vm 上有數字（2026-10-21 實測 26，較前一個 24 小時 +13%：這台 FortiGate 有送 IPS／異常偵測日誌）；沒有 IPS 日誌的站點才寫「尚未接入」。異常連線清單的「目的」欄現在直接列內部主機 IP（最多 3 個，其餘寫「等 N 個」）：**這是第一次對真實 Graylog 做三層 `group_by`（來源 × 埠 × 目的）**，若 Graylog 不接受，畫面會退回「N 個內部主機」，清單下方多一行「目的主機的 IP 沒有全部查到……：原因」，而不是壞掉（有幾列補查成功卻一個目的也對不上時，原因會寫「有 N 列沒有查到目的 IP」）；看到這行把原因貼回來。`global-read` 沒有「建立事件案」按鈕
 - 左側「設定」頁的「內部網段」：預設是三個私有位址網段；admin 改成你站點實際的網段（例如只有 172.16.1.0/24）存檔後，回「內網可視性」確認「內部網段：…」那行與清單都變了；填 `10.0.0.0/4`、空白、`abc` 都會被擋下並說明；異動紀錄多一筆。`global-read` 看得到但輸入框是停用的，直接打 `/ioc-settings.php` 的 `save_network` 回 403。看完改回你要的網段
+- 左側「設定」頁的「站點與網段」（2026-10-22 新增，**這一項還沒在 monitor-vm 驗證**）：先看總覽的「站點數」「站點分佈」現在是只有 LibreNMS 位置的舊樣子（1 個站點、13 台沒有歸屬）；admin 新增一個站點「測試站點」＝`172.16.1.0/24`（你的設備所在網段）存檔，總覽自動重載：站點數增加、那些設備歸進去（排行與站點分佈都有它，離線比例合理）、「另有 N 台設備沒有歸屬站點」的 N 變小；異動紀錄多一筆「（新增）→ 測試站點：172.16.1.0/24」；稽核軌跡（身分與稽核頁）多一筆「修改設定：站點與網段」。再試：填空白名稱、`Unknown`、`abc` 網段、同一個網段放進兩個站點，都會被擋下並說明（一次列出所有問題）；改名後再存、刪掉後再存，異動紀錄各多一筆；設定了一個沒有設備的網段（例如 `203.0.113.0/24`）→ 總覽的站點區塊提示那個站點沒有設備歸進去。`global-read` 看得到但輸入框是停用的，直接打 `/ioc-settings.php` 的 `save_sites` 回 403。**看完把測試站點刪掉（或改成你要的站點）**。若某台設備的 IP 欄位在 LibreNMS 是空的（IPv6、沒探索過），它不會歸進網段站點，只能靠 LibreNMS 的位置
 
 **4. 失敗時看哪裡**：PHP 錯誤在 PHP-FPM 的錯誤 log（`/var/log/php8.3-fpm.log` 或 nginx 的 error log），訊息以 `[ioc]` 開頭；
 瀏覽器看到的只會是通用錯誤訊息，不含內部細節。
@@ -192,6 +193,7 @@ sudo mysql librenms -e 'DROP TABLE ioc_case_history; DROP TABLE ioc_cases; DROP 
 ```
 
 只想讓風險等級回到預設（85／65）、不退整個入口：在設定頁按「填入預設值」再儲存（會留異動紀錄，這是正規做法）。
+只想取消自訂站點（總覽回到只依 LibreNMS 位置）：在設定頁把站點全部刪除再儲存；緊急時 `sudo mysql librenms -e "DELETE FROM ioc_settings WHERE skey LIKE 'site.%'"`（同樣不留異動紀錄；`sites.next_id` 計數器不會被這條刪掉，留著無害，之後新增的站點 id 也不會重用）。
 緊急時才用 SQL：`sudo mysql librenms -e 'DELETE FROM ioc_settings'`（沒有資料列就用預設值），**這樣改不會留異動紀錄**，稽核軌跡會有缺口；事後請自己記下是誰、何時、為什麼改。
 
 只想先停用入口、不刪任何東西：執行第 1 步即可（頁面與 API 都會消失，資料保留，重新 `update.sh` 就回來）。
