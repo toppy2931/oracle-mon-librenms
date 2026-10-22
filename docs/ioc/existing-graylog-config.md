@@ -176,3 +176,10 @@ end
   其他值（例如連線結束的 `close`）目前沒有 `event_action`。
 - `fortigate-extract-flow-fields` 寫的 `source_ip`、`destination_ip` 是給 jt-gelflow 的，和 IOC 的 `src_ip`、`dst_ip` 是**不同欄位**，不衝突。
   但 IOC 的 Windows 規則把 `source_ip` 當成 Winlogbeat 的候選欄位之一，因此 **Windows pipeline 不可連到 `FortiGate Syslog` stream**。
+- **既有 pipeline 的位元組數欄位是壞的（monitor-vm 實測，2026-10-21）**：`fortigate_normalize` 讀 `sentbyte`／`rcvdbyte`，
+  但這台 FortiGate（v7.4／v7.2）的 CEF 日誌沒有這兩個鍵，位元組數放在 CEF 標準的 `out=`（送出）與 `in=`（收到），
+  封包數在 `FTNTFGTsentpkt`／`FTNTFGTrcvdpkt`。結果是 `sentbyte`、`rcvdbyte` 沒有值，`network_bytes` **每一筆都是 0**
+  （最近 1 小時 10,942 筆 `traffic:forward` 的 `sum(network_bytes)`＝0、`card(network_bytes)`＝1）；`out`、`in` 則被 `key_value()` 寫成字串欄位，不能直接加總。
+  真實日誌的樣子：`… FTNTFGTduration=74 out=4456 in=11139 FTNTFGTsentpkt=20 FTNTFGTrcvdpkt=18 …`（連線結束的 `act=close` 才有位元組數）。
+  這條既有 pipeline 不歸本工具管，所以不去改它；IOC 的防火牆 pipeline 新增規則 `ioc-fw-bytes`，從原始訊息文字取 `out=`、`in=`，
+  寫標準欄位 `net_bytes`（數字，送出加收到），內網可視性讀這個欄位。**只有套用之後進來的日誌才有 `net_bytes`**。

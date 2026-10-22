@@ -89,6 +89,24 @@ class RuleGenerationTests(unittest.TestCase):
         written = {name: set(re.findall(r'set_field\("(\w+)"', src)) - {"ioc_schema"} for name, src in rules.items()}
         self.assertFalse(written["ioc-fw-base"] & written["ioc-fw-deny"])
         self.assertFalse(written["ioc-fw-base"] & written["ioc-fw-allow"])
+        for other in ("ioc-fw-base", "ioc-fw-deny", "ioc-fw-allow"):    # 位元組數規則寫自己的欄位，不與其他規則重疊
+            self.assertFalse(written["ioc-fw-bytes"] & written[other], other)
+
+    def test_firewall_bytes_come_from_cef_out_and_in_and_are_numeric(self):
+        """這台 FortiGate 的 CEF 把位元組數放在 out／in；既有 pipeline 讀 sentbyte／rcvdbyte，network_bytes 每筆都是 0（monitor-vm 實測）。"""
+        src = dict(gp.firewall_rules())["ioc-fw-bytes"]
+        self.assertRegex(src, r'set_field\("net_bytes", to_long\(regex_replace\("\^\.\* out=\(\[0-9\]\+\)\.\*\$", [^\n]*?"\$1"\), 0\) \+ to_long\(regex_replace\("\^\.\* in=\(\[0-9\]\+\)\.\*\$", [^\n]*?"\$1"\), 0\)\);',
+                         "從原文取 out= 與 in=，轉成數字才能 sum")
+        self.assertIn('contains(to_string($message.message, ""), " out=") || contains(to_string($message.message, ""), " in=")', src,
+                      "沒有 out／in 的日誌不寫 net_bytes：沒有資料不等於 0 位元組")
+        self.assertNotIn("sentbyte", src, "不依賴既有 pipeline 的 sentbyte／rcvdbyte")
+        self.assertNotIn("$message.in", src, "in 可能是 Graylog 規則語言的保留字，不用欄位寫法")
+        # 與 FortiGate 實際日誌的格式對得上：... FTNTFGTduration=74 out=4456 in=11139 FTNTFGTsentpkt=20 ...
+        sample = "x FTNTFGTduration=74 out=4456 in=11139 FTNTFGTsentpkt=20 FTNTFGTrcvdpkt=18"
+        self.assertEqual(re.sub(r"^.* out=([0-9]+).*$", r"\1", sample), "4456")
+        self.assertEqual(re.sub(r"^.* in=([0-9]+).*$", r"\1", sample), "11139")
+        self.assertIn("net_bytes", gp.STANDARD_FIELDS)
+        self.assertEqual(list(gp.lint("ioc-fw-bytes", src)), [])
 
     def test_grok_patterns_capture_only_standard_fields(self):
         for rules in gp.pipelines().values():
@@ -305,6 +323,22 @@ class SyncTests(unittest.TestCase):
         self.assertIn("PLAN: changes=", out)
         self.assertEqual(self.gl.mutations(), [])
         self.assertEqual(self.gl.rules, {})
+
+    def test_new_rule_is_added_to_an_already_applied_firewall_pipeline(self):
+        """monitor-vm 的升級路徑：已套用過（還沒有 ioc-fw-bytes）再跑 apply，只新增那一條規則並更新防火牆 pipeline 的原始碼。"""
+        run(["apply"], self.env)
+        rid = next(i for i, r in self.gl.rules.items() if r["title"] == "ioc-fw-bytes")
+        fid = self.fw_id()
+        del self.gl.rules[rid]
+        self.gl.pipes[fid]["source"] = self.gl.pipes[fid]["source"].replace('  rule "ioc-fw-bytes"\n', "")
+        self.assertNotIn("ioc-fw-bytes", self.gl.pipes[fid]["source"])
+        self.gl.requests.clear()
+        code, out, _ = run(["apply"], self.env)
+        self.assertEqual(code, 0, out)
+        self.assertEqual(self.gl.mutations(), [("POST", gp.P_RULE), ("PUT", gp.P_PIPE + "/" + fid)])
+        self.assertIn("APPLY: changes=2", out)
+        self.assertIn('  rule "ioc-fw-bytes"', self.gl.pipes[fid]["source"])
+        self.assertEqual((len(self.gl.rules), len(self.gl.pipes)), (self.n_rules, self.n_pipes), "其他規則與 pipeline 沒被動到")
 
     def test_changed_rule_on_server_is_updated_in_place(self):
         run(["apply"], self.env)

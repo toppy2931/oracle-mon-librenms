@@ -4,6 +4,7 @@ graylog-pipelines.py — IOC 欄位標準化 pipeline 的冪等套用工具（Gr
 
 把 Windows / Linux / 防火牆 / 網路設備的日誌，統一寫入標準欄位，原始欄位保持不動：
   ioc_schema  log_type  event_action  severity  user_name  src_ip  dst_ip  host_name  target_name
+  net_bytes（防火牆連線的總位元組數＝送出加收到，數字；只有帶 CEF 的 out／in 的日誌才有，給內網可視性算流量）
 中文入口（IOC portal）只讀這些標準欄位；event_action 存英文代碼，中文名稱在入口顯示層對照。
 
 用法：
@@ -53,6 +54,7 @@ DESCRIPTION = "IOC 欄位標準化（由 system/graylog-pipelines.py 管理，�
 STANDARD_FIELDS = frozenset([
     "ioc_schema", "log_type", "event_action", "severity",
     "user_name", "src_ip", "dst_ip", "host_name", "target_name",
+    "net_bytes",
 ])
 # 預設 stage 0。防火牆規則要讀 fortigate_normalize（stage 0、1）產生的欄位，所以排 stage 2
 STAGE = {PIPELINE_PREFIX + "Firewall": 2}
@@ -179,6 +181,16 @@ def firewall_rules():
     deny = " || ".join('contains(%s, "%s")' % (act, w) for w in ("deny", "drop", "block", "reject"))
     allow = " || ".join('contains(%s, "%s")' % (act, w) for w in ("accept", "allow", "pass"))
     has = '%s != "" && %s != ""' % (src, dst)
+    # 位元組數：CEF 標準的 out（送出）與 in（收到）。既有的 fortigate_normalize 讀的是 sentbyte／rcvdbyte，
+    # 但這台 FortiGate 的 CEF 日誌沒有這兩個鍵，所以它寫的 network_bytes 每一筆都是 0（monitor-vm 實測，
+    # 見 docs/ioc/existing-graylog-config.md），不能拿來算流量。
+    # 直接從原始訊息文字取 " out=數字" 與 " in=數字"，不依賴 key_value() 寫出來的欄位，也不用 $message.in
+    # 這種欄位寫法（in 可能被 Graylog 的規則語言當成保留字）。regex_replace 沒比對到時會回傳整段原文，
+    # 轉成數字失敗就是 0；缺 out 或缺 in 時那一邊當 0。訊息裡完全沒有 out= 也沒有 in= 的日誌不寫 net_bytes
+    # （沒有資料不等於 0 位元組）。
+    has_bytes = '%s && (contains(%s, " out=") || contains(%s, " in="))' % (has, MSG, MSG)
+    bytes_out = 'to_long(regex_replace("^.* out=([0-9]+).*$", %s, "$1"), 0)' % MSG
+    bytes_in = 'to_long(regex_replace("^.* in=([0-9]+).*$", %s, "$1"), 0)' % MSG
     return [
         rule("fw-base", has,
              [("log_type", lit("firewall")), ("src_ip", src),
@@ -187,6 +199,7 @@ def firewall_rules():
              [("event_action", lit("fw_deny")), ("severity", lit("low"))]),
         rule("fw-allow", "%s && (%s) && !(%s)" % (has, allow, deny),
              [("event_action", lit("fw_allow")), ("severity", lit("info"))]),
+        rule("fw-bytes", has_bytes, [("net_bytes", "%s + %s" % (bytes_out, bytes_in))]),
     ]
 
 

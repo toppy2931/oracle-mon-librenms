@@ -74,13 +74,13 @@ function nvSource(): FakeNetworkSource
     $src->route(static fn ($q, $f, $t, $g) => $g === ['log_type'], static function ($q, $f) use ($prevStart) {
         $east = strpos($q, 'dst_ip:(') !== false;
         $prev = $f < $prevStart;
-        return [['log_type' => 'firewall', 'sum_network_bytes' => (float) ($east ? ($prev ? 20000 : 2500) : ($prev ? 40000 : 10000))]];
+        return [['log_type' => 'firewall', 'sum_net_bytes' => (float) ($east ? ($prev ? 20000 : 2500) : ($prev ? 40000 : 10000))]];
     });
     $src->route(static fn ($q, $f, $t, $g) => $g === ['src_ip'], [
-        ['src_ip' => '10.0.0.5', 'sum_network_bytes' => 5000.0, 'count' => 40],
-        ['src_ip' => '10.0.0.9', 'sum_network_bytes' => 9000.0, 'count' => 3],
-        ['src_ip' => '8.8.8.8', 'sum_network_bytes' => 99999.0, 'count' => 1],       // 不在內部網段：不列
-        ['src_ip' => null, 'sum_network_bytes' => 88888.0, 'count' => 1],            // 沒有來源位址：不列
+        ['src_ip' => '10.0.0.5', 'sum_net_bytes' => 5000.0, 'count' => 40],
+        ['src_ip' => '10.0.0.9', 'sum_net_bytes' => 9000.0, 'count' => 3],
+        ['src_ip' => '8.8.8.8', 'sum_net_bytes' => 99999.0, 'count' => 1],       // 不在內部網段：不列
+        ['src_ip' => null, 'sum_net_bytes' => 88888.0, 'count' => 1],            // 沒有來源位址：不列
     ]);
     $src->route(static fn ($q, $f, $t, $g) => $g === ['src_ip', 'dstport'], static function ($q, $f) use ($prevStart, $when) {
         $deny = strpos($q, 'event_action:fw_deny') !== false;
@@ -370,7 +370,7 @@ test('內網可視性：查詢條件——一律用絕對時間、排除範例�
     foreach (['cat:"traffic:forward"', $internal('src_ip'), 'NOT dst_ip:"255.255.255.255"', 'NOT dst_ip:224.*', 'NOT dst_ip:239.*'] as $part) {
         assertTrue(strpos($talk['q'], $part) !== false, '熱門來源的查詢要有 ' . $part);
     }
-    assertSame(['sum:network_bytes', 'count'], $talk['metrics']);
+    assertSame(['sum:net_bytes', 'count'], $talk['metrics']);
     [$iProbe, $probe] = $first($calls, static fn ($c) => $c['groupBy'] === ['src_ip', 'dstport'] && strpos($c['q'], 'fw_deny') === false);
     foreach (['cat:"traffic:forward"', $internal('src_ip') . ' AND ' . $internal('dst_ip'), 'NOT dstport:(67 OR 68 OR 137 OR 138 OR 1900 OR 5353 OR 5355)'] as $part) {
         assertTrue(strpos($probe['q'], $part) !== false, '橫向探測的查詢要有 ' . $part);
@@ -456,15 +456,33 @@ test('內網可視性：Graylog 連不上——每個區塊都標原因，只打
 test('內網可視性：日誌沒有位元組數欄位——流量區塊寫原因，不能是 0 位元組；異常連線不受影響', function () {
     $src = nvSource();
     $src->route(static fn ($q, $f, $t, $g) => $g === ['log_type'], []);
-    $src->route(static fn ($q, $f, $t, $g) => $g === ['src_ip'], [['src_ip' => '10.0.0.5', 'sum_network_bytes' => 0, 'count' => 3]]);
+    $src->route(static fn ($q, $f, $t, $g) => $g === ['src_ip'], [['src_ip' => '10.0.0.5', 'sum_net_bytes' => 0, 'count' => 3]]);
     $d = nvBuild($src);
     foreach (['trend', 'talkers'] as $k) {
         assertSame(false, $d[$k]['ok'], $k);
-        assertTrue(strpos($d[$k]['error'], 'network_bytes') !== false, $d[$k]['error']);
+        assertTrue(strpos($d[$k]['error'], 'net_bytes') !== false, $d[$k]['error']);
     }
     assertTrue($d['anomalies']['ok'], '異常連線靠筆數與目的主機數，不需要位元組數');
     assertSame([null, 'unknown'], [nvKpi($d, 'eastwest')['value'], nvKpi($d, 'eastwest')['state']]);
-    assertTrue(strpos(nvKpi($d, 'eastwest')['sub'], 'network_bytes') !== false);
+    assertTrue(strpos(nvKpi($d, 'eastwest')['sub'], 'net_bytes') !== false);
+});
+
+test('內網可視性：位元組欄位剛開始寫入（前面幾格是 0）——有資料的格照算，沒資料的格明講，24 小時合計與 KPI 註明只含有資料的格', function () {
+    $src = nvSource();
+    $prevStart = nvIso(NV_NOW - 86400);
+    $firstData = nvIso(NV_NOW - 86400 + 2 * NetworkVisibilityService::BUCKET);       // 前 2 格（8 小時）還沒有位元組欄位
+    $src->route(static fn ($q, $f, $t, $g) => $g === ['log_type'] && $f >= $prevStart && $f < $firstData, [['log_type' => 'firewall', 'sum_net_bytes' => 0]]);
+    $d = nvBuild($src);
+    $t = $d['trend']['data'];
+    assertSame([2, 40000, 10000, 25], [$t['empty_buckets'], $t['total'], $t['east_west'], $t['share']], '只算有資料的 4 格：4×10000，內部對內部 4×2500');
+    assertSame([0, 0, null, 10000], [$t['buckets'][0]['total'], $t['buckets'][1]['east_west'], $t['buckets'][1]['share'], $t['buckets'][2]['total']]);
+    assertTrue(strpos($t['buckets'][0]['text'], '沒有位元組數資料') !== false && strpos($t['buckets'][0]['text'], '還沒開始寫入') !== false, $t['buckets'][0]['text']);
+    $east = nvKpi($d, 'eastwest');
+    assertSame('25%', $east['value']);
+    assertTrue(strpos($east['sub'], '只有 4／6 格有位元組數資料') !== false, $east['sub']);
+    // 全部都有資料就不加這句
+    assertSame(0, nvBuild(nvSource())['trend']['data']['empty_buckets']);
+    assertTrue(strpos(nvKpi(nvBuild(nvSource()), 'eastwest')['sub'], '格有位元組數資料') === false);
 });
 
 test('內網可視性：前一個 24 小時讀不到只影響「較前期」，其他照常', function () {
@@ -586,7 +604,7 @@ test('內網可視性：熱門來源碰到查詢上限要標示', function () {
     $src->route(static fn ($q, $f, $t, $g) => $g === ['src_ip'], static function () {
         $rows = [];
         for ($i = 1; $i <= NetworkVisibilityService::TALKER_LIMIT; $i++) {
-            $rows[] = ['src_ip' => '10.2.' . intdiv($i, 250) . '.' . ($i % 250), 'sum_network_bytes' => (float) (1000 + $i), 'count' => 1];
+            $rows[] = ['src_ip' => '10.2.' . intdiv($i, 250) . '.' . ($i % 250), 'sum_net_bytes' => (float) (1000 + $i), 'count' => 1];
         }
         return $rows;
     });
