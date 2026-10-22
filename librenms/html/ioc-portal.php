@@ -216,7 +216,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
 <div class="toast" id="toast" role="status"></div>
 
 <script type="application/json" id="ioc-config"><?= $config ?></script>
-<script src="/js/ioc-config-backup.js?v=3"></script>
+<script src="/js/ioc-config-backup.js?v=4"></script>
 <script>
 (() => {
   'use strict';

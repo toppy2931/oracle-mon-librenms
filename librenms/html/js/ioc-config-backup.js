@@ -35,64 +35,101 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
     const b = response.backup;
     const settings = b.settings;
     const catalog = response.devices;
-    const list = h('div');
-    const rows = [];
     const message = h('div', { role: 'status', 'aria-live': 'polite' });
     const enabled = h('input', { type: 'checkbox', checked: settings.enabled });
     const interval = h('select', { 'aria-label': '備份頻率' }, [1, 6, 12, 24, 48, 168].map((n) => h('option', { value: String(n) }, n === 168 ? '每週一次' : '每 ' + n + ' 小時')));
     if (![1, 6, 12, 24, 48, 168].includes(settings.interval_hours)) interval.append(h('option', { value: String(settings.interval_hours) }, '每 ' + settings.interval_hours + ' 小時'));
     interval.value = String(settings.interval_hours);
-    const addRow = (device) => {
+    const entries = settings.devices.map((d) => Object.assign({ password: '' }, d));
+    const deviceTable = h('div');
+    const editor = h('div');
+    let selected = entries[0] || null;
+    let editorFields = null;
+    const deviceInfo = (entry) => catalog.find((d) => d.device_id === entry.device_id) || {
+      device_id: entry.device_id, name: entry.name || '已移除設備', host: entry.host || '位址未提供',
+    };
+    const captureEditor = () => {
+      if (!selected || !editorFields) return;
+      selected.device_id = Number(editorFields.select.value);
+      selected.model = editorFields.model.value;
+      selected.username = editorFields.username.value;
+      selected.password = editorFields.password.value;
+      selected.enabled = editorFields.active.checked;
+    };
+    const drawDevices = () => {
+      const rows = entries.map((entry) => {
+        const info = deviceInfo(entry);
+        return [info.name, info.host, models.find(([value]) => value === entry.model)?.[1] || entry.model,
+          entry.username || '尚未設定', entry.enabled ? '已納入' : '已停用',
+          h('div', { class: 'toolbar' },
+            h('button', { class: 'btn', type: 'button', onclick: () => { captureEditor(); selected = entry; drawEditor(); } }, '編輯'),
+            h('button', { class: 'btn', type: 'button', onclick: () => {
+              const index = entries.indexOf(entry); entries.splice(index, 1);
+              if (selected === entry) selected = entries[index] || entries[index - 1] || null;
+              drawDevices(); drawEditor();
+            } }, '移除'))];
+      });
+      deviceTable.replaceChildren(rows.length ? table(['設備', '連線位址', '品牌／系統', '備份帳號', '狀態', '操作'], rows) : note('尚未加入備份設備。'));
+    };
+    const drawEditor = () => {
+      if (!selected) { editorFields = null; editor.replaceChildren(note('請按「加入設備」或在表格選擇「編輯」。')); return; }
+      const current = selected;
       const choices = catalog.slice();
-      if (device && !choices.some((d) => d.device_id === device.device_id)) choices.push({ device_id: device.device_id, name: device.name + '（已不在可備份設備清單，請移除）', host: device.host });
+      if (current.device_id && !choices.some((d) => d.device_id === current.device_id)) choices.push(deviceInfo(current));
       const select = h('select', { 'aria-label': '選擇設備', required: true, style: 'width:100%' }, h('option', { value: '' }, '請選擇設備'),
         choices.map((d) => h('option', { value: String(d.device_id) }, d.name + '（' + d.host + '）')));
-      select.value = device ? String(device.device_id) : '';
+      select.value = current.device_id ? String(current.device_id) : '';
       const model = h('select', { 'aria-label': '設備品牌', style: 'width:100%' }, models.map(([v, title]) => h('option', { value: v }, title)));
-      model.value = device ? device.model : 'fortios';
+      model.value = current.model || 'fortios';
       const username = h('input', { type: 'text', maxlength: 128, autocomplete: 'off', required: true, style: 'width:100%' });
-      username.value = device ? device.username : '';
+      username.value = current.username || '';
       const password = h('input', { type: 'password', maxlength: 512, autocomplete: 'new-password', style: 'width:100%',
-        placeholder: device && device.password_set ? '已設定；留白可沿用' : '請輸入設備備份帳號的密碼' });
-      const active = h('input', { type: 'checkbox', checked: device ? device.enabled : true });
-      // 只有仍選擇原設備才允許沿用密碼，避免將 A 設備的憑證套到 B。
-      select.addEventListener('change', () => {
-        const same = device && select.value === String(device.device_id);
-        password.required = !same || !device.password_set;
-        password.placeholder = same && device.password_set ? '已設定；留白可沿用' : '請輸入此設備的密碼';
-      });
-      password.required = !device || !device.password_set;
-      const entry = { select, model, username, password, active };
-      const row = h('fieldset', { style: 'border:1px solid var(--line);border-radius:10px;margin:12px 0;padding:12px' },
-        h('legend', null, '備份設備'), label('設備', select), label('設備品牌／系統', model),
+        placeholder: current.password_set ? '已設定；留白可沿用' : '請輸入設備備份帳號的密碼' });
+      password.value = current.password || '';
+      const active = h('input', { type: 'checkbox', checked: current.enabled !== false });
+      const updatePasswordRule = () => {
+        const same = current.device_id && select.value === String(current.device_id);
+        password.required = !same || !current.password_set;
+        password.placeholder = same && current.password_set ? '已設定；留白可沿用' : '請輸入此設備的密碼';
+      };
+      select.addEventListener('change', updatePasswordRule); updatePasswordRule();
+      editorFields = { select, model, username, password, active };
+      editor.replaceChildren(h('fieldset', { style: 'border:1px solid var(--line);border-radius:10px;margin:12px 0;padding:12px' },
+        h('legend', null, '設備備份設定'), label('設備', select), label('設備品牌／系統', model),
         h('div', { class: 'grid even' }, label('備份帳號', username), label('備份密碼', password)),
-        label('納入備份', active), note('使用 SSH 加密連線，連接埠為 22。請使用可讀取完整設定的專用帳號。'),
-        h('button', { class: 'btn', type: 'button', onclick: () => { rows.splice(rows.indexOf(entry), 1); row.remove(); } }, '移除此設備'));
-      rows.push(entry); list.append(row);
+        label('納入備份', active), note('使用 SSH 加密連線，連接埠為 22。請使用可讀取完整設定的專用帳號。')));
     };
-    settings.devices.forEach(addRow);
+    drawDevices(); drawEditor();
     const save = h('button', { class: 'btn primary', type: 'submit' }, '儲存並套用備份設定');
-    const add = h('button', { class: 'btn', type: 'button', onclick: () => { if (rows.length < 50) addRow(null); } }, '＋ 加入設備');
+    const add = h('button', { class: 'btn', type: 'button', onclick: () => {
+      captureEditor();
+      if (entries.length >= 50) return;
+      selected = { device_id: null, model: 'fortios', username: '', password: '', password_set: false, enabled: true };
+      entries.push(selected); drawDevices(); drawEditor();
+    } }, '＋ 加入設備');
     const form = h('form', { onsubmit: async (event) => {
       event.preventDefault(); save.disabled = true; add.disabled = true;
       const fields = Array.from(form.querySelectorAll('input, select, button'));
       fields.forEach((el) => { el.disabled = true; });
       message.replaceChildren(note('正在儲存並確認工具設定…'));
       try {
-        const r = await request('save', { settings: { enabled: enabled.checked, interval_hours: Number(interval.value), devices: rows.map((row) => ({
-          device_id: Number(row.select.value), model: row.model.value, username: row.username.value,
-          password: row.password.value, port: 22, enabled: row.active.checked,
+        captureEditor();
+        const r = await request('save', { settings: { enabled: enabled.checked, interval_hours: Number(interval.value), devices: entries.map((entry) => ({
+          device_id: Number(entry.device_id), model: entry.model, username: entry.username,
+          password: entry.password, port: 22, enabled: entry.enabled,
         })) } });
-        rows.forEach((row) => { row.password.value = ''; });
+        entries.forEach((entry) => { entry.password = ''; });
+        if (editorFields) editorFields.password.value = '';
         renderSettings(box, r);
       } catch (e) {
         message.replaceChildren(unavailable(e.message));
         fields.forEach((el) => { el.disabled = false; }); save.disabled = false; add.disabled = false;
       }
     } }, engineNotice(b.engine),
-      note('依序選擇設備、填入專用備份帳號，再設定備份頻率。已儲存不代表備份已完成，結果請到本頁「設備與狀態」或「備份歷史與比較」查看。'),
+      note('設備集中顯示於表格；按「加入設備」或「編輯」後，只會開啟一筆設定。儲存後會立即套用至備份引擎。'),
       label('啟用自動備份', enabled), label('備份頻率（固定間隔執行）', interval),
-      note('停用自動備份不會刪除歷史備份。首次備份建立基準，之後自動比較設定變更。'), list,
+      note('停用自動備份不會刪除歷史備份。首次備份建立基準，之後自動比較設定變更。'),
+      section('已設定備份設備', '可新增、編輯或移除；密碼不會顯示於表格', [deviceTable]), editor,
       h('div', { class: 'toolbar' }, add, save), message);
     box.replaceChildren(section('設備組態備份', '在這裡完成設定，不必編輯設備備份工具的設定檔', form));
   }

@@ -46,7 +46,7 @@ class ConfigBackupIntegrationTests(unittest.TestCase):
                  'password': 'cli-test-only-secret', 'port': 22, 'enabled': True}]}
             code, saved = call({'action': 'save', 'actor': 'test-admin', 'settings': settings})
             self.assertEqual(code, 0)
-            self.assertEqual(saved['data']['engine']['state'], 'pending_apply')
+            self.assertEqual(saved['data']['engine']['state'], 'unavailable')
             code, status = call({'action': 'status', 'actor': ''})
             self.assertEqual(code, 0)
             self.assertTrue(status['data']['settings']['devices'][0]['password_set'])

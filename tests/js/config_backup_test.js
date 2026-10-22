@@ -51,6 +51,20 @@ test('儲存表單送設備 id 與密碼，成功後清除密碼並保留待套�
   assert.equal(walk(root).find((e) => e.type === 'password').value, '');
   assert.ok(text(root).includes('等待工具套用'));
 });
+test('備份設定以設備表格集中管理，可加入、編輯與移除單筆設備', async () => {
+  const root = h('div'); const ui = create(async () => payload());
+  await ui.settings(root);
+  assert.ok(walk(root).some((e) => e.tag === 'table' && text(e).includes('備份帳號')));
+  assert.equal(walk(root).filter((e) => e.tag === 'fieldset').length, 1);
+  button(root, '＋ 加入設備').onclick();
+  assert.equal(walk(root).filter((e) => e.tag === 'fieldset').length, 1);
+  const select = findLabel(root, '選擇設備'); select.value = '7'; select.listeners.change();
+  const password = walk(root).find((e) => e.type === 'password');
+  assert.equal(password.required, true);
+  const remove = walk(root).filter((e) => e.tag === 'button' && text(e) === '移除').at(-1);
+  remove.onclick();
+  assert.ok(text(root).includes('尚未加入備份設備') === false);
+});
 test('已排入的工作不顯示成備份成功；差異以文字節點呈現', async () => {
   const p = payload(); p.backup.runs = [{ device_name: 'fw', kind: 'test', status: 'queued', requested_at: '2026-10-22 01:00:00' }];
   p.backup.changes = [{ device_name: 'fw', detected_at: '2026-10-22 01:00:00', added: 1, removed: 1, diff: '+ <script>alert(1)</script>' }];

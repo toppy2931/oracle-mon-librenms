@@ -259,12 +259,12 @@ class BackupTests(unittest.TestCase):
         out = self.finish(content=['hostname router\n', 'interface eth0\n'])
         self.assertEqual('success', out['runs'][0]['status'])
 
-    def test_status_and_save_do_not_call_network(self):
+    def test_save_applies_engine_immediately_while_status_remains_read_only(self):
         self.worker.dispatch({'action': 'save', 'actor': 'admin', 'settings': self.settings})
         out = self.call('status')
-        self.assertEqual([], self.engine.calls)
-        self.assertEqual('pending_apply', out['engine']['state'])
-        self.assertFalse(out['engine']['applied'])
+        self.assertIn('/reload.json', self.engine.calls)
+        self.assertEqual('ready', out['engine']['state'])
+        self.assertTrue(out['engine']['applied'])
 
     def test_fetch_unavailable_after_valid_completion_still_times_out(self):
         self.save()

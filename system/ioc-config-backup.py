@@ -463,7 +463,9 @@ end
                 self.put_meta('redaction_secrets', sorted(secrets))
                 self.put_meta('settings', settings)
                 self.generate()
-                engine.update(state='pending_apply', applied=False, message='設定已儲存，等待背景程序套用；尚未啟用備份')
+                # 儲存後立刻要求受管引擎重載，讓新增設備可立即測試／備份；
+                # 引擎暫時不可用時仍保留設定，並以安全狀態回覆前端。
+                engine, _ = self.applied_engine()
                 self.put_meta('engine', engine)
                 self.audit(actor, 'save', '儲存備份政策；設備數：' + str(len(settings['devices'])))
             if action in {'test', 'run'}:
