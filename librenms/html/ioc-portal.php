@@ -577,7 +577,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
         ? '另有 ' + d.unlocated + ' 台設備沒有歸屬站點（IP 不在任何站點的網段內，也沒有有效的 LibreNMS 位置），不屬於任何站點。'
         : '另有 ' + d.unlocated + ' 台設備沒有有效的位置（未指定，或是 Unknown 這類 SNMP 預設值），不屬於任何站點。') : null,
       // 設定了卻沒有設備歸進去的站點不會出現在上面，要說明（多半是網段填錯）
-      d.empty_sites && d.empty_sites.length ? h('p', { class: 'note warn' }, '設定頁的這些站點沒有任何設備歸進去，所以沒有列在上面（請檢查網段有沒有填對）：' + d.empty_sites.join('、')) : null,
+      d.empty_sites && d.empty_sites.length ? h('p', { class: 'note warn' }, '設定頁的這些站點已經算在站點數裡，但目前沒有任何設備歸進去，所以不在上面的健康分佈裡（請檢查網段有沒有填對）：' + d.empty_sites.join('、')) : null,
       h('p', { class: 'note' }, '站點異常等級看離線設備的比例：<25% 輕微、<50% 中度、≥50% 嚴重。散佈圖沒有底圖（離線環境不載入外部地圖）。'),
     ];
   }
@@ -586,7 +586,9 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     if (!sec.ok) return unavailable(sec.error);
     return sec.data.map((s) => h('div', { class: 'rank' },
       h('span', { class: 'no' }, String(s.rank)), h('span', { class: 'nm' }, s.name),
-      badge(SITE_LABEL[s.level], SITE_BADGE[s.level]), h('span', { class: 'd', style: 'color:var(--muted);font-size:12px;min-width:5em;text-align:right' }, s.issues)));
+      // 設定了卻沒有設備歸進去的站點（empty）沒有健康等級，標灰色的「尚無設備」，不能顯示成「正常」
+      s.empty ? badge('尚無設備', 'gray') : badge(SITE_LABEL[s.level], SITE_BADGE[s.level]),
+      h('span', { class: 'd', style: 'color:var(--muted);font-size:12px;min-width:5em;text-align:right' }, s.issues)));
   }
 
   function renderLatest(sec) {
@@ -1092,7 +1094,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     const r = n.meta.rules;
     const nets = n.meta.nets;
     const rule = '橫向探測：同一個內部來源、同一個目的埠，' + n.meta.range_label + '內連到 ≥ ' + r.probe_min + ' 個不同的內部主機（≥ ' + r.probe_medium
-      + ' 個為中風險、≥ ' + r.probe_high + ' 個為高風險）；被擋下：內部對內部的連線被防火牆擋下（累積 ≥ ' + r.blocked_medium + ' 次為中風險，否則低風險）。'
+      + ' 個為中風險、≥ ' + r.probe_high + ' 個為高風險）；被擋下：內部對內部、經過防火牆轉送的連線被擋下（連到防火牆本身或送到網段廣播位址的封包不算；累積 ≥ ' + r.blocked_medium + ' 次為中風險，否則低風險）。'
       + '廣播與探索類的埠（' + r.noise_ports.join('、') + '）不算。這組規則是提案版，之後可依實際情況調整。';
     $('#view-network').replaceChildren(
       h('div', { class: 'toolbar', style: 'margin:0' },

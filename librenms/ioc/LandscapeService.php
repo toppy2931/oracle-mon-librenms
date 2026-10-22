@@ -58,16 +58,23 @@ final class LandscapeService
             ['key' => $key, 'label' => $label, 'value' => null, 'state' => 'unknown', 'sub' => $why, 'na' => $na];
         $noFleet = 'LibreNMS 的設備資料無法讀取';
 
-        // 1) 站點數
+        // 1) 站點數＝有設備的站點＋設定了卻還沒有設備歸進去的站點：要和設定頁自訂的站點對得起來。後者沒有健康等級可言，
+        //    所以不在分佈與高風險站點的計算裡，在這張卡片與排行（標「尚無設備」）另外交代
+        $empty = $fleet === null ? [] : $fleet->emptyConfiguredSites();
         if ($fleet === null) {
             $sites = $unknown('sites', '站點數', $noFleet);
-        } elseif ($fleet->sites() === []) {
+        } elseif ($fleet->total() === 0 || ($fleet->sites() === [] && $empty === [])) {
             $sites = $unknown('sites', '站點數', self::noSitesReason($fleet) . self::warnSuffix($sitesWarning), '尚未設定');
+        } elseif ($fleet->sites() === []) {
+            // 設定了站點，但沒有任何設備歸進去（多半是網段填錯）：有站點、沒有健康資料，不能是綠色
+            $sites = ['key' => 'sites', 'label' => '站點數', 'value' => count($empty), 'state' => 'warn',
+                'sub' => self::noSitesReason($fleet) . self::warnSuffix($sitesWarning)];
         } else {
             $un = $fleet->unlocated();
             $cfg = $fleet->hasConfiguredSites();
-            $sites = ['key' => 'sites', 'label' => '站點數', 'value' => count($fleet->sites()), 'state' => $sitesWarning === null ? 'good' : 'warn',
-                'sub' => ($un > 0
+            $note = $empty === [] ? '' : sprintf('其中 %d 個還沒有設備歸進去（%s）；', count($empty), implode('、', $empty));
+            $sites = ['key' => 'sites', 'label' => '站點數', 'value' => count($fleet->sites()) + count($empty), 'state' => $sitesWarning === null ? 'good' : 'warn',
+                'sub' => $note . ($un > 0
                     ? ($cfg ? sprintf('另有 %d 台設備沒有歸屬站點（IP 不在任何站點的網段內，也沒有有效的 LibreNMS 位置）', $un)
                             : sprintf('另有 %d 台設備沒有有效位置（未指定，或是 Unknown 這類預設值）', $un))
                     : ($cfg ? '各設備都已歸屬站點' : '各設備都已指定位置')) . self::warnSuffix($sitesWarning)];
@@ -226,7 +233,7 @@ final class LandscapeService
         if ($fleet === null) {
             return $this->fail('LibreNMS 的設備資料無法讀取');
         }
-        if ($fleet->sites() === []) {
+        if ($fleet->total() === 0 || ($fleet->sites() === [] && $fleet->emptyConfiguredSites() === [])) {
             return $this->fail('沒有站點資料：' . self::noSitesReason($fleet) . self::warnSuffix($sitesWarning));
         }
         return ['ok' => true, 'data' => $fleet->ranking(self::RANKING_LIMIT)];
