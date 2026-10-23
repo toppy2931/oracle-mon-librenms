@@ -340,6 +340,20 @@ final class ConfigBackupService
             'failed' => '備份失敗，請確認設備連線與權限',
             'timeout' => '備份逾時',
         ];
+        // Worker 只會產生固定、已遮罩的錯誤摘要；只允許這些白名單字串
+        // 通過，避免把未來的工具原始錯誤或憑證內容直接帶到前端。
+        $safeFailureMessages = [
+            '無法安全連線 FortiGate REST API，請確認 TLS 憑證與網路',
+            'FortiGate REST API 拒絕備份要求，請確認 Token 權限與 TLS 信任',
+            'FortiGate REST API 備份要求失敗，請確認 Token 權限與 TLS 信任',
+            '無法安全連線 PAN-OS XML API，請確認 TLS 憑證與網路',
+            'PAN-OS XML API 拒絕匯出要求，請確認 API Key 權限與 TLS 信任',
+            'Oxidized SSH 採集失敗（no_connection）；請檢查互動式提示字元及服務日誌',
+            'Oxidized SSH 採集失敗；請檢查受管服務日誌',
+            '設備備份失敗，請檢查連線、帳號權限及設備類型',
+            '備份內容含有設備分頁提示，判定為不完整設定',
+            '備份內容為空、超過上限或格式不正確',
+        ];
         foreach (array_slice($data['runs'], 0, 50) as $row) {
             if (!is_array($row)) {
                 continue;
@@ -352,6 +366,11 @@ final class ConfigBackupService
             if (!in_array($kind, ['test', 'manual', 'scheduled'], true)) {
                 $kind = 'manual';
             }
+            $message = $statuses[$status];
+            $workerMessage = $row['message'] ?? null;
+            if ($status === 'failed' && is_string($workerMessage) && in_array($workerMessage, $safeFailureMessages, true)) {
+                $message = $workerMessage;
+            }
             $runs[] = [
                 'id' => $this->text($row['id'] ?? ''),
                 'device_id' => (int) ($row['device_id'] ?? 0),
@@ -360,7 +379,7 @@ final class ConfigBackupService
                 'status' => $status,
                 'requested_at' => $this->text($row['requested_at'] ?? ''),
                 'completed_at' => isset($row['completed_at']) ? $this->text($row['completed_at']) : null,
-                'message' => $statuses[$status],
+                'message' => $message,
                 'version_id' => $this->text($row['version_id'] ?? ''),
             ];
         }

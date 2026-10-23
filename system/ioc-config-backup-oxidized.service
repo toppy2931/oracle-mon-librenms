@@ -3,6 +3,7 @@ Description=IOC managed Oxidized configuration backup engine
 After=network-online.target
 Wants=network-online.target
 ConditionPathExists=/var/lib/oracle-mon/config-backup/oxidized/config
+ConditionFileNotEmpty=/var/lib/oracle-mon/config-backup/oxidized/router.db
 
 [Service]
 Type=simple

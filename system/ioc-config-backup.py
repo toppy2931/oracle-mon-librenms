@@ -609,11 +609,17 @@ end
         }, sort_keys=True).encode()).hexdigest()
         out = {'backend': 'oxidized', 'endpoint': ENGINE_URL, 'state': 'unavailable',
                'applied': False, 'checked_at': utcnow(), 'message': '備份工具尚未啟動，設定已儲存但尚未生效'}
+        expected = {d['host'] for d in settings['devices'] if d['enabled'] and uses_oxidized(d)}
+        if not expected:
+            # 原生 API 設備不依賴 Oxidized。空 router.db 會讓 Oxidized
+            # 回報「source returns no usable nodes」並進入 systemd 重啟迴圈。
+            out.update(backend='native_api', state='ready', applied=True,
+                       message='目前沒有 SSH 備份設備；原生 API 備份可獨立執行')
+            return out, []
         try:
             nodes = self.engine.request('/nodes.json')
             if not isinstance(nodes, list) or any(not isinstance(n, dict) or not isinstance(n.get('name'), str) or (n.get('last') is not None and not isinstance(n.get('last'), dict)) for n in nodes):
                 raise BackupError('invalid_response', '備份工具節點回應格式不相容')
-            expected = {d['host'] for d in settings['devices'] if d['enabled'] and uses_oxidized(d)}
             actual = {n.get('name') for n in nodes if isinstance(n, dict)}
             if self.get_meta('applied_revision') != revision or actual != expected:
                 if not retry:
@@ -860,7 +866,11 @@ end
                 status, message = 'timeout', '等待備份結果超過 15 分鐘，未取得完整成功證據'
             elif valid:
                 if last.get('status') != 'success':
-                    status, message = 'failed', '設備備份失敗，請檢查連線、帳號權限及設備類型'
+                    if last.get('status') == 'no_connection':
+                        message = 'Oxidized SSH 採集失敗（no_connection）；請檢查互動式提示字元及服務日誌'
+                    else:
+                        message = 'Oxidized SSH 採集失敗；請檢查受管服務日誌'
+                    status = 'failed'
                 else:
                     if fetched >= 5:
                         continue
