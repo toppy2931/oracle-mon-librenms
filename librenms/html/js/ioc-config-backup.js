@@ -104,7 +104,7 @@ window.IocConfigBackup = function ({ h, section, table, api, downloadVersion, un
     const interval = h('select', { 'aria-label': '備份頻率' }, [1, 6, 12, 24, 48, 168].map((n) => h('option', { value: String(n) }, n === 168 ? '每週一次' : '每 ' + n + ' 小時')));
     if (![1, 6, 12, 24, 48, 168].includes(settings.interval_hours)) interval.append(h('option', { value: String(settings.interval_hours) }, '每 ' + settings.interval_hours + ' 小時'));
     interval.value = String(settings.interval_hours);
-    const entries = settings.devices.map((d) => Object.assign({ password: '' }, d));
+    const entries = settings.devices.map((d) => Object.assign({ password: '', api_token: '', backup_backend: 'oxidized' }, d));
     // SSH 主機金鑰必須逐台確認，絕不可因為新增設備而自動信任。
     // 後端契約：host_key_scan 回傳 backup.host_key（device_id、host、algorithm、fingerprint、token、expires_at、trusted），
     // host_key_confirm 只接受已掃描的一次性 token 與原始 fingerprint；前端的勾選代表管理者已完成設備端核對。
@@ -137,6 +137,8 @@ window.IocConfigBackup = function ({ h, section, table, api, downloadVersion, un
       selected.model = editorFields.model.value;
       selected.username = editorFields.username.value;
       selected.password = editorFields.password.value;
+      selected.api_token = editorFields.apiToken.value;
+      selected.backup_backend = editorFields.backend.value;
       selected.enabled = editorFields.active.checked;
     };
     const drawDevices = () => {
@@ -145,7 +147,7 @@ window.IocConfigBackup = function ({ h, section, table, api, downloadVersion, un
         const hostKey = hostKeyStates.get(Number(entry.device_id));
         const trust = hostKey && (hostKey.trusted || hostKey.status === 'trusted') ? '已驗證' : '待確認';
         return [info.name, info.host, models.find(([value]) => value === entry.model)?.[1] || entry.model,
-          entry.username || '尚未設定', trust, entry.enabled ? '已納入' : '已停用',
+          entry.username || '尚未設定', entry.backup_backend === 'fortigate_api' ? 'FortiGate REST API' : 'Oxidized SSH', trust, entry.enabled ? '已納入' : '已停用',
           h('div', { class: 'toolbar' },
             h('button', { class: 'btn', type: 'button', onclick: () => { captureEditor(); selected = entry; drawEditor(); } }, '編輯'),
             h('button', { class: 'btn', type: 'button', onclick: () => {
@@ -155,7 +157,7 @@ window.IocConfigBackup = function ({ h, section, table, api, downloadVersion, un
             } }, '移除'))];
       });
       paged(deviceTable, rows, devicePage,
-        (pageRows) => table(['設備', '連線位址', '品牌／系統', '備份帳號', 'SSH 身分', '狀態', '操作'], pageRows),
+        (pageRows) => table(['設備', '連線位址', '品牌／系統', '備份帳號', '備份方式', 'SSH 身分', '狀態', '操作'], pageRows),
         '尚未加入備份設備。');
     };
     const drawEditor = () => {
@@ -185,13 +187,26 @@ window.IocConfigBackup = function ({ h, section, table, api, downloadVersion, un
       model.value = current.model || 'fortios';
       const username = h('input', { type: 'text', maxlength: 128, autocomplete: 'off', required: true, style: 'width:100%' });
       username.value = current.username || '';
+      const backend = h('select', { 'aria-label': '備份方式', style: 'width:100%' },
+        h('option', { value: 'oxidized' }, 'Oxidized SSH（預設）'),
+        h('option', { value: 'fortigate_api', disabled: model.value !== 'fortios' }, 'FortiGate REST API（備援）'));
+      backend.value = current.backup_backend || 'oxidized';
       const password = h('input', { type: 'password', maxlength: 512, autocomplete: 'new-password', style: 'width:100%',
         placeholder: current.password_set ? '已設定；留白可沿用' : '請輸入設備備份帳號的密碼' });
       password.value = current.password || '';
+      const apiToken = h('input', { type: 'password', maxlength: 1024, autocomplete: 'new-password', style: 'width:100%',
+        placeholder: current.api_token_set ? '已設定；留白可沿用' : '僅 REST API 備援需要填寫' });
+      apiToken.value = current.api_token || '';
       const active = h('input', { type: 'checkbox', checked: current.enabled !== false });
       const updatePasswordRule = () => {
         const same = current.device_id && select.value === String(current.device_id);
-        password.required = !same || !current.password_set;
+        const api = backend.value === 'fortigate_api';
+        password.required = !api && (!same || !current.password_set);
+        apiToken.required = api && !current.api_token_set;
+        password.disabled = api;
+        username.disabled = api;
+        username.required = !api;
+        apiToken.disabled = !api;
         password.placeholder = same && current.password_set ? '已設定；留白可沿用' : '請輸入此設備的密碼';
       };
       let candidate = null;
@@ -242,6 +257,13 @@ window.IocConfigBackup = function ({ h, section, table, api, downloadVersion, un
         hostKeyArea.replaceChildren(h('fieldset', { style: 'border:1px solid var(--line);border-radius:10px;margin:12px 0;padding:12px' },
           h('legend', null, 'SSH 主機身分驗證'), hostKeyStatus(), !(candidate && (candidate.trusted || candidate.status === 'trusted')) && scan, hostKeyMessage));
       };
+      backend.addEventListener('change', () => { updatePasswordRule(); drawHostKey(); });
+      model.addEventListener('change', () => {
+        const apiOption = walk(backend).find((e) => e.tag === 'option' && e.value === 'fortigate_api');
+        if (apiOption) apiOption.disabled = model.value !== 'fortios';
+        if (model.value !== 'fortios' && backend.value === 'fortigate_api') backend.value = 'oxidized';
+        updatePasswordRule(); drawHostKey();
+      });
       select.addEventListener('change', () => {
         if (!selectingNewDevice) return;
         // 立即同步選擇結果，讓表格在儲存前就能顯示正確名稱與位址。
@@ -255,15 +277,16 @@ window.IocConfigBackup = function ({ h, section, table, api, downloadVersion, un
         current.device_id = nextDeviceId;
         updatePasswordRule(); candidate = null; drawDevices(); drawHostKey();
       }); updatePasswordRule();
-      editorFields = { select, model, username, password, active };
+      editorFields = { select, model, username, password, apiToken, backend, active };
       editor.replaceChildren(h('fieldset', { style: 'border:1px solid var(--line);border-radius:10px;margin:12px 0;padding:12px' },
         h('legend', null, '設備備份設定'), label(selectingNewDevice ? '設備' : '已固定設備', deviceField),
         selectingNewDevice
           ? note('新增模式：只能選擇尚未納入備份的設備。')
           : note('此設備已儲存，設備名稱與連線位址已固定；如需更換設備，請先移除此筆後再新增。'),
-        label('設備品牌／系統', model),
+        label('設備品牌／系統', model), label('備份方式', backend),
         h('div', { class: 'grid even' }, label('備份帳號', username), label('備份密碼', password)),
-        label('納入備份', active), note('使用 SSH 加密連線，連接埠為 22。請使用可讀取完整設定的專用帳號。'), hostKeyArea));
+        label('FortiGate REST API Token', apiToken),
+        label('納入備份', active), note('預設使用 Oxidized SSH。REST API 備援僅支援 FortiGate，固定使用 HTTPS、系統信任的 TLS 憑證與專用 Token；不會自動切換。'), hostKeyArea));
       drawHostKey();
     };
     drawDevices(); drawEditor();
@@ -271,7 +294,7 @@ window.IocConfigBackup = function ({ h, section, table, api, downloadVersion, un
     const add = h('button', { class: 'btn', type: 'button', onclick: () => {
       captureEditor();
       if (entries.length >= 50) return;
-      selected = { device_id: null, model: 'fortios', username: '', password: '', password_set: false, enabled: true, draft: true };
+      selected = { device_id: null, model: 'fortios', username: '', password: '', api_token: '', password_set: false, api_token_set: false, backup_backend: 'oxidized', enabled: true, draft: true };
       entries.push(selected); drawDevices(); drawEditor();
     } }, '＋ 加入設備');
     const validationMessage = () => {
@@ -297,7 +320,7 @@ window.IocConfigBackup = function ({ h, section, table, api, downloadVersion, un
       try {
         const r = await request('save', { settings: { enabled: enabled.checked, interval_hours: Number(interval.value), devices: entries.map((entry) => ({
           device_id: Number(entry.device_id), model: entry.model, username: entry.username,
-          password: entry.password, port: 22, enabled: entry.enabled,
+          password: entry.password, api_token: entry.api_token, backup_backend: entry.backup_backend || 'oxidized', port: 22, enabled: entry.enabled,
         })) } });
         entries.forEach((entry) => { entry.password = ''; delete entry.draft; });
         if (editorFields) editorFields.password.value = '';
@@ -326,6 +349,15 @@ window.IocConfigBackup = function ({ h, section, table, api, downloadVersion, un
         if (tokens.get(root) === renderToken) renderGovernance(root, r);
       } catch (e) { message.replaceChildren(unavailable(e.message)); button.disabled = false; }
     };
+    const diagnosis = b.diagnosis;
+    if (diagnosis) {
+      const labels = { complete: 'SSH、PTY、互動 shell 與提示字元均可建立', prompt_not_detected: 'shell 已建立，但在安全等待時間內未辨識提示字元', host_key_untrusted: '尚未核對 SSH 主機金鑰', authentication_failed: '設備拒絕帳號或密碼', timeout: '連線或 shell 等待逾時', connection_failed: '無法建立 SSH 連線', pty_rejected: '設備拒絕 PTY', pty_timeout: 'PTY 建立逾時', shell_rejected: '設備拒絕互動 shell', shell_timeout: '互動 shell 建立逾時', shell_failed: '互動 shell 建立失敗', probe_failed: '診斷工具未取得安全可用的結果' };
+      message.replaceChildren(h('div', { style: 'border:1px solid ' + (diagnosis.outcome === 'success' ? '#22c55e' : '#f59e0b') + ';border-radius:8px;padding:10px;margin:8px 0' },
+        h('strong', null, diagnosis.outcome === 'success' ? 'SSH 診斷完成' : 'SSH 診斷結果'),
+        h('p', null, labels[diagnosis.stage] || labels.probe_failed),
+        h('p', { class: 'note' }, 'SSH：' + (diagnosis.transport ? '已建立' : '未建立') + '｜PTY：' + (diagnosis.pty ? '已建立' : '未建立') + '｜shell：' + (diagnosis.shell ? '已建立' : '未建立') + (diagnosis.prompt_detected ? '｜提示結尾：' + diagnosis.prompt_terminator + (diagnosis.ha_role_format ? '｜偵測到 HA 角色格式' : '') : '')),
+        note('此診斷只建立 SSH transport、PTY 與互動 shell；未送出任何設備 CLI 指令，也未讀取組態。')));
+    }
     const ready = b.engine && b.engine.state === 'ready';
     const search = h('input', { type: 'search', 'aria-label': '搜尋已設定設備', placeholder: '搜尋設備名稱或位址' });
     const deviceTable = h('div');
@@ -336,11 +368,15 @@ window.IocConfigBackup = function ({ h, section, table, api, downloadVersion, un
     const runsPage = { page: 0 }, changesPage = { page: 0 }, auditPage = { page: 0 };
     const drawDevices = () => {
     const devices = b.settings.devices.filter((d) => (d.name + ' ' + d.host).toLowerCase().includes(search.value.toLowerCase())).map((d) => {
-      const test = h('button', { class: 'btn', type: 'button', disabled: !ready || !d.enabled }, '測試並建立備份');
-      const run = h('button', { class: 'btn', type: 'button', disabled: !ready || !d.enabled }, '立即備份');
+      const usesSsh = d.backup_backend !== 'fortigate_api';
+      const unavailableForDevice = !d.enabled || (usesSsh && !ready);
+      const test = h('button', { class: 'btn', type: 'button', disabled: unavailableForDevice }, '測試並建立備份');
+      const run = h('button', { class: 'btn', type: 'button', disabled: unavailableForDevice }, '立即備份');
+      const diagnose = usesSsh ? h('button', { class: 'btn', type: 'button', disabled: !d.enabled }, '診斷 SSH 連線') : null;
       test.addEventListener('click', () => action('test', d.device_id, test));
       run.addEventListener('click', () => action('run', d.device_id, run));
-      return [d.name, d.host, d.enabled ? '已納入' : '已停用', h('div', { class: 'toolbar' }, test, run)];
+      if (diagnose) diagnose.addEventListener('click', () => action('diagnose', d.device_id, diagnose));
+      return [d.name, d.host, d.enabled ? '已納入' : '已停用', h('div', { class: 'toolbar' }, diagnose, test, run)];
     });
     paged(deviceTable, devices, devicePage,
       (pageRows) => table(['設備', '連線位址', '狀態', '操作'], pageRows),
@@ -354,7 +390,7 @@ window.IocConfigBackup = function ({ h, section, table, api, downloadVersion, un
       note('這是兩次成功備份之間偵測到的差異，無法單靠備份判定實際修改者。敏感設定已遮罩；差異過長時會截斷。'),
       diffLegend(), diffContent(c.diff, '這次只有敏感欄位或未顯示內容發生變更。', '480px')));
     const audits = (b.audit || []).map((a) => [time(a.occurred_at), a.actor,
-      ({ save: '儲存備份設定', test: '要求測試備份', run: '要求立即備份', scheduled: '排程備份' })[a.action] || '備份操作', a.detail]);
+      ({ save: '儲存備份設定', test: '要求測試備份', run: '要求立即備份', scheduled: '排程備份', diagnose: '診斷 SSH 連線' })[a.action] || '備份操作', a.detail]);
     paged(runsTable, runs, runsPage,
       (pageRows) => table(['設備', '方式', '要求時間', '結果', '完成時間', '說明'], pageRows),
       '目前沒有備份執行紀錄。');

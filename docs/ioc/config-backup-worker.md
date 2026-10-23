@@ -24,10 +24,10 @@
 
 ## 狀態與排程
 
-1. `save` 驗證政策，交易寫入資料庫並產生受管設定；回傳 `pending_apply`。**儲存不是生效。** 寫檔中斷時資料庫交易回復，下一次 tick 由資料庫重建檔案再套用。
-2. `tick` 檢查本機 REST，重新載入設備來源並確認設備清單，再標示 `ready/applied`。未安裝、未啟動或回應不相容都顯示 `unavailable`，不宣稱已備份。
-3. `test`、`run` 只建立 `queued` 工作，必須先有背景程序確認的已套用設定；不接受尚未儲存的帳密。
-4. `tick` 將等待中的工作送入 Oxidized。送出前持久化 `dispatched_at` 與前次完成時間；即使 API 回應遺失，也不自動重送，避免同設備重複觸發。
+1. `save` 驗證政策，交易寫入資料庫並產生受管設定；回傳 `pending_apply`。**儲存不是生效。** 寫檔中斷時資料庫交易回復，下一次 tick 由資料庫重建檔案再套用。每台預設採 `oxidized`；僅 FortiGate 可由管理者明確改為 `fortigate_api` 備援，系統不會因 SSH 失敗自動切換協定。
+2. `tick` 檢查本機 Oxidized REST，重新載入 SSH 後端的設備來源並確認設備清單，再標示 `ready/applied`。未安裝、未啟動或回應不相容都顯示 `unavailable`，不宣稱 SSH 備份已備妥。
+3. `test`、`run` 只建立 `queued` 工作，不接受尚未儲存的帳密。Oxidized SSH 工作必須先有背景程序確認的已套用設定；明確選用 REST API 的 FortiGate 工作不依賴 Oxidized。
+4. `tick` 將等待中的工作送入對應後端：Oxidized 工作送至本機引擎，FortiGate REST API 工作由 `oracle-backup` 直接安全擷取。送出前持久化 `dispatched_at` 與前次完成時間；即使回應遺失，也不自動重送，避免同設備重複觸發。
 5. 後續 tick 必須取得新的 `last.start/end/status`，且開始時間不早於 `dispatched_at`，才接受此次採集。`/node/next` 的 `ok` 只代表排隊。
 6. `success` 結果還需取得非空、小於 2 MiB 且不含 FortiGate `--More--` 分頁提示的內容才能建立版本；失敗、空內容或分頁殘留都不覆蓋成功版本。相同內容為 `unchanged`，仍保留工作紀錄。
 7. 工作等待超過 15 分鐘為 `timeout`；Oxidized 本身 `timelimit=300`、`retries=0`。未取得成功證據不視為成功。
@@ -36,13 +36,13 @@ Oxidized `interval=0` 停用其初始與週期採集，只有 IOC 排程可觸�
 
 `update.sh` 會先透過受限入口重建這份設定，再只重啟原本已在運行的 `ioc-config-backup-oxidized.service`。這是讓 Oxidized 載入 SSH 輸入模式等啟動期設定所必需的步驟；尚未啟用的服務不會被更新程序自動啟用。IOC 專用 FortiGate 模型也包含上游對 HA 提示字元（例如 `hostname(Primary) #`）的修正，避免互動 shell 在 `show` 後等候提示字元直到逾時。
 
-`status/settings` 純讀已保存狀態，不執行 HTTP。工具狀態是最近一次 tick 的快照，含 `checked_at`；超過三分鐘未更新會顯示 unavailable 並拒絕新的手動工作；維護人員應確認 timer 運作。執行中的工作會禁止更改政策。停用全域排程會停止新增週期工作，已排隊工作繼續完成；手動備份仍可使用。
+`status/settings` 純讀已保存狀態，不執行 HTTP。`diagnose` 是管理者專用的獨立 SSH 探測：只建立 transport、PTY 與互動 shell，絕不傳送 CLI 指令、換行、exit 或讀取組態。它只回傳成功階段與遮罩後的提示字元特徵（HA 角色格式、結尾符號），不回傳或稽核 banner、提示字元原文、帳密或組態。工具狀態是最近一次 tick 的快照，含 `checked_at`；超過三分鐘未更新會顯示 unavailable 並拒絕新的手動工作；維護人員應確認 timer 運作。執行中的工作會禁止更改政策。停用全域排程會停止新增週期工作，已排隊工作繼續完成；手動備份仍可使用。
 
 ## 版本與機密
 
 `remove_secret=false` 保存原始採集輸出，讓密碼等敏感設定的變更也會產生雜湊及版本紀錄。原始檔是否足以還原仍取決於設備與模型採集範圍；不得在未實機驗證前承諾完整還原。
 
-一般 Web API 不接收原始內容，只收到差異預覽。已知設備密碼、密碼／金鑰／community／token 等敏感行及 PEM 私鑰區塊會遮罩；僅敏感內容變更也會提示。這是盡力遮罩，無法保證涵蓋所有廠牌的未知秘密格式，所以第一版組態內容僅限 admin，仍應以敏感資料處理。設備密碼不回傳，只回 `password_set`；操作紀錄只寫設備 ID、設備數與固定說明，不寫憑證或 API 原始錯誤。
+一般 Web API 不接收原始內容，只收到差異預覽。已知設備密碼、密碼／金鑰／community／token 等敏感行及 PEM 私鑰區塊會遮罩；僅敏感內容變更也會提示。這是盡力遮罩，無法保證涵蓋所有廠牌的未知秘密格式，所以第一版組態內容僅限 admin，仍應以敏感資料處理。設備密碼與 REST API Token 都不回傳，只回 `password_set`／`api_token_set`；操作紀錄只寫設備 ID、設備數與固定說明，不寫憑證、提示字元、banner 或 API 原始錯誤。
 
 管理者可在「備份版本」按下載，取得指定代數的原始組態附件，供還原或離線稽核使用。下載採獨立 POST、CSRF、handler 權限與同設備版本驗證，檔案不經一般 JSON API 或列表回傳；每次下載都寫入操作稽核。附件可能含設備密碼、金鑰或其他機密設定，應儲存於受管位置並避免以未加密管道傳遞。
 
@@ -56,15 +56,19 @@ Oxidized `interval=0` 停用其初始與週期採集，只有 IOC 排程可觸�
 
 ## 閘道契約
 
-輸入 `{action,actor,settings,device_id}`。動作為 `settings/status/save/test/run/tick/history/compare/download/host_key_scan/host_key_confirm`，Web 不可直接暴露 tick。輸入 JSON 上限 256 KiB。排程另可執行 `--tick`，不接受其他命令列參數。
+輸入 `{action,actor,settings,device_id}`。動作為 `settings/status/save/test/run/diagnose/tick/history/compare/download/host_key_scan/host_key_confirm`，Web 不可直接暴露 tick。輸入 JSON 上限 256 KiB。排程另可執行 `--tick`，不接受其他命令列參數。
 
-`settings`：`{enabled,interval_hours,devices:[{device_id,name,host,model,username,password,port,enabled}]}`。
+`settings`：`{enabled,interval_hours,devices:[{device_id,name,host,model,username,password,backup_backend,api_token,port,enabled}]}`。
 
-`password` 空白或省略保留相同 device_id 已存密碼，首次必填。username 上限 128 字元、password 512 字元、actor 255 字元。來源為 Oxidized CSV，輸入不得含控制字元、`|`、Ruby 插值起始 `#{`。主機支援 IP 或安全 DNS 名稱；拒絕直接輸入 loopback、link-local、multicast、unspecified。DNS 解析及 SSH 連線仍屬可信管理端的設備納管權限，不是任意多租戶 SSRF 隔離措施。
+`password` 空白或省略保留相同 device_id 已存密碼；`api_token` 空白或省略保留同設備 Token。`backup_backend` 預設 `oxidized`；`fortigate_api` 僅接受 `fortios`，且首次需填 Token。REST 備援固定連至 `https://<受管設備>:443/api/v2/monitor/system/config/backup?scope=global`，先 POST、僅遇 404/405 改試一次 GET；禁用 Proxy、Redirect 與略過 TLS 驗證。自簽憑證須由維護人員將 CA 匯入 VM 信任鏈，不能以關閉驗證處理。FortiGate 應建立最小權限的專用 API 管理者並以 `trusthost` 限制 monitor VM 來源 IP。
+
+`password` 首次 Oxidized 設定必填。username 上限 128 字元、password 512 字元、actor 255 字元。來源為 Oxidized CSV，輸入不得含控制字元、`|`、Ruby 插值起始 `#{`。主機支援 IP 或安全 DNS 名稱；拒絕直接輸入 loopback、link-local、multicast、unspecified。DNS 解析及 SSH 連線仍屬可信管理端的設備納管權限，不是任意多租戶 SSRF 隔離措施。
 
 `host_key_scan`：僅限已儲存的設備，固定使用本機 `ssh-keyscan` 取得 ED25519 候選公開金鑰，回傳 host、演算法、SHA256 指紋與短效 token；取得候選值不代表信任。
 
 `host_key_confirm`：需傳回相同的 device_id、token 與 fingerprint；背景程序只在 token 尚未逾期、設備位址未變且指紋完全相同時，寫入專用信任清單。
+
+`diagnose`：僅限已設定 Oxidized SSH 後端且已核對 SSH 主機金鑰的設備。輸入 device_id，輸出 transport、PTY、shell、提示字元是否辨識、結尾符號與 HA 格式旗標；失敗階段可能是 host_key_untrusted、authentication_failed、pty、shell、prompt 或 timeout。這不是備份，也不影響設備設定。
 
 成功 `{ok:true,data:{settings,engine,runs,changes,audit}}`，exit 0。失敗 `{ok:false,error:{code,message}}`，exit 1，不回 traceback 或工具原始錯誤。
 
@@ -87,7 +91,7 @@ Oxidized `interval=0` 停用其初始與週期採集，只有 IOC 排程可觸�
 
 ## 驗證與官方依據
 
-本機測試：`python -m unittest discover -s tests -p test_config_backup.py`。測試使用假的 Oxidized REST 行為，不連線真實設備；另於 WSL 執行同組測試驗證 POSIX 權限與符號連結。真實工具版本、設備與 systemd 啟用仍待 VM 驗收。
+本機測試：`python -m unittest discover -s tests -p 'test_config_backup*.py'`、`node --test tests/js/config_backup_test.js`，以及 WSL 的 `php tests/php/run.php tests/php/config_backup_test.php`。測試使用假的 Oxidized REST 行為，不連線真實設備；另於 WSL 執行同組測試驗證 POSIX 權限與符號連結。真實工具版本、設備與 systemd 啟用仍待 VM 驗收。
 
 官方參考（2026-10-22 查閱）：
 

@@ -163,6 +163,47 @@ test('掃描結果沒有一次性候選憑證時，不提供信任按鈕', async
   assert.equal(button(root, '確認後信任此主機金鑰'), undefined);
   assert.ok(text(root).includes('沒有提供可供核對'));
 });
+test('管理者可執行安全 SSH 診斷並只顯示摘要', async () => {
+  const calls = []; const root = h('div');
+  await create(async (url, body) => {
+    calls.push(body); const p = payload();
+    if (body.action === 'diagnose') p.backup.diagnosis = { device_id: 7, outcome: 'failed', stage: 'shell_timeout', transport: true, pty: true, shell: false, prompt_detected: false, raw_prompt: 'secret-banner#' };
+    return p;
+  }).governance(root);
+  const diagnose = button(root, '診斷 SSH 連線');
+  await diagnose.listeners.click();
+  assert.deepEqual(JSON.parse(JSON.stringify(calls.at(-1))), { action: 'diagnose', device_id: 7 });
+  assert.ok(text(root).includes('互動 shell 建立逾時'));
+  assert.ok(text(root).includes('未送出任何設備 CLI 指令'));
+  assert.ok(!text(root).includes('secret-banner#'));
+});
+
+test('FortiGate REST API 備援 Token 只送儲存要求且不回填畫面', async () => {
+  const calls = []; const root = h('div'); const p = payload();
+  await create(async (url, body) => { calls.push(body); return p; }).settings(root);
+  const backend = findLabel(root, '備份方式'); backend.value = 'fortigate_api'; backend.listeners.change();
+  const fields = walk(root).filter((e) => e.type === 'password');
+  const apiToken = fields.at(-1); apiToken.value = 'api-token-only-for-request';
+  await walk(root).find((e) => e.tag === 'form').onsubmit({ preventDefault() {} });
+  const saved = calls.find((call) => call.action === 'save');
+  assert.equal(saved.settings.devices[0].backup_backend, 'fortigate_api');
+  assert.equal(saved.settings.devices[0].api_token, 'api-token-only-for-request');
+  assert.ok(!text(root).includes('api-token-only-for-request'));
+});
+
+test('FortiGate REST fallback can run while Oxidized is unavailable', async () => {
+  const p = payload();
+  p.backup.settings.devices[0].backup_backend = 'fortigate_api';
+  p.backup.settings.devices[0].api_token_set = true;
+  p.backup.engine = { state: 'unavailable', message: 'Oxidized unavailable' };
+  const root = h('div'); await create(async () => p).governance(root);
+  const run = walk(root).find((e) => e.tag === 'button' && text(e) === '\u7acb\u5373\u5099\u4efd');
+  const testRun = walk(root).find((e) => e.tag === 'button' && text(e) === '\u6e2c\u8a66\u4e26\u5efa\u7acb\u5099\u4efd');
+  assert.equal(run.disabled, false);
+  assert.equal(testRun.disabled, false);
+  assert.equal(walk(root).some((e) => e.tag === 'button' && text(e) === '\u8a3a\u65b7 SSH \u9023\u7dda'), false);
+});
+
 test('已排入的工作不顯示成備份成功；差異以文字節點呈現', async () => {
   const p = payload(); p.backup.runs = [{ device_name: 'fw', kind: 'test', status: 'queued', requested_at: '2026-10-22 01:00:00' }];
   p.backup.changes = [{ device_name: 'fw', detected_at: '2026-10-22 01:00:00', added: 1, removed: 1, diff: '+ <script>alert(1)</script>' }];

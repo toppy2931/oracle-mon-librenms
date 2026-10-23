@@ -21,6 +21,7 @@ class ConfigBackupIntegrationTests(unittest.TestCase):
         self.assertIn('262144',src)
         self.assertIn('host_key_scan', src)
         self.assertIn('host_key_confirm', src)
+        self.assertIn('diagnose', src)
 
     def test_module_is_local_and_secrets_never_use_html(self):
         src=(ROOT/'librenms/html/js/ioc-config-backup.js').read_text(encoding='utf-8')
@@ -28,6 +29,8 @@ class ConfigBackupIntegrationTests(unittest.TestCase):
         self.assertNotIn('outerHTML',src)
         self.assertIn("type: 'password'",src)
         self.assertIn('password_set',src)
+        self.assertIn('api_token_set',src)
+        self.assertIn('診斷 SSH 連線',src)
         self.assertIn('尚未安裝',src)
         portal=(ROOT/'librenms/html/ioc-portal.php').read_text(encoding='utf-8')
         self.assertIn('/js/ioc-config-backup.js',portal)

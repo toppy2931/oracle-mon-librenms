@@ -51,17 +51,23 @@ final class ConfigBackupService
             $id = $row['device_id'];
             $trusted = $this->devices[$id];
             $seen[$id] = true;
+            $backend = $row['backup_backend'] ?? 'oxidized';
             if (!in_array($row['model'] ?? null, ['ios', 'fortios', 'junos', 'routeros'], true)
+                || !in_array($backend, ['oxidized', 'fortigate_api'], true)
+                || ($backend === 'fortigate_api' && ($row['model'] ?? null) !== 'fortios')
                 || ($row['port'] ?? null) !== 22 || !is_bool($row['enabled'] ?? null)) {
-                throw new ValidationError(['請選擇支援的設備類型、SSH 連接埠 22 與設備啟用狀態']);
+                throw new ValidationError(['請選擇支援的設備類型、備份方式、SSH 連接埠 22 與設備啟用狀態']);
             }
             $username = $row['username'] ?? null;
             $password = $row['password'] ?? '';
-            if (!is_string($username) || trim($username) === '' || mb_strlen($username, 'UTF-8') > 128
-                || preg_match('/[\x00-\x20\x7f]/', $username)
+            $apiToken = $row['api_token'] ?? '';
+            if (!is_string($username) || ($backend === 'oxidized' && trim($username) === '') || mb_strlen($username, 'UTF-8') > 128
+                || ($username !== '' && preg_match('/[\x00-\x20\x7f]/', $username))
                 || !is_string($password) || mb_strlen($password, 'UTF-8') > 512
-                || preg_match('/[\x00-\x1f\x7f]/', $password)) {
-                throw new ValidationError(['請輸入有效的備份帳號與密碼；密碼留空表示沿用']);
+                || preg_match('/[\x00-\x1f\x7f]/', $password)
+                || !is_string($apiToken) || mb_strlen($apiToken, 'UTF-8') > 1024
+                || preg_match('/[\x00-\x1f\x7f]/', $apiToken)) {
+                throw new ValidationError(['請輸入有效的備份帳號、密碼與 REST API Token；留空表示沿用']);
             }
             $host = (string) $trusted['host'];
             $name = mb_substr((string) $trusted['name'], 0, 128, 'UTF-8');
@@ -69,7 +75,7 @@ final class ConfigBackupService
                 throw new ValidationError(['設備位址不符合備份工具格式，請先確認 LibreNMS 設備資料']);
             }
             // Oxidized CSV 來源會解讀分隔符及 Ruby 插值，不允許這些字元進入任何欄位。
-            foreach ([$username, $password, $name] as $value) {
+            foreach ([$username, $password, $apiToken, $name] as $value) {
                 if (strpos($value, '|') !== false || strpos($value, '#{') !== false
                     || preg_match('/[\x00-\x1f\x7f]/', $value)) {
                     throw new ValidationError(['設備名稱、帳號或密碼包含備份工具不支援的字元']);
@@ -82,6 +88,8 @@ final class ConfigBackupService
                 'model' => $row['model'],
                 'username' => $username,
                 'password' => $password,
+                'api_token' => $apiToken,
+                'backup_backend' => $backend,
                 'port' => 22,
                 'enabled' => $row['enabled'],
             ];
@@ -107,6 +115,13 @@ final class ConfigBackupService
     {
         $this->authorize($level);
         return $this->deviceAction('run', $deviceId, $actor);
+    }
+
+    /** 不傳送設備指令，只檢查 SSH transport、PTY 與 shell 的建立狀態。 */
+    public function diagnose(int $deviceId, string $actor, ?string $level): array
+    {
+        $this->authorize($level);
+        return $this->deviceAction('diagnose', $deviceId, $actor);
     }
 
     /** 取得候選值不代表信任；仍須由管理者比對設備端指紋後明確確認。 */
@@ -214,7 +229,9 @@ final class ConfigBackupService
             }
             $messages = [
                 'validation' => '備份設定不完整，請重新確認',
-                'password_required' => '首次設定設備時請輸入備份密碼',
+                'password_required' => '首次設定 Oxidized SSH 備份時請輸入備份密碼',
+                'api_token_required' => '首次設定 FortiGate REST API 時請輸入 API Token',
+                'api_request_failed' => 'FortiGate REST API 備份要求失敗，請確認 Token 權限與 TLS 憑證信任',
                 'busy' => '備份工作正在執行，請稍後再試',
                 'unavailable' => '備份工具尚未就緒，請聯絡管理者',
                 'unsafe_state' => '備份設定儲存位置不安全，請聯絡管理者',
@@ -225,6 +242,7 @@ final class ConfigBackupService
                 'host_key_expired' => 'SSH 身分指紋確認已逾時或設備資料已變更，請重新取得',
                 'host_key_mismatch' => 'SSH 身分指紋確認不符，未變更信任設定',
                 'host_key_conflict' => '此設備已有不同的 SSH 身分指紋，為安全起見未覆寫',
+                'host_key_untrusted' => '尚未核對並信任 SSH 主機身分，請先完成主機金鑰確認',
                 'state_error' => '無法讀取備份紀錄，請聯絡管理者',
             ];
             throw new IocError($messages[$code] ?? '設備備份服務無法完成要求，請確認設定與服務狀態');
@@ -256,6 +274,8 @@ final class ConfigBackupService
                 'port' => (int) ($row['port'] ?? 22),
                 'enabled' => ($row['enabled'] ?? false) === true,
                 'password_set' => ($row['password_set'] ?? false) === true,
+                'api_token_set' => ($row['api_token_set'] ?? false) === true,
+                'backup_backend' => in_array($row['backup_backend'] ?? 'oxidized', ['oxidized', 'fortigate_api'], true) ? ($row['backup_backend'] ?? 'oxidized') : 'oxidized',
                 'host_key_trusted' => ($row['host_key_trusted'] ?? false) === true,
             ];
         }
@@ -325,6 +345,7 @@ final class ConfigBackupService
             'scheduled' => '排程備份',
             'host_key_scan' => '取得 SSH 身分指紋',
             'host_key_confirm' => '確認 SSH 身分指紋',
+            'diagnose' => '診斷 SSH 連線',
         ];
         foreach (array_slice(is_array($data['audit'] ?? null) ? $data['audit'] : [], 0, 50) as $row) {
             if (!is_array($row) || !is_string($row['action'] ?? null) || !isset($actions[$row['action']])) {
@@ -378,6 +399,25 @@ final class ConfigBackupService
                 $result['host_key']['token'] = $hostKey['token'];
                 $result['host_key']['expires_at'] = $this->text($hostKey['expires_at'] ?? '');
             }
+        }
+        if (isset($data['diagnosis']) && is_array($data['diagnosis'])) {
+            $diagnosis = $data['diagnosis'];
+            $stages = ['complete', 'prompt_not_detected', 'host_key_untrusted', 'authentication_failed', 'timeout',
+                'connection_failed', 'pty_rejected', 'pty_timeout', 'shell_rejected', 'shell_timeout', 'shell_failed', 'probe_failed'];
+            $stage = $diagnosis['stage'] ?? 'probe_failed';
+            if (!is_string($stage) || !in_array($stage, $stages, true)) {
+                $stage = 'probe_failed';
+            }
+            $terminator = $diagnosis['prompt_terminator'] ?? 'unknown';
+            if (!is_string($terminator) || !in_array($terminator, ['#', '$', '>', 'unknown'], true)) {
+                $terminator = 'unknown';
+            }
+            $result['diagnosis'] = ['device_id' => (int) ($diagnosis['device_id'] ?? 0),
+                'outcome' => ($diagnosis['outcome'] ?? '') === 'success' ? 'success' : 'failed', 'stage' => $stage,
+                'transport' => ($diagnosis['transport'] ?? false) === true, 'pty' => ($diagnosis['pty'] ?? false) === true,
+                'shell' => ($diagnosis['shell'] ?? false) === true,
+                'prompt_detected' => ($diagnosis['prompt_detected'] ?? false) === true,
+                'prompt_terminator' => $terminator, 'ha_role_format' => ($diagnosis['ha_role_format'] ?? false) === true];
         }
         $result['history_devices'] = [];
         foreach (is_array($data['history_devices'] ?? null) ? $data['history_devices'] : [] as $row) {

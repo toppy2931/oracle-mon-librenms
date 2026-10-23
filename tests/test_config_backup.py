@@ -38,11 +38,35 @@ class FakeEngine:
         return 'ok'
 
 
+class FakeProbe:
+    def __init__(self, response=None):
+        self.response = response or {'transport': True, 'pty': True, 'shell': True, 'stage': 'complete',
+                                     'prompt': {'detected': True, 'terminator': '#', 'ha_role_format': True, 'shape': 'x(role) #'}}
+        self.calls = []
+
+    def probe(self, device, known_hosts):
+        self.calls.append((device.copy(), str(known_hosts)))
+        return self.response.copy()
+
+
+class FakeApiBackup:
+    def __init__(self, content='config system global\nend\n'):
+        self.content, self.calls = content, []
+
+    def fetch(self, device):
+        self.calls.append(device.copy())
+        if isinstance(self.content, Exception):
+            raise self.content
+        return self.content
+
+
 class BackupTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.engine = FakeEngine()
-        self.worker = backup.Worker(Path(self.temp.name) / 'state', self.engine)
+        self.probe = FakeProbe()
+        self.api = FakeApiBackup()
+        self.worker = backup.Worker(Path(self.temp.name) / 'state', self.engine, self.probe, self.api)
         self.settings = {'enabled': False, 'interval_hours': 24, 'devices': [
             {'device_id': 7, 'name': '核心交換器', 'host': '192.168.10.1', 'model': 'ios',
              'username': 'backup', 'password': 'private-secret', 'port': 22, 'enabled': True}]}
@@ -69,6 +93,104 @@ class BackupTests(unittest.TestCase):
         if content is not None:
             self.engine.content = content
         return self.call('tick')
+
+    def trust_host(self):
+        ssh = self.worker.root / '.ssh'
+        ssh.mkdir(mode=0o700, exist_ok=True)
+        known = ssh / 'known_hosts'
+        known.write_text('192.168.10.1 ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGeneratedForDiagnosisOnly=\n', encoding='ascii')
+        known.chmod(0o600)
+
+    def test_diagnose_returns_only_masked_summary_and_audits_stage(self):
+        self.save(); self.trust_host()
+        result = self.call('diagnose', device_id=7)['diagnosis']
+        self.assertEqual('success', result['outcome'])
+        self.assertEqual('complete', result['stage'])
+        self.assertTrue(result['transport']); self.assertTrue(result['pty']); self.assertTrue(result['shell'])
+        self.assertEqual('#', result['prompt_terminator']); self.assertTrue(result['ha_role_format'])
+        self.assertNotIn('shape', result)
+        self.assertEqual('diagnose', self.call('status')['audit'][0]['action'])
+        serialized = json.dumps(self.call('status'), ensure_ascii=False)
+        self.assertNotIn('private-secret', serialized)
+        self.assertNotIn('x(role)', serialized)
+        self.assertEqual(1, len(self.probe.calls))
+
+    def test_diagnose_does_not_connect_without_confirmed_host_key(self):
+        self.save()
+        result = self.call('diagnose', device_id=7)['diagnosis']
+        self.assertEqual(('failed', 'host_key_untrusted'), (result['outcome'], result['stage']))
+        self.assertEqual([], self.probe.calls)
+
+    def test_diagnose_classifies_expected_pty_shell_and_timeout_failures(self):
+        self.save(); self.trust_host()
+        for stage in ['authentication_failed', 'pty_rejected', 'shell_timeout', 'timeout']:
+            with self.subTest(stage=stage):
+                self.probe.response = {'transport': stage != 'authentication_failed', 'pty': stage not in {'authentication_failed', 'pty_rejected'},
+                                       'shell': False, 'stage': stage}
+                result = self.call('diagnose', device_id=7)['diagnosis']
+                self.assertEqual(('failed', stage), (result['outcome'], result['stage']))
+                self.assertFalse(result['prompt_detected'])
+
+    def test_fortigate_api_is_explicit_and_can_run_when_oxidized_unavailable(self):
+        self.settings['devices'][0].update({'model': 'fortios', 'backup_backend': 'fortigate_api', 'api_token': 'api-test-token', 'password': '', 'username': ''})
+        self.engine.online = False
+        self.call('save', settings=self.settings)
+        self.call('run', device_id=7)
+        out = self.call('status')
+        self.assertEqual('success', out['runs'][0]['status'])
+        self.assertEqual(1, len(self.api.calls))
+        self.assertNotIn('api-test-token', json.dumps(out))
+        self.assertTrue(out['settings']['devices'][0]['api_token_set'])
+        self.assertEqual('fortigate_api', out['settings']['devices'][0]['backup_backend'])
+
+    def test_fortigate_api_uses_post_then_only_compatibility_get(self):
+        class Headers:
+            def __init__(self, content_type): self.content_type = content_type
+            def get_content_type(self): return self.content_type
+        class Response:
+            def __init__(self, content, content_type='text/plain'):
+                self.content, self.headers = content, Headers(content_type)
+            def read(self, _limit): return self.content
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+        calls = []
+        outcomes = [backup.HTTPError('https://192.0.2.1/', 405, 'method', None, None),
+                    Response(b'config system global\nend\n')]
+        class Opener:
+            def open(self, request, timeout):
+                calls.append((request.get_method(), request.full_url, request.get_header('Authorization'), timeout))
+                outcome = outcomes.pop(0)
+                if isinstance(outcome, Exception): raise outcome
+                return outcome
+        device = {'host': '192.0.2.1', 'api_token': 'api-token-secret'}
+        with patch.object(backup, 'build_opener', return_value=Opener()):
+            self.assertEqual('config system global\nend\n', backup.FortiGateApiBackup().fetch(device))
+        self.assertEqual(['POST', 'GET'], [call[0] for call in calls])
+        self.assertTrue(all('api-token-secret' not in call[1] for call in calls))
+        self.assertTrue(all(call[3] == 15 for call in calls))
+
+    def test_fortigate_api_rejects_non_configuration_or_auth_error_without_token_leak(self):
+        class Headers:
+            def get_content_type(self): return 'text/html'
+        class Response:
+            headers = Headers()
+            def read(self, _limit): return b'<html>not a config</html>'
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+        class Opener:
+            def open(self, _request, timeout): return Response()
+        with patch.object(backup, 'build_opener', return_value=Opener()):
+            with self.assertRaises(backup.BackupError) as error:
+                backup.FortiGateApiBackup().fetch({'host': '192.0.2.1', 'api_token': 'api-token-secret'})
+        self.assertEqual('invalid_backup', error.exception.code)
+        self.assertNotIn('api-token-secret', error.exception.message)
+
+    def test_fortigate_api_rejects_non_fortigate_and_missing_token(self):
+        self.settings['devices'][0].update({'backup_backend': 'fortigate_api', 'api_token': 'token'})
+        with self.assertRaises(backup.BackupError): self.save()
+        self.settings['devices'][0].update({'model': 'fortios', 'api_token': ''})
+        with self.assertRaises(backup.BackupError) as error: self.save()
+        self.assertEqual('api_token_required', error.exception.code)
 
     def test_history_paginates_all_runs_and_versions_after_device_removal(self):
         self.save()

@@ -11,13 +11,14 @@ from pathlib import Path
 import re
 import secrets
 import sqlite3
+import ssl
 import stat
 import subprocess
 import sys
 import time
 from datetime import datetime, timezone
-from urllib.error import URLError
-from urllib.request import build_opener, ProxyHandler, HTTPRedirectHandler
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, HTTPSHandler, build_opener, ProxyHandler, HTTPRedirectHandler
 from urllib.parse import quote
 
 STATE_DIR = '/var/lib/oracle-mon/config-backup'
@@ -27,10 +28,11 @@ MODELS = {'ios', 'fortios', 'junos', 'routeros'}
 # 不能使用一次性 SSH exec channel，否則只會取得第一頁。
 ENGINE_MODELS = {'fortios': 'iocfortios'}
 # 變更受管 Oxidized 輸出或模型時遞增，以迫使既有設定重新載入。
-ENGINE_CONFIG_REVISION = 5
+ENGINE_CONFIG_REVISION = 6
 LIMIT = 2 * 1024 * 1024
 HISTORY_PAGE_SIZE = 10
 DOWNLOAD_LIMIT = 2 * 1024 * 1024
+API_BACKENDS = {'oxidized', 'fortigate_api'}
 
 
 class BackupError(Exception):
@@ -54,6 +56,158 @@ def timestamp(value):
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         raise BackupError('unavailable', '備份工具回傳非預期重新導向')
+
+
+class PromptProbe:
+    """只取得 SSH transport／PTY／shell 建立證據；絕不傳送設備 CLI 指令。"""
+    TIMEOUT = 8
+    _SCRIPT = r"""
+require 'json'
+require 'net/ssh'
+request = JSON.parse(STDIN.read)
+result = {'transport' => false, 'pty' => false, 'shell' => false, 'prompt_detected' => false}
+buffer = +''
+begin
+  Net::SSH.start(request.fetch('host'), request.fetch('username'),
+    password: request.fetch('password'), non_interactive: true,
+    verify_host_key: :always, user_known_hosts_file: [request.fetch('known_hosts')],
+    global_known_hosts_file: [], timeout: 5, auth_methods: ['password']) do |ssh|
+    result['transport'] = true
+    channel = ssh.open_channel
+    pty_done = shell_done = false
+    channel.request_pty(term: 'vt100') do |_ch, ok|
+      result['pty'] = !!ok; pty_done = true
+      unless ok
+        result['stage'] = 'pty_rejected'
+        next
+      end
+      channel.send_channel_request('shell') do |_shell, shell_ok|
+        result['shell'] = !!shell_ok; shell_done = true
+        result['stage'] = 'shell_rejected' unless shell_ok
+      end
+    end
+    channel.on_data do |_ch, data|
+      buffer << data.to_s.byteslice(0, [1024 - buffer.bytesize, 0].max).to_s
+    end
+    deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5
+    while Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline && !(pty_done && shell_done && !buffer.empty?)
+      ssh.loop(0.1)
+    end
+    if !pty_done
+      result['stage'] = 'pty_timeout'
+    elsif !result['pty']
+      result['stage'] ||= 'pty_rejected'
+    elsif !shell_done
+      result['stage'] = 'shell_timeout'
+    elsif !result['shell']
+      result['stage'] ||= 'shell_rejected'
+    else
+      clean = buffer.gsub(/\e\[[0-?]*[ -\/]*[@-~]/, '').gsub(/[\x00-\x08\x0b-\x1f\x7f]/, '')
+      candidate = clean.lines.map(&:strip).reject(&:empty?).last.to_s.byteslice(-128, 128).to_s
+      terminator = candidate[/[#$>]\s*\z/]&.strip
+      result['prompt_detected'] = !terminator.nil?
+      result['prompt_signature'] = {
+        'ha_role_format' => candidate.match?(/\([^)]{1,32}\)/),
+        'terminator' => terminator || 'unknown',
+        'shape' => candidate.gsub(/[[:alnum:]_.-]/, 'x').gsub(/\([^)]{1,32}\)/, '(role)').byteslice(0, 96)
+      }
+      result['stage'] = result['prompt_detected'] ? 'complete' : 'prompt_not_detected'
+    end
+  end
+rescue Net::SSH::HostKeyUnknown, Net::SSH::HostKeyMismatch
+  result['stage'] = 'host_key_untrusted'
+rescue Net::SSH::AuthenticationFailed
+  result['stage'] = 'authentication_failed'
+rescue Net::SSH::ConnectionTimeout, Timeout::Error
+  result['stage'] = 'timeout'
+rescue Errno::ECONNREFUSED, Errno::EHOSTUNREACH, SocketError
+  result['stage'] = 'connection_failed'
+rescue StandardError
+  result['stage'] = result['transport'] ? 'shell_failed' : 'connection_failed'
+end
+puts JSON.generate(result)
+"""
+
+    def probe(self, device, known_hosts):
+        try:
+            completed = subprocess.run(
+                ['/usr/bin/ruby3.2', '-rjson', '-rnet/ssh', '-e', self._SCRIPT],
+                input=json.dumps({'host': device['host'], 'username': device['username'],
+                                  'password': device['password'], 'known_hosts': str(known_hosts)}),
+                text=True, encoding='utf-8', stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                timeout=self.TIMEOUT + 2, check=False,
+                env={'PATH': '/usr/bin:/bin', 'HOME': str(known_hosts.parent)},
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            return {'transport': False, 'pty': False, 'shell': False, 'stage': 'timeout'}
+        try:
+            raw = completed.stdout
+            if not isinstance(raw, str) or len(raw.encode('utf-8')) > 4096:
+                raise ValueError()
+            data = json.loads(raw)
+        except (ValueError, TypeError, UnicodeError):
+            return {'transport': False, 'pty': False, 'shell': False, 'stage': 'probe_failed'}
+        return self._safe(data)
+
+    @staticmethod
+    def _safe(data):
+        if not isinstance(data, dict):
+            return {'transport': False, 'pty': False, 'shell': False, 'stage': 'probe_failed'}
+        stage = data.get('stage')
+        allowed = {'complete', 'prompt_not_detected', 'host_key_untrusted', 'authentication_failed',
+                   'timeout', 'connection_failed', 'pty_rejected', 'pty_timeout', 'shell_rejected',
+                   'shell_timeout', 'shell_failed', 'probe_failed'}
+        result = {'transport': data.get('transport') is True, 'pty': data.get('pty') is True,
+                  'shell': data.get('shell') is True,
+                  'stage': stage if stage in allowed else 'probe_failed'}
+        signature = data.get('prompt_signature')
+        if isinstance(signature, dict) and result['shell']:
+            term = signature.get('terminator')
+            shape = signature.get('shape')
+            if term in {'#', '$', '>', 'unknown'} and isinstance(shape, str) and len(shape) <= 96:
+                result['prompt'] = {'detected': data.get('prompt_detected') is True,
+                                    'ha_role_format': signature.get('ha_role_format') is True,
+                                    'terminator': term, 'shape': re.sub(r'[^x() role#>$~.\\- ]', '?', shape)}
+        return result
+
+
+class FortiGateApiBackup:
+    """明確選用的 FortiGate REST API 後端；TLS 憑證驗證永遠開啟。"""
+    def fetch(self, device):
+        host = device['host']
+        address = '[' + host + ']' if ':' in host else host
+        url = 'https://' + address + ':443/api/v2/monitor/system/config/backup?scope=global'
+        token = device.get('api_token')
+        if not isinstance(token, str) or not token:
+            raise BackupError('api_token_required', '尚未設定 FortiGate REST API Token')
+        opener = build_opener(ProxyHandler({}), NoRedirect(), HTTPSHandler(context=ssl.create_default_context()))
+        def send(method):
+            request = Request(url, method=method, headers={'Authorization': 'Bearer ' + token, 'Accept': 'text/plain, application/octet-stream'})
+            with opener.open(request, timeout=15) as response:
+                raw = response.read(LIMIT + 1)
+                content_type = response.headers.get_content_type()
+            if len(raw) > LIMIT:
+                raise BackupError('invalid_backup', 'REST API 回傳內容超過 2 MiB 上限')
+            if content_type in {'text/html', 'application/json'}:
+                raise BackupError('invalid_backup', 'REST API 未回傳設定檔內容')
+            try:
+                content = raw.decode('utf-8')
+            except UnicodeDecodeError:
+                raise BackupError('invalid_backup', 'REST API 回傳內容不是文字設定檔') from None
+            if not content.strip() or '\x00' in content or '--More--' in content:
+                raise BackupError('invalid_backup', 'REST API 回傳內容不完整或格式不正確')
+            return content
+        try:
+            return send('POST')
+        except HTTPError as error:
+            if error.code not in {404, 405}:
+                raise BackupError('api_request_failed', 'FortiGate REST API 拒絕備份要求，請確認 Token 權限與 TLS 信任') from None
+        except (OSError, URLError, ssl.SSLError):
+            raise BackupError('api_request_failed', '無法安全連線 FortiGate REST API，請確認 TLS 憑證與網路') from None
+        try:
+            return send('GET')
+        except (OSError, URLError, HTTPError, ssl.SSLError):
+            raise BackupError('api_request_failed', 'FortiGate REST API 備份要求失敗，請確認 Token 權限與 TLS 信任') from None
 
 
 class Engine:
@@ -100,11 +254,13 @@ def secure_path(path, directory=False):
 
 
 class Worker:
-    def __init__(self, root=None, engine=None):
+    def __init__(self, root=None, engine=None, probe=None, api_backup=None):
         self.root = Path(root or os.environ.get('IOC_BACKUP_STATE_DIR', STATE_DIR)).absolute()
         secure_path(self.root, True)
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.engine = engine or Engine()
+        self.probe_client = probe or PromptProbe()
+        self.api_backup = api_backup or FortiGateApiBackup()
         db_path = self.root / 'state.sqlite3'
         secure_path(db_path)
         self.db = sqlite3.connect(db_path, timeout=3, isolation_level=None)
@@ -165,8 +321,9 @@ class Worker:
     def public_settings(self):
         settings = self.settings()
         trusted = self.trusted_hosts()
-        settings['devices'] = [{**{k: v for k, v in d.items() if k != 'password'},
+        settings['devices'] = [{**{k: v for k, v in d.items() if k not in {'password', 'api_token'}},
                                 'password_set': bool(d.get('password')),
+                                'api_token_set': bool(d.get('api_token')),
                                 'host_key_trusted': d['host'] in trusted} for d in settings['devices']]
         return settings
 
@@ -204,6 +361,9 @@ class Worker:
             model = item.get('model')
             if not isinstance(model, str) or model not in MODELS:
                 raise BackupError('validation', '尚未支援此設備類型')
+            backend = item.get('backup_backend', previous.get(ident, {}).get('backup_backend', 'oxidized'))
+            if backend not in API_BACKENDS or (backend == 'fortigate_api' and model != 'fortios'):
+                raise BackupError('validation', 'FortiGate REST API 僅支援 FortiGate 設備')
             if type(item.get('port', 22)) is not int or item.get('port', 22) != 22:
                 raise BackupError('validation', '第一版僅支援 SSH 連接埠 22')
             if type(item.get('enabled')) is not bool:
@@ -211,12 +371,20 @@ class Worker:
             password = item.get('password', '')
             if password == '':
                 password = previous.get(ident, {}).get('password', '')
-            if not password:
-                raise BackupError('password_required', '首次設定設備時請填寫備份帳號密碼')
-            password = safe_text(password, '設備密碼', 512)
+            token = item.get('api_token', '')
+            if token == '':
+                token = previous.get(ident, {}).get('api_token', '')
+            if backend == 'oxidized' and not password:
+                raise BackupError('password_required', '首次設定 Oxidized SSH 備份時請填寫備份帳號密碼')
+            if backend == 'fortigate_api' and not token:
+                raise BackupError('api_token_required', '首次設定 FortiGate REST API 時請填寫 API Token')
+            password = safe_text(password, '設備密碼', 512, allow_empty=backend == 'fortigate_api')
+            token = safe_text(token, 'REST API Token', 1024, allow_empty=backend == 'oxidized')
             result.append({'device_id': ident, 'name': safe_text(item.get('name'), '設備名稱', 128),
-                           'host': host, 'model': model, 'username': safe_text(item.get('username'), '設備帳號', 128),
-                           'password': password, 'port': 22, 'enabled': item['enabled']})
+                           'host': host, 'model': model,
+                           'username': safe_text(item.get('username'), '設備帳號', 128, allow_empty=backend == 'fortigate_api'),
+                           'password': password, 'api_token': token, 'backup_backend': backend,
+                           'port': 22, 'enabled': item['enabled']})
         return {'enabled': submitted['enabled'], 'interval_hours': interval, 'devices': result}
 
     def write_private(self, path, content):
@@ -272,7 +440,7 @@ end
 """)
         lines = ['|'.join([d['host'], d['host'], ENGINE_MODELS.get(d['model'], d['model']), d['username'], d['password'],
                            'true' if d['model'] == 'fortios' else 'false'])
-                 for d in self.settings()['devices'] if d['enabled']]
+                 for d in self.settings()['devices'] if d['enabled'] and d.get('backup_backend', 'oxidized') == 'oxidized']
         self.write_private(home / 'router.db', '\n'.join(lines) + ('\n' if lines else ''))
 
     def applied_engine(self, retry=True):
@@ -287,7 +455,7 @@ end
             nodes = self.engine.request('/nodes.json')
             if not isinstance(nodes, list) or any(not isinstance(n, dict) or not isinstance(n.get('name'), str) or (n.get('last') is not None and not isinstance(n.get('last'), dict)) for n in nodes):
                 raise BackupError('invalid_response', '備份工具節點回應格式不相容')
-            expected = {d['host'] for d in settings['devices'] if d['enabled']}
+            expected = {d['host'] for d in settings['devices'] if d['enabled'] and d.get('backup_backend', 'oxidized') == 'oxidized'}
             actual = {n.get('name') for n in nodes if isinstance(n, dict)}
             if self.get_meta('applied_revision') != revision or actual != expected:
                 if not retry:
@@ -295,7 +463,7 @@ end
                     return out, nodes
                 self.engine.request('/reload.json')
                 nodes = self.engine.request('/nodes.json')
-                expected = {d['host'] for d in settings['devices'] if d['enabled']}
+                expected = {d['host'] for d in settings['devices'] if d['enabled'] and d.get('backup_backend', 'oxidized') == 'oxidized'}
                 if not isinstance(nodes, list) or {n.get('name') for n in nodes if isinstance(n, dict)} != expected:
                     out.update(state='pending_apply', message='設備清單尚未套用，請檢查受管備份服務')
                     return out, []
@@ -406,6 +574,25 @@ end
         return {'device_id': device['device_id'], 'host': verified['host'], 'algorithm': verified['algorithm'],
                 'fingerprint': verified['fingerprint'], 'trusted': True, 'already_trusted': already_trusted}
 
+    def diagnose(self, ident, actor):
+        device = self.configured_device(ident)
+        known_hosts = self.root / '.ssh' / 'known_hosts'
+        if device['host'] not in self.trusted_hosts():
+            outcome = {'device_id': device['device_id'], 'outcome': 'failed', 'stage': 'host_key_untrusted',
+                       'transport': False, 'pty': False, 'shell': False, 'prompt_detected': False}
+        else:
+            probe = self.probe_client.probe(device, known_hosts)
+            stage = probe.get('stage', 'probe_failed')
+            outcome = {'device_id': device['device_id'], 'outcome': 'success' if stage == 'complete' else 'failed',
+                       'stage': stage, 'transport': probe.get('transport') is True, 'pty': probe.get('pty') is True,
+                       'shell': probe.get('shell') is True, 'prompt_detected': probe.get('prompt', {}).get('detected') is True}
+            prompt = probe.get('prompt')
+            if isinstance(prompt, dict):
+                outcome['prompt_terminator'] = prompt.get('terminator') if prompt.get('terminator') in {'#', '$', '>', 'unknown'} else 'unknown'
+                outcome['ha_role_format'] = prompt.get('ha_role_format') is True
+        self.audit(actor, 'diagnose', '設備識別碼：' + str(device['device_id']) + '；階段：' + outcome['stage'])
+        return outcome
+
     def queue(self, device_id, kind):
         device = next((d for d in self.settings()['devices'] if d['device_id'] == device_id), None)
         if not device or not device['enabled']:
@@ -419,13 +606,21 @@ end
         devices = {d['device_id']: d for d in self.settings()['devices']}
         by_name = {n.get('name'): n for n in nodes if isinstance(n, dict)}
         for run in self.db.execute("SELECT * FROM runs WHERE status='queued' AND dispatched_at IS NULL ORDER BY id LIMIT 5").fetchall():
-            device = devices[run['device_id']]
+            device = devices.get(run['device_id'])
+            if not device:
+                continue
             last = by_name.get(device['host'], {}).get('last') or {}
-            # 送出前先保存，回應中斷時也不會再次觸發相同工作。
             claimed = self.db.execute("UPDATE runs SET dispatched_at=?,previous_end=?,message=? WHERE id=? AND dispatched_at IS NULL AND status='queued'",
                             (utcnow(), last.get('end'), '已送交備份工具，等待完成證據', run['id']))
-            self.db.commit()
             if claimed.rowcount != 1:
+                continue
+            if device.get('backup_backend', 'oxidized') == 'fortigate_api':
+                try:
+                    status, version, message = self.store_version(run, self.api_backup.fetch(device))
+                except BackupError as error:
+                    status, version, message = 'failed', None, error.message
+                self.db.execute('UPDATE runs SET status=?,completed_at=?,message=?,version_id=? WHERE id=?',
+                                (status, utcnow(), message, version, run['id']))
                 continue
             try:
                 self.engine.request('/node/next/' + quote(device['host'], safe='') + '.json')
@@ -436,7 +631,8 @@ end
 
     def redact(self, content):
         secrets = set(self.get_meta('redaction_secrets', []))
-        secrets.update(d['password'] for d in self.settings()['devices'])
+        secrets.update(d.get('password', '') for d in self.settings()['devices'])
+        secrets.update(d.get('api_token', '') for d in self.settings()['devices'])
         for secret in sorted(secrets, key=len, reverse=True):
             if secret:
                 content = content.replace(secret, '[已遮罩]')
@@ -593,7 +789,7 @@ end
         return engine
 
     def dispatch(self, request):
-        if not isinstance(request, dict) or request.get('action') not in {'settings', 'status', 'save', 'test', 'run', 'tick', 'history', 'compare', 'download', 'host_key_scan', 'host_key_confirm'}:
+        if not isinstance(request, dict) or request.get('action') not in {'settings', 'status', 'save', 'test', 'run', 'tick', 'history', 'compare', 'download', 'host_key_scan', 'host_key_confirm', 'diagnose'}:
             raise BackupError('validation', '不支援的組態備份操作')
         action = request['action']
         actor = safe_text(request.get('actor', 'system'), '操作者', 255, allow_empty=action in {'settings', 'status', 'history', 'compare'})
@@ -605,8 +801,10 @@ end
                 if self.db.execute("SELECT 1 FROM runs WHERE status='queued'").fetchone():
                     raise BackupError('busy', '仍有備份執行中，請完成後再修改設定')
                 secrets = set(self.get_meta('redaction_secrets', []))
-                secrets.update(d['password'] for d in self.settings()['devices'])
-                secrets.update(d['password'] for d in settings['devices'])
+                secrets.update(d.get('password', '') for d in self.settings()['devices'])
+                secrets.update(d.get('api_token', '') for d in self.settings()['devices'])
+                secrets.update(d.get('password', '') for d in settings['devices'])
+                secrets.update(d.get('api_token', '') for d in settings['devices'])
                 self.put_meta('redaction_secrets', sorted(secrets))
                 self.put_meta('settings', settings)
                 self.generate()
@@ -616,13 +814,17 @@ end
                 self.put_meta('engine', engine)
                 self.audit(actor, 'save', '儲存備份政策；設備數：' + str(len(settings['devices'])))
             if action in {'test', 'run'}:
-                if not engine['applied']:
-                    raise BackupError('unavailable', engine['message'])
                 ident = request.get('device_id')
                 if type(ident) is not int:
                     raise BackupError('validation', '請指定設備識別碼')
+                device = self.configured_device(ident)
+                if device.get('backup_backend', 'oxidized') == 'oxidized' and not engine['applied']:
+                    raise BackupError('unavailable', engine['message'])
                 self.queue(ident, 'test' if action == 'test' else 'manual')
                 self.audit(actor, action, '設備識別碼：' + str(ident))
+            diagnosis = None
+            if action == 'diagnose':
+                diagnosis = self.diagnose(request.get('device_id'), actor)
             host_key = None
             if action == 'host_key_scan':
                 host_key = self.scan_host_key(request.get('device_id'), actor)
@@ -634,20 +836,20 @@ end
                 engine, nodes = self.applied_engine()
                 self.put_meta('engine', engine)
                 self.reconcile(nodes)
-                if engine['applied']:
-                    if self.settings()['enabled']:
-                        count = 0
-                        for device in self.settings()['devices']:
-                            if not device['enabled']:
-                                continue
-                            recent = self.db.execute('SELECT * FROM runs WHERE device_id=? ORDER BY id DESC LIMIT 1', (device['device_id'],)).fetchone()
-                            if recent and (recent['status'] == 'queued' or (datetime.now(timezone.utc) - timestamp(recent['requested_at'])).total_seconds() < self.settings()['interval_hours'] * 3600):
-                                continue
-                            self.queue(device['device_id'], 'scheduled')
-                            self.audit('system', 'scheduled', '設備識別碼：' + str(device['device_id']))
-                            count += 1
-                            if count >= 5:
-                                break
+                if self.settings()['enabled']:
+                    count = 0
+                    for device in self.settings()['devices']:
+                        if not device['enabled'] or (device.get('backup_backend', 'oxidized') == 'oxidized' and not engine['applied']):
+                            continue
+                        recent = self.db.execute('SELECT * FROM runs WHERE device_id=? ORDER BY id DESC LIMIT 1', (device['device_id'],)).fetchone()
+                        if recent and (recent['status'] == 'queued' or (datetime.now(timezone.utc) - timestamp(recent['requested_at'])).total_seconds() < self.settings()['interval_hours'] * 3600):
+                            continue
+                        self.queue(device['device_id'], 'scheduled')
+                        self.audit('system', 'scheduled', '設備識別碼：' + str(device['device_id']))
+                        count += 1
+                        if count >= 5:
+                            break
+                if engine['applied'] or any(d.get('backup_backend', 'oxidized') == 'fortigate_api' and d.get('enabled') for d in self.settings()['devices']):
                     self.dispatch_pending(nodes)
             result = self.response(engine)
             if action == 'history':
@@ -658,6 +860,8 @@ end
                 result['download'] = self.download(request, actor)
             if host_key is not None:
                 result['host_key'] = host_key
+            if diagnosis is not None:
+                result['diagnosis'] = diagnosis
             self.db.commit()
             return result
         except Exception:

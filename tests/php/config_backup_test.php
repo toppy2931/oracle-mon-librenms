@@ -63,6 +63,42 @@ test('組態備份：空密碼代表沿用，測試與備份只送設備編號',
     assertSame('test',$requests[1]['action']);assertSame(7,$requests[1]['device_id']);assertSame('run',$requests[2]['action']);
     assertTrue(!isset($requests[1]['settings']));
 });
+test('組態備份：診斷只限管理者、可信設備，且回傳不含提示字元原文', function () {
+    $calls = 0; $captured = null;
+    $svc = cbService(function ($request) use (&$calls, &$captured) {
+        $calls++; $captured = $request;
+        $reply = cbReply();
+        $reply['data']['diagnosis'] = ['device_id' => 7, 'outcome' => 'failed', 'stage' => 'shell_timeout',
+            'transport' => true, 'pty' => true, 'shell' => false, 'prompt_detected' => false,
+            'prompt_terminator' => '#', 'raw_prompt' => 'secret-host#'];
+        return $reply;
+    });
+    assertThrows(AccessDenied::class, fn () => $svc->diagnose(7, 'admin', Access::VIEWER));
+    assertThrows(ValidationError::class, fn () => $svc->diagnose(8, 'admin', Access::HANDLER));
+    assertSame(0, $calls);
+    $result = $svc->diagnose(7, 'admin', Access::HANDLER);
+    assertSame('diagnose', $captured['action']);
+    assertSame('admin', $captured['actor']);
+    assertSame('shell_timeout', $result['diagnosis']['stage']);
+    assertTrue(strpos(json_encode($result), 'secret-host#') === false);
+});
+
+test('組態備份：FortiGate REST 備援只允許 FortiGate，Token 不回傳瀏覽器', function () {
+    $request = null;
+    $svc = cbService(function ($value) use (&$request) { $request = $value; return cbReply(); });
+    $settings = cbSettings();
+    $settings['devices'][0]['model'] = 'fortios';
+    $settings['devices'][0]['username'] = '';
+    $settings['devices'][0]['backup_backend'] = 'fortigate_api';
+    $settings['devices'][0]['api_token'] = 'api-token-secret';
+    $data = $svc->save($settings, 'admin', Access::HANDLER);
+    assertSame('fortigate_api', $request['settings']['devices'][0]['backup_backend']);
+    assertSame('api-token-secret', $request['settings']['devices'][0]['api_token']);
+    assertTrue(strpos(json_encode($data), 'api-token-secret') === false);
+    $settings['devices'][0]['model'] = 'ios';
+    assertThrows(ValidationError::class, fn () => $svc->save($settings, 'admin', Access::HANDLER));
+});
+
 test('組態備份：工具失敗與例外一律安全回覆',function(){
     foreach ([fn()=>['ok'=>false,'error'=>['code'=>'failure','message'=>'secret-123']],fn()=>['ok'=>true],function(){throw new RuntimeException('secret-123');}] as $transport) {
         $e=assertThrows(IocError::class,fn()=>cbService($transport)->status(Access::HANDLER));
