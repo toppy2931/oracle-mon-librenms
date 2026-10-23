@@ -220,6 +220,7 @@ final class ConfigBackupService
                 'unsafe_state' => '備份設定儲存位置不安全，請聯絡管理者',
                 'invalid_response' => '備份工具回應不完整，請稍後再試',
                 'invalid_backup' => '未取得完整設備設定，請確認備份權限',
+                'incomplete_backup' => '偵測到設備分頁提示，該版本不完整；請重新備份',
                 'host_key_scan_failed' => '無法取得設備的 SSH 身分指紋，請確認設備連線與 SSH 服務',
                 'host_key_expired' => 'SSH 身分指紋確認已逾時或設備資料已變更，請重新取得',
                 'host_key_mismatch' => 'SSH 身分指紋確認不符，未變更信任設定',
@@ -396,7 +397,8 @@ final class ConfigBackupService
                 if (is_array($row)) {
                     $versions[] = ['id' => (int) ($row['id'] ?? 0), 'device_id' => (int) ($row['device_id'] ?? 0),
                         'created_at' => $this->text($row['created_at'] ?? ''),
-                        'digest' => preg_match('/\A[a-f0-9]{64}\z/', (string) ($row['digest'] ?? '')) ? $row['digest'] : ''];
+                        'digest' => preg_match('/\A[a-f0-9]{64}\z/', (string) ($row['digest'] ?? '')) ? $row['digest'] : '',
+                        'complete' => ($row['complete'] ?? true) === true || ($row['complete'] ?? 1) === 1];
                 }
             }
             $result['history'] = ['device_id' => (int) ($history['device_id'] ?? 0),

@@ -417,12 +417,12 @@ window.IocConfigBackup = function ({ h, section, table, api, downloadVersion, un
         const history = r.backup.history;
         offset = history.offset;
         historyPage.page = Math.floor(offset / history.limit);
-        history.versions.forEach((v) => versions.set(v.id, v)); updateSelections();
+        history.versions.filter((v) => v.complete !== false).forEach((v) => versions.set(v.id, v)); updateSelections();
         const total = Math.max(history.total_runs, history.total_versions);
         records.replaceChildren(note('執行紀錄共 ' + history.total_runs + ' 筆；內容版本共 ' + history.total_versions + ' 代。'),
           total > history.limit ? paginationControls(total, history.limit, historyPage, (page) => fetchPage(page * history.limit)) : h('span', { class: 'note' }, '共 ' + total + ' 筆'),
           section('備份執行紀錄', '內容沒有變更也會保留執行紀錄；每頁 ' + history.limit + ' 筆', history.runs.length ? table(['要求時間', '方式', '結果', '完成時間', '說明'], history.runs.map((r) => [time(r.requested_at), kinds[r.kind] || '備份', statuses[r.status] || '狀態無法辨識', time(r.completed_at), r.message || ''])) : note('此頁沒有執行紀錄。')),
-          section('備份版本', '內容變更才建立新版本；首次成功備份為基準；下載檔可能包含設備機密設定，請妥善保管。', history.versions.length ? [table(['版本', '建立時間', '操作'], history.versions.map((v) => ['#' + v.id, time(v.created_at), h('button', { type: 'button', class: 'btn', onclick: async function () { await download(id, v, this); } }, '下載')])), downloadMessage] : note('此頁沒有備份版本。')));
+          section('備份版本', '內容變更才建立新版本；首次成功備份為基準；下載檔可能包含設備機密設定，請妥善保管。偵測到分頁提示的舊版本會標示為不完整，不能下載或比較。', history.versions.length ? [table(['版本', '建立時間', '操作'], history.versions.map((v) => ['#' + v.id, time(v.created_at), v.complete === false ? h('span', { class: 'note' }, '不完整，請重新備份') : h('button', { type: 'button', class: 'btn', onclick: async function () { await download(id, v, this); } }, '下載')])), downloadMessage] : note('此頁沒有備份版本。')));
       } catch (e) { if (requestSequence === sequence) records.replaceChildren(unavailable(e.message)); }
     };
     picker.addEventListener('change', () => { versions.clear(); historyPage.page = 0; from.value = ''; to.value = ''; updateSelections(); return fetchPage(0); });

@@ -255,6 +255,28 @@ class BackupTests(unittest.TestCase):
             self.assertEqual('failed', out['runs'][0]['status'])
         self.assertEqual(1, self.worker.db.execute('SELECT COUNT(*) FROM versions').fetchone()[0])
 
+    def test_paged_fortigate_output_is_rejected_and_never_saved(self):
+        self.save()
+        self.call('run', device_id=7)
+        out = self.finish(content='config system interface\nedit "port1"\n--More--  edit "port2"\n')
+        self.assertEqual('failed', out['runs'][0]['status'])
+        self.assertIn('分頁提示', out['runs'][0]['message'])
+        self.assertEqual(0, self.worker.db.execute('SELECT COUNT(*) FROM versions').fetchone()[0])
+
+    def test_legacy_paged_version_is_marked_incomplete_and_cannot_download(self):
+        self.save()
+        partial = 'config system interface\n--More--  edit "port2"\n'
+        self.worker.db.execute(
+            'INSERT INTO versions(device_id,created_at,digest,content) VALUES(?,?,?,?)',
+            (7, backup.utcnow(), hashlib.sha256(partial.encode()).hexdigest(), partial),
+        )
+        self.worker.db.commit()
+        history = self.call('history', device_id=7, offset=0)['history']
+        self.assertFalse(history['versions'][0]['complete'])
+        with self.assertRaises(backup.BackupError) as raised:
+            self.call('download', actor='admin', device_id=7, version_id=1)
+        self.assertEqual('incomplete_backup', raised.exception.code)
+
     def test_oxidized_utc_result_marks_failed_run_complete(self):
         self.save()
         self.call('run', device_id=7)
@@ -404,15 +426,17 @@ class BackupTests(unittest.TestCase):
         self.assertEqual('127.0.0.1', config['extensions']['oxidized-web']['listen'])
         self.assertFalse(config['output']['clean_obsolete_nodes'])
 
-    def test_fortios_uses_ioc_exec_model_without_modifying_system_model(self):
+    def test_fortios_uses_interactive_pager_aware_model_without_modifying_system_model(self):
         self.settings['devices'][0]['model'] = 'fortios'
         self.save()
         home = self.worker.root / 'oxidized'
         router = (home / 'router.db').read_text()
-        model = (home / 'model' / 'iocfortios.rb').read_text()
+        model = (home / 'model' / 'iocfortios.rb').read_text(encoding='utf-8')
         self.assertIn('|iocfortios|', router)
         self.assertIn('class IocFortiOS < FortiOS', model)
-        self.assertIn('exec true', model)
+        self.assertIn('expect /--More--/', model)
+        self.assertIn("send ' '", model)
+        self.assertNotIn('exec true', model)
 
     def test_host_key_requires_explicit_fingerprint_confirmation(self):
         self.save()

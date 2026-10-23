@@ -208,13 +208,14 @@ test('組態備份：歷史允許已移除設備且不回傳原始內容', funct
     $reply['data']['history_devices'] = [['device_id'=>99,'name'=>'舊設備','configured'=>false,'password'=>'hidden']];
     $reply['data']['history'] = ['device_id'=>99,'offset'=>20,'total_runs'=>25,'total_versions'=>21,
         'runs'=>[['id'=>1,'status'=>'failed','message'=>'hidden']],
-        'versions'=>[['id'=>1,'device_id'=>99,'created_at'=>'now','digest'=>str_repeat('a',64),'content'=>'hidden']]];
+        'versions'=>[['id'=>1,'device_id'=>99,'created_at'=>'now','digest'=>str_repeat('a',64),'complete'=>false,'content'=>'hidden']]];
     $svc=cbService(function($r) use (&$requests,$reply) { $requests[]=$r; return $reply; });
     $result=$svc->history(99,20,Access::HANDLER);
     assertSame(99,$requests[0]['device_id']);
     assertSame(20,$result['history']['offset']);
     assertSame(10,$result['history']['limit']);
     assertSame(25,$result['history']['total_runs']);
+    assertSame(false,$result['history']['versions'][0]['complete']);
     assertTrue(strpos(json_encode($result),'hidden')===false);
 });
 

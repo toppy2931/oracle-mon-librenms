@@ -23,11 +23,11 @@ from urllib.parse import quote
 STATE_DIR = '/var/lib/oracle-mon/config-backup'
 ENGINE_URL = 'http://127.0.0.1:8879'
 MODELS = {'ios', 'fortios', 'junos', 'routeros'}
-# FortiOS 內建模型預設採互動式 shell，部分 FortiGate CLI 提示字元無法辨識；
-# IOC 專用模型改用已驗證的 SSH exec channel。
+# FortiGate 的 `show` 會輸出分頁提示；必須使用可回應提示的互動式 shell，
+# 不能使用一次性 SSH exec channel，否則只會取得第一頁。
 ENGINE_MODELS = {'fortios': 'iocfortios'}
 # 變更受管 Oxidized 輸出或模型時遞增，以迫使既有設定重新載入。
-ENGINE_CONFIG_REVISION = 2
+ENGINE_CONFIG_REVISION = 3
 LIMIT = 2 * 1024 * 1024
 HISTORY_PAGE_SIZE = 10
 DOWNLOAD_LIMIT = 2 * 1024 * 1024
@@ -252,12 +252,15 @@ class Worker:
                              'map': {'name': 0, 'ip': 1, 'model': 2, 'username': 3, 'password': 4}, 'vars_map': {}}}}
         # JSON 是 YAML 子集，無需新增 YAML 依賴；來源分隔符不允許出現在輸入。
         self.write_private(home / 'config', json.dumps(config, ensure_ascii=False, indent=2))
-        # 不修改系統安裝的 Oxidized 模型；僅在 IOC 受管目錄提供 FortiOS exec 相容層。
+        # 不修改系統安裝的 Oxidized 模型；僅在 IOC 受管目錄補強 FortiGate 分頁處理。
         self.write_private(models / 'iocfortios.rb', """require 'oxidized/model/fortios'
 
 class IocFortiOS < FortiOS
-  cfg :ssh do
-    exec true
+  # 部分 FortiOS 版本在 --More-- 後附帶 CR、退格或下一頁內容，
+  # 內建嚴格比對可能漏接，造成只保存第一頁組態。
+  expect /--More--/ do |data, re|
+    send ' '
+    data.sub re, ''
   end
 end
 """)
@@ -439,6 +442,8 @@ end
             content = ''.join(content)
         if not isinstance(content, str) or not content.strip() or len(content.encode()) > LIMIT or '\x00' in content:
             raise BackupError('invalid_backup', '備份內容為空、超過上限或格式不正確')
+        if '--More--' in content:
+            raise BackupError('incomplete_backup', '備份內容含有設備分頁提示，判定為不完整設定')
         content = content.replace('\r\n', '\n').replace('\r', '\n')
         digest = hashlib.sha256(content.encode()).hexdigest()
         prior = self.db.execute('SELECT * FROM versions WHERE device_id=? ORDER BY id DESC LIMIT 1', (run['device_id'],)).fetchone()
@@ -526,7 +531,7 @@ end
         if ident not in {d['device_id'] for d in self.history_devices()}:
             raise BackupError('validation', '找不到此設備的備份紀錄')
         runs = [dict(r) for r in self.db.execute('SELECT id,device_id,device_name,kind,status,requested_at,completed_at,message,version_id FROM runs WHERE device_id=? ORDER BY id DESC LIMIT ? OFFSET ?', (ident, HISTORY_PAGE_SIZE, offset))]
-        versions = [dict(r) for r in self.db.execute('SELECT id,device_id,created_at,digest FROM versions WHERE device_id=? ORDER BY id DESC LIMIT ? OFFSET ?', (ident, HISTORY_PAGE_SIZE, offset))]
+        versions = [dict(r) for r in self.db.execute("SELECT id,device_id,created_at,digest,CASE WHEN instr(content, '--More--')=0 THEN 1 ELSE 0 END AS complete FROM versions WHERE device_id=? ORDER BY id DESC LIMIT ? OFFSET ?", (ident, HISTORY_PAGE_SIZE, offset))]
         return {'device_id': ident, 'offset': offset, 'limit': HISTORY_PAGE_SIZE, 'runs': runs, 'versions': versions,
                 'total_runs': self.db.execute('SELECT COUNT(*) FROM runs WHERE device_id=?', (ident,)).fetchone()[0],
                 'total_versions': self.db.execute('SELECT COUNT(*) FROM versions WHERE device_id=?', (ident,)).fetchone()[0]}
@@ -560,6 +565,8 @@ end
         if row is None or not isinstance(row['content'], str):
             raise BackupError('validation', '版本不存在或不屬於同一設備')
         content = row['content']
+        if '--More--' in content:
+            raise BackupError('incomplete_backup', '此版本含有設備分頁提示，判定為不完整設定，請重新備份')
         if len(content.encode('utf-8')) > DOWNLOAD_LIMIT:
             raise BackupError('download_too_large', '備份版本超過下載大小上限')
         self.audit(actor, 'download', '設備識別碼：' + str(ident) + '；版本：' + str(version))

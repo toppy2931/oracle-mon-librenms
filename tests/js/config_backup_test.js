@@ -294,6 +294,16 @@ test('備份版本可由專用下載函式下載，且不混入一般 API 請求
   assert.deepEqual(downloads, [[7, 21]]);
   assert.ok(text(root).includes('已開始下載版本 #21'));
 });
+test('偵測到分頁提示的不完整舊版本不可下載或比較', async () => {
+  const root = h('div'); const history = historyPayload();
+  history.backup.history.versions[0].complete = false;
+  await create(async (url, body) => body.action === 'history' ? history : payload()).governance(root);
+  await button(root, '備份歷史與比較').onclick();
+  const picker = findLabel(root, '查詢備份設備'); picker.value = '7'; await picker.listeners.change();
+  assert.ok(text(root).includes('不完整，請重新備份'));
+  assert.equal(button(root, '下載'), undefined);
+  assert.ok(!text(findLabel(root, '比較起始版本')).includes('#21'));
+});
 test('切換設備後忽略舊歷史回應', async () => {
   let finish; const delayed = new Promise((resolve) => { finish = resolve; });
   const root = h('div'); await create(async (url, body) => body.action === 'history' ? delayed : payload()).governance(root);
