@@ -423,6 +423,7 @@ class BackupTests(unittest.TestCase):
         self.assertEqual(0, config['interval'])
         self.assertTrue(config['next_adds_job'])
         self.assertTrue(config['input']['ssh']['secure'])
+        self.assertEqual(5, config['source']['csv']['vars_map']['ssh_no_exec'])
         self.assertEqual('127.0.0.1', config['extensions']['oxidized-web']['listen'])
         self.assertFalse(config['output']['clean_obsolete_nodes'])
 
@@ -433,6 +434,7 @@ class BackupTests(unittest.TestCase):
         router = (home / 'router.db').read_text()
         model = (home / 'model' / 'iocfortios.rb').read_text(encoding='utf-8')
         self.assertIn('|iocfortios|', router)
+        self.assertTrue(router.rstrip().endswith('|true'))
         self.assertIn('class IocFortiOS < FortiOS', model)
         self.assertIn('expect /--More--/', model)
         self.assertIn("send ' '", model)

@@ -27,7 +27,7 @@ MODELS = {'ios', 'fortios', 'junos', 'routeros'}
 # 不能使用一次性 SSH exec channel，否則只會取得第一頁。
 ENGINE_MODELS = {'fortios': 'iocfortios'}
 # 變更受管 Oxidized 輸出或模型時遞增，以迫使既有設定重新載入。
-ENGINE_CONFIG_REVISION = 3
+ENGINE_CONFIG_REVISION = 4
 LIMIT = 2 * 1024 * 1024
 HISTORY_PAGE_SIZE = 10
 DOWNLOAD_LIMIT = 2 * 1024 * 1024
@@ -249,7 +249,8 @@ class Worker:
                   'extensions': {'oxidized-web': {'load': True, 'listen': '127.0.0.1', 'port': 8879}},
                   'output': {'default': 'file', 'clean_obsolete_nodes': False, 'file': {'directory': str(output)}},
                   'source': {'default': 'csv', 'csv': {'file': str(home / 'router.db'), 'delimiter': '|',
-                             'map': {'name': 0, 'ip': 1, 'model': 2, 'username': 3, 'password': 4}, 'vars_map': {}}}}
+                             'map': {'name': 0, 'ip': 1, 'model': 2, 'username': 3, 'password': 4},
+                             'vars_map': {'ssh_no_exec': 5}}}}
         # JSON 是 YAML 子集，無需新增 YAML 依賴；來源分隔符不允許出現在輸入。
         self.write_private(home / 'config', json.dumps(config, ensure_ascii=False, indent=2))
         # 不修改系統安裝的 Oxidized 模型；僅在 IOC 受管目錄補強 FortiGate 分頁處理。
@@ -264,7 +265,8 @@ class IocFortiOS < FortiOS
   end
 end
 """)
-        lines = ['|'.join([d['host'], d['host'], ENGINE_MODELS.get(d['model'], d['model']), d['username'], d['password']])
+        lines = ['|'.join([d['host'], d['host'], ENGINE_MODELS.get(d['model'], d['model']), d['username'], d['password'],
+                           'true' if d['model'] == 'fortios' else 'false'])
                  for d in self.settings()['devices'] if d['enabled']]
         self.write_private(home / 'router.db', '\n'.join(lines) + ('\n' if lines else ''))
 
