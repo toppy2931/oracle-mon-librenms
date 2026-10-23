@@ -103,5 +103,11 @@ class ConfigBackupIntegrationTests(unittest.TestCase):
         self.assertIn('ioc-config-backup.py',src)
         self.assertIn('ioc-backup.php',(ROOT/'uninstall.sh').read_text(encoding='utf-8'))
 
+    def test_update_rebuilds_then_restarts_only_active_backup_engine(self):
+        src = (ROOT/'update.sh').read_text(encoding='utf-8')
+        self.assertIn('"action":"status","actor":"system"', src)
+        self.assertIn('systemctl is-active --quiet ioc-config-backup-oxidized.service', src)
+        self.assertIn('systemctl restart ioc-config-backup-oxidized.service', src)
+
 if __name__=='__main__':
     unittest.main()
