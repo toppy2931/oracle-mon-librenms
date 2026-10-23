@@ -75,9 +75,9 @@ MODELS = {model for adapter in ADAPTER_REGISTRY.values() if adapter['available']
           for model in adapter['models']}
 # FortiGate 的 `show` 會輸出分頁提示；必須使用可回應提示的互動式 shell，
 # 不能使用一次性 SSH exec channel，否則只會取得第一頁。
-ENGINE_MODELS = {'fortios': 'iocfortios'}
+ENGINE_MODELS = {'fortios': 'iocfortigate'}
 # 變更受管 Oxidized 輸出或模型時遞增，以迫使既有設定重新載入。
-ENGINE_CONFIG_REVISION = 6
+ENGINE_CONFIG_REVISION = 7
 LIMIT = 2 * 1024 * 1024
 HISTORY_PAGE_SIZE = 10
 DOWNLOAD_LIMIT = 2 * 1024 * 1024
@@ -150,32 +150,43 @@ require 'json'
 require 'net/ssh'
 request = JSON.parse(STDIN.read)
 result = {'transport' => false, 'pty' => false, 'shell' => false, 'prompt_detected' => false}
-buffer = +''
+buffer = ''.b
 begin
   Net::SSH.start(request.fetch('host'), request.fetch('username'),
     password: request.fetch('password'), non_interactive: true,
     verify_host_key: :always, user_known_hosts_file: [request.fetch('known_hosts')],
     global_known_hosts_file: [], timeout: 5, auth_methods: ['password']) do |ssh|
     result['transport'] = true
-    channel = ssh.open_channel
     pty_done = shell_done = false
-    channel.request_pty(term: 'vt100') do |_ch, ok|
-      result['pty'] = !!ok; pty_done = true
-      unless ok
-        result['stage'] = 'pty_rejected'
-        next
+    ssh.open_channel do |channel|
+      channel.request_pty(term: 'vt100') do |_ch, ok|
+        result['pty'] = !!ok; pty_done = true
+        unless ok
+          result['stage'] = 'pty_rejected'
+          next
+        end
+        channel.send_channel_request('shell') do |_shell, shell_ok|
+          result['shell'] = !!shell_ok; shell_done = true
+          result['stage'] = 'shell_rejected' unless shell_ok
+        end
       end
-      channel.send_channel_request('shell') do |_shell, shell_ok|
-        result['shell'] = !!shell_ok; shell_done = true
-        result['stage'] = 'shell_rejected' unless shell_ok
+      channel.on_data do |_ch, data|
+        # 保留尾端，避免較長的登入訊息把真正的提示字元擠出診斷範圍。
+        buffer << data.to_s.b
+        buffer = buffer.byteslice(buffer.bytesize - 1024, 1024) if buffer.bytesize > 1024
       end
     end
-    channel.on_data do |_ch, data|
-      buffer << data.to_s.byteslice(0, [1024 - buffer.bytesize, 0].max).to_s
+    prompt_candidate = lambda do
+      clean = buffer.gsub(/\e\[[0-?]*[ -\/]*[@-~]/, '').gsub(/[\x00-\x08\x0b-\x1f\x7f]/, '')
+      last = clean.lines.map(&:strip).reject(&:empty?).last.to_s
+      last.bytesize > 128 ? last.byteslice(last.bytesize - 128, 128) : last
     end
     deadline = Process.clock_gettime(Process::CLOCK_MONOTONIC) + 5
-    while Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline && !(pty_done && shell_done && !buffer.empty?)
-      ssh.loop(0.1)
+    while Process.clock_gettime(Process::CLOCK_MONOTONIC) < deadline
+      ssh.process(0.1)
+      break if pty_done && !result['pty']
+      break if shell_done && !result['shell']
+      break if shell_done && prompt_candidate.call.match?(/[#$>]\s*\z/)
     end
     if !pty_done
       result['stage'] = 'pty_timeout'
@@ -186,8 +197,7 @@ begin
     elsif !result['shell']
       result['stage'] ||= 'shell_rejected'
     else
-      clean = buffer.gsub(/\e\[[0-?]*[ -\/]*[@-~]/, '').gsub(/[\x00-\x08\x0b-\x1f\x7f]/, '')
-      candidate = clean.lines.map(&:strip).reject(&:empty?).last.to_s.byteslice(-128, 128).to_s
+      candidate = prompt_candidate.call
       terminator = candidate[/[#$>]\s*\z/]&.strip
       result['prompt_detected'] = !terminator.nil?
       result['prompt_signature'] = {
@@ -197,6 +207,8 @@ begin
       }
       result['stage'] = result['prompt_detected'] ? 'complete' : 'prompt_not_detected'
     end
+    # 診斷只讀取初始提示字元；不要等待互動 shell 自行關閉。
+    ssh.shutdown!
   end
 rescue Net::SSH::HostKeyUnknown, Net::SSH::HostKeyMismatch
   result['stage'] = 'host_key_untrusted'
@@ -580,12 +592,11 @@ class Worker:
         # JSON 是 YAML 子集，無需新增 YAML 依賴；來源分隔符不允許出現在輸入。
         self.write_private(home / 'config', json.dumps(config, ensure_ascii=False, indent=2))
         # 不修改系統安裝的 Oxidized 模型；僅在 IOC 受管目錄補強 FortiGate 分頁處理。
-        self.write_private(models / 'iocfortios.rb', r"""require 'oxidized/model/fortios'
+        self.write_private(models / 'iocfortigate.rb', r"""require 'oxidized/model/fortigate'
 
-class IocFortiOS < FortiOS
-  # Oxidized 0.37.0 的內建模式無法辨識 FortiGate HA 常見的
-  # "hostname(Primary) #" 提示字元，會在互動式 shell 等待到逾時。
-  # 此規則與上游修正版本一致，允許主機名稱中的括號。
+class IocFortiGate < FortiGate
+  # FortiGate 從 Oxidized 0.36 起使用獨立模型；繼承 FortiOS 會執行
+  # 裸 show，分頁時可能無法完成。保留 HA 提示字元的相容處理。
   prompt /^(\(\w\) )?([-\w.~()]+(\s[(\w\-.)]+)?~?\s?[#>$]\s?)$/
 
   # 部分 FortiOS 版本在 --More-- 後附帶 CR、退格或下一頁內容，
@@ -969,13 +980,17 @@ end
         return engine
 
     def dispatch(self, request):
-        if not isinstance(request, dict) or request.get('action') not in {'settings', 'status', 'save', 'test', 'run', 'tick', 'history', 'compare', 'download', 'host_key_scan', 'host_key_confirm', 'diagnose'}:
+        if not isinstance(request, dict) or request.get('action') not in {'settings', 'status', 'prepare_engine', 'save', 'test', 'run', 'tick', 'history', 'compare', 'download', 'host_key_scan', 'host_key_confirm', 'diagnose'}:
             raise BackupError('validation', '不支援的組態備份操作')
         action = request['action']
         actor = safe_text(request.get('actor', 'system'), '操作者', 255, allow_empty=action in {'settings', 'status', 'history', 'compare'})
         self.db.execute('BEGIN' if action in {'settings', 'status', 'history', 'compare'} else 'BEGIN IMMEDIATE')
         try:
             engine = self.cached_engine()
+            if action == 'prepare_engine':
+                if actor != 'system':
+                    raise BackupError('forbidden', '只有系統更新程序可以重建備份引擎設定')
+                self.generate()
             if action == 'save':
                 settings = self.validate(request.get('settings'))
                 if self.db.execute("SELECT 1 FROM runs WHERE status='queued'").fetchone():

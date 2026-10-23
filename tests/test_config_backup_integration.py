@@ -108,7 +108,7 @@ class ConfigBackupIntegrationTests(unittest.TestCase):
 
     def test_update_rebuilds_then_restarts_only_active_backup_engine(self):
         src = (ROOT/'update.sh').read_text(encoding='utf-8')
-        self.assertIn('"action":"status","actor":"system"', src)
+        self.assertIn('"action":"prepare_engine","actor":"system"', src)
         self.assertIn('systemctl is-active --quiet ioc-config-backup-oxidized.service', src)
         self.assertIn('systemctl restart ioc-config-backup-oxidized.service', src)
 

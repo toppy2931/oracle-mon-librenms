@@ -92,7 +92,7 @@ env ORACLE_MON_DIR="$ORACLE_MON_DIR" LIBRENMS_DIR="$LIBRENMS_DIR" LIBRENMS_USER=
 # Oxidized 只在啟動時讀取 config；先以受限入口重建 IOC 管理的設定，
 # 再僅重啟原本已在運行的專用服務，避免更新後仍沿用舊輸入模式。
 say "重建組態備份引擎設定"
-printf '%s' '{"action":"status","actor":"system"}' | "$ORACLE_MON_DIR/admin/manage-config-backup.sh" >/dev/null \
+printf '%s' '{"action":"prepare_engine","actor":"system"}' | "$ORACLE_MON_DIR/admin/manage-config-backup.sh" >/dev/null \
     || say "組態備份設定未重建（可在服務啟動後重新整理備份狀態）"
 if systemctl is-active --quiet ioc-config-backup-oxidized.service; then
     say "重啟已執行的組態備份引擎以套用設定"

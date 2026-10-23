@@ -2,6 +2,7 @@
 import hashlib
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -16,6 +17,79 @@ from unittest.mock import patch
 from helpers import load_module
 
 backup = load_module('ioc_config_backup', 'system/ioc-config-backup.py')
+
+
+class PromptProbeScriptTests(unittest.TestCase):
+    @unittest.skipUnless(shutil.which('ruby'), 'Ruby runtime unavailable')
+    def test_probe_returns_after_open_shell_and_waits_for_prompt_after_banner(self):
+        # 模擬不會自行關閉的互動 shell；診斷仍須在提示字元出現後返回。
+        fake_ssh = r'''
+module Net
+  module SSH
+    class HostKeyUnknown < StandardError; end
+    class HostKeyMismatch < StandardError; end
+    class AuthenticationFailed < StandardError; end
+    class ConnectionTimeout < StandardError; end
+    class Channel
+      def open!; @open = true; end
+      def request_pty(term:)
+        raise 'PTY requested before channel opened' unless @open
+        yield self, true
+      end
+      def send_channel_request(name)
+        raise 'unexpected channel request' unless name == 'shell'
+        yield self, true
+      end
+      def on_data(&block); @on_data = block; end
+      def emit(data); @on_data.call(self, data); end
+      def send_data(*); raise 'diagnosis must not send CLI'; end
+    end
+    class Session
+      def initialize; @channel = Channel.new; @step = 0; end
+      def open_channel(&callback); @on_open = callback; @channel; end
+      def process(_wait)
+        @step += 1
+        if @step == 1
+          @channel.open!
+          @on_open.call(@channel)
+        elsif @step == 2
+          @channel.emit('Welcome to device' + "\n")
+        elsif @step == 3
+          @channel.emit('FGT71G (Primary) # ')
+        end
+        true
+      end
+      def loop(*); raise 'persistent shell did not close'; end
+      def shutdown!; @closed = true; end
+      def closed?; @closed == true; end
+    end
+    def self.start(_host, _user, **_options)
+      session = Session.new
+      yield session
+      raise 'session was not closed' unless session.closed?
+    end
+  end
+end
+'''
+        with tempfile.TemporaryDirectory() as folder:
+            stub = Path(folder) / 'net' / 'ssh.rb'
+            stub.parent.mkdir()
+            stub.write_text(fake_ssh, encoding='utf-8')
+            result = subprocess.run(
+                [shutil.which('ruby'), '-e', backup.PromptProbe._SCRIPT],
+                input=json.dumps({'host': '192.0.2.1', 'username': 'test',
+                                  'password': 'private-secret', 'known_hosts': '/unused'}),
+                text=True, encoding='utf-8', capture_output=True, timeout=3,
+                env={**os.environ, 'RUBYLIB': folder},
+            )
+        self.assertEqual(0, result.returncode, result.stderr)
+        outcome = json.loads(result.stdout)
+        self.assertEqual('complete', outcome['stage'])
+        self.assertTrue(outcome['transport'] and outcome['pty'] and outcome['shell'])
+        self.assertTrue(outcome['prompt_detected'])
+        self.assertEqual('#', outcome['prompt_signature']['terminator'])
+        self.assertNotIn('FGT71G', result.stdout)
+        self.assertNotIn('private-secret', result.stdout)
 
 
 class FakeEngine:
@@ -606,19 +680,31 @@ class BackupTests(unittest.TestCase):
         self.assertEqual('127.0.0.1', config['extensions']['oxidized-web']['listen'])
         self.assertFalse(config['output']['clean_obsolete_nodes'])
 
-    def test_fortios_uses_interactive_pager_aware_model_without_modifying_system_model(self):
+    def test_fortigate_uses_dedicated_pager_aware_model_without_modifying_system_model(self):
         self.settings['devices'][0]['model'] = 'fortios'
         self.save()
         home = self.worker.root / 'oxidized'
         router = (home / 'router.db').read_text()
-        model = (home / 'model' / 'iocfortios.rb').read_text(encoding='utf-8')
-        self.assertIn('|iocfortios|', router)
+        model = (home / 'model' / 'iocfortigate.rb').read_text(encoding='utf-8')
+        self.assertIn('|iocfortigate|', router)
         self.assertTrue(router.rstrip().endswith('|true'))
-        self.assertIn('class IocFortiOS < FortiOS', model)
+        self.assertIn("require 'oxidized/model/fortigate'", model)
+        self.assertIn('class IocFortiGate < FortiGate', model)
         self.assertIn('[-\\w.~()]+', model)
         self.assertIn('expect /--More--/', model)
         self.assertIn("send ' '", model)
         self.assertNotIn('exec true', model)
+
+    def test_prepare_engine_rebuilds_config_only_for_system_updater(self):
+        self.save()
+        config = self.worker.root / 'oxidized' / 'config'
+        config.unlink()
+        with self.assertRaises(backup.BackupError) as error:
+            self.call('prepare_engine')
+        self.assertEqual('forbidden', error.exception.code)
+        self.assertFalse(config.exists())
+        self.worker.dispatch({'action': 'prepare_engine', 'actor': 'system'})
+        self.assertTrue(config.is_file())
 
     def test_host_key_requires_explicit_fingerprint_confirmation(self):
         self.save()
