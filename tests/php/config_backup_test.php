@@ -228,3 +228,14 @@ test('組態備份：比較傳遞任意版本並遮罩敏感差異', function ()
     assertTrue(strpos($result['comparison']['diff'],'+hostname branch')!==false);
     assertTrue(strpos(json_encode($result),'hidden')===false);
 });
+
+test('組態備份：下載版本只經受保護服務回傳原始內容', function () {
+    $request = null; $reply = cbReply();
+    $reply['data']['download'] = ['device_id' => 99, 'version_id' => 5, 'content' => "hostname restore-target\npassword secret"];
+    $svc = cbService(function ($r) use (&$request, $reply) { $request = $r; return $reply; });
+    $result = $svc->downloadVersion(99, 5, 'admin', Access::HANDLER);
+    assertSame('download', $request['action']); assertSame('admin', $request['actor']);
+    assertSame("hostname restore-target\npassword secret", $result['content']);
+    assertSame('config-backup-device-99-version-5.conf', $result['filename']);
+    assertThrows(AccessDenied::class, fn () => $svc->downloadVersion(99, 5, 'admin', Access::VIEWER));
+});

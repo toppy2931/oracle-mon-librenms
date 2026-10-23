@@ -30,6 +30,7 @@ ENGINE_MODELS = {'fortios': 'iocfortios'}
 ENGINE_CONFIG_REVISION = 2
 LIMIT = 2 * 1024 * 1024
 HISTORY_PAGE_SIZE = 10
+DOWNLOAD_LIMIT = 2 * 1024 * 1024
 
 
 class BackupError(Exception):
@@ -552,6 +553,18 @@ end
                 'from_created_at': before['created_at'], 'to_created_at': after['created_at'],
                 'diff': diff, 'added': added, 'removed': removed, 'changed': changed, 'truncated': truncated}
 
+    def download(self, request, actor):
+        ident = self.identifier(request.get('device_id'))
+        version = self.identifier(request.get('version_id'))
+        row = self.db.execute('SELECT content FROM versions WHERE device_id=? AND id=?', (ident, version)).fetchone()
+        if row is None or not isinstance(row['content'], str):
+            raise BackupError('validation', '版本不存在或不屬於同一設備')
+        content = row['content']
+        if len(content.encode('utf-8')) > DOWNLOAD_LIMIT:
+            raise BackupError('download_too_large', '備份版本超過下載大小上限')
+        self.audit(actor, 'download', '設備識別碼：' + str(ident) + '；版本：' + str(version))
+        return {'device_id': ident, 'version_id': version, 'content': content}
+
     def cached_engine(self):
         engine = self.get_meta('engine', {'backend': 'oxidized', 'endpoint': ENGINE_URL,
                                       'state': 'unavailable', 'applied': False, 'checked_at': None,
@@ -566,7 +579,7 @@ end
         return engine
 
     def dispatch(self, request):
-        if not isinstance(request, dict) or request.get('action') not in {'settings', 'status', 'save', 'test', 'run', 'tick', 'history', 'compare', 'host_key_scan', 'host_key_confirm'}:
+        if not isinstance(request, dict) or request.get('action') not in {'settings', 'status', 'save', 'test', 'run', 'tick', 'history', 'compare', 'download', 'host_key_scan', 'host_key_confirm'}:
             raise BackupError('validation', '不支援的組態備份操作')
         action = request['action']
         actor = safe_text(request.get('actor', 'system'), '操作者', 255, allow_empty=action in {'settings', 'status', 'history', 'compare'})
@@ -627,6 +640,8 @@ end
                 result['history'] = self.history(request)
             if action == 'compare':
                 result['comparison'] = self.compare(request)
+            if action == 'download':
+                result['download'] = self.download(request, actor)
             if host_key is not None:
                 result['host_key'] = host_key
             self.db.commit()

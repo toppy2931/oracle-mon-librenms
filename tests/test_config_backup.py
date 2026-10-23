@@ -116,6 +116,26 @@ class BackupTests(unittest.TestCase):
         automatic = self.call('status')['changes'][0]
         self.assertEqual((1, 1), (automatic['added'], automatic['removed']))
 
+    def test_download_returns_only_requested_version_and_audits_actor(self):
+        run = {'device_id': 7, 'device_name': 'router'}
+        self.worker.store_version(run, 'hostname downloadable')
+        result = self.call('download', actor='admin', device_id=7, version_id=1)['download']
+        self.assertEqual('hostname downloadable', result['content'])
+        self.assertEqual((7, 1), (result['device_id'], result['version_id']))
+        self.assertEqual('download', self.call('status')['audit'][0]['action'])
+        with self.assertRaises(backup.BackupError):
+            self.call('download', actor='admin', device_id=7, version_id=2)
+
+        oversized = 'x' * (backup.DOWNLOAD_LIMIT + 1)
+        self.worker.db.execute(
+            'INSERT INTO versions(device_id,created_at,digest,content) VALUES(?,?,?,?)',
+            (7, backup.utcnow(), hashlib.sha256(oversized.encode()).hexdigest(), oversized),
+        )
+        self.worker.db.commit()
+        with self.assertRaises(backup.BackupError) as raised:
+            self.call('download', actor='admin', device_id=7, version_id=2)
+        self.assertEqual('download_too_large', raised.exception.code)
+
     def test_large_comparison_is_truncated_with_complete_change_counts(self):
         run = {'device_id': 7, 'device_name': 'router'}
         before = ''.join('interface ethernet' + str(n) + ' description original\n' for n in range(35000))

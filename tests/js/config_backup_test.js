@@ -283,6 +283,17 @@ test('歷史翻頁保留版本選擇並傳送指定代數，比較輸出為純�
   picker.value = ''; await picker.listeners.change();
   assert.equal(from.value, ''); assert.equal(to.value, ''); assert.ok(button(root, '比較兩個版本').disabled);
 });
+test('備份版本可由專用下載函式下載，且不混入一般 API 請求', async () => {
+  const downloads = []; const root = h('div');
+  await create(async (url, body) => body.action === 'history' ? historyPayload() : payload(), {
+    downloadVersion: async (deviceId, versionId) => { downloads.push([deviceId, versionId]); }
+  }).governance(root);
+  await button(root, '備份歷史與比較').onclick();
+  const picker = findLabel(root, '查詢備份設備'); picker.value = '7'; await picker.listeners.change();
+  const download = button(root, '下載'); await download.onclick();
+  assert.deepEqual(downloads, [[7, 21]]);
+  assert.ok(text(root).includes('已開始下載版本 #21'));
+});
 test('切換設備後忽略舊歷史回應', async () => {
   let finish; const delayed = new Promise((resolve) => { finish = resolve; });
   const root = h('div'); await create(async (url, body) => body.action === 'history' ? delayed : payload()).governance(root);

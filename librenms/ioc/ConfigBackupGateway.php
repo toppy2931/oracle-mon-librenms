@@ -6,6 +6,9 @@ namespace Ioc;
 /** 固定特權入口；秘密僅透過 stdin，非阻塞 I/O 有整體期限與輸出上限。 */
 final class ConfigBackupGateway
 {
+    // 下載內容會先包裝成 JSON；2 MiB 原始文字在跳脫後可能明顯膨脹。
+    private const OUTPUT_LIMIT = 16 * 1024 * 1024;
+
     public function __invoke(array $request): array
     {
         $process = null;
@@ -49,7 +52,7 @@ final class ConfigBackupGateway
                 }
                 $output .= stream_get_contents($pipes[1], 8192);
                 $error .= stream_get_contents($pipes[2], 8192);
-                if (strlen($output) > 1048576 || strlen($error) > 65536) {
+                if (strlen($output) > self::OUTPUT_LIMIT || strlen($error) > 65536) {
                     throw new \RuntimeException();
                 }
                 $status = proc_get_status($process);

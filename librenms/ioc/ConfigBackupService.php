@@ -149,6 +149,24 @@ final class ConfigBackupService
             'from_version_id' => $from, 'to_version_id' => $to]);
     }
 
+    /** 原始組態只供受保護的下載端點串流，絕不混入一般 JSON API 回應。 */
+    public function downloadVersion(int $deviceId, int $versionId, string $actor, ?string $level): array
+    {
+        $this->authorize($level);
+        $this->actor($actor);
+        $this->identifier($deviceId);
+        $this->identifier($versionId);
+        $data = $this->rawRequest(['action' => 'download', 'actor' => $actor,
+            'device_id' => $deviceId, 'version_id' => $versionId]);
+        $download = $data['download'] ?? null;
+        if (!is_array($download) || (int) ($download['device_id'] ?? 0) !== $deviceId
+            || (int) ($download['version_id'] ?? 0) !== $versionId || !is_string($download['content'] ?? null)
+            || strlen($download['content']) > 2 * 1024 * 1024) {
+            throw new IocError('備份版本下載資料不完整，請稍後再試');
+        }
+        return ['content' => $download['content'], 'filename' => 'config-backup-device-' . $deviceId . '-version-' . $versionId . '.conf'];
+    }
+
     private function identifier(int $id, bool $allowZero = false): void
     {
         if ($id < ($allowZero ? 0 : 1) || $id > 2147483647) {
@@ -179,6 +197,11 @@ final class ConfigBackupService
 
     private function request(array $request): array
     {
+        return $this->sanitize($this->rawRequest($request));
+    }
+
+    private function rawRequest(array $request): array
+    {
         try {
             $response = ($this->transport)($request);
         } catch (\Throwable $e) {
@@ -205,7 +228,7 @@ final class ConfigBackupService
             ];
             throw new IocError($messages[$code] ?? '設備備份服務無法完成要求，請確認設定與服務狀態');
         }
-        return $this->sanitize($response['data']);
+        return $response['data'];
     }
 
     /** 後端也採欄位白名單；原始設定、例外及工具訊息絕不回傳瀏覽器。 */

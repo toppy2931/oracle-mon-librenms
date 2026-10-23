@@ -40,7 +40,9 @@ Oxidized `interval=0` 停用其初始與週期採集，只有 IOC 排程可觸�
 
 `remove_secret=false` 保存原始採集輸出，讓密碼等敏感設定的變更也會產生雜湊及版本紀錄。原始檔是否足以還原仍取決於設備與模型採集範圍；不得在未實機驗證前承諾完整還原。
 
-Web 不接收原始內容，只收到差異預覽。已知設備密碼、密碼／金鑰／community／token 等敏感行及 PEM 私鑰區塊會遮罩；僅敏感內容變更也會提示。這是盡力遮罩，無法保證涵蓋所有廠牌的未知秘密格式，所以第一版組態內容僅限 admin，仍應以敏感資料處理。設備密碼不回傳，只回 `password_set`；操作紀錄只寫設備 ID、設備數與固定說明，不寫憑證或 API 原始錯誤。
+一般 Web API 不接收原始內容，只收到差異預覽。已知設備密碼、密碼／金鑰／community／token 等敏感行及 PEM 私鑰區塊會遮罩；僅敏感內容變更也會提示。這是盡力遮罩，無法保證涵蓋所有廠牌的未知秘密格式，所以第一版組態內容僅限 admin，仍應以敏感資料處理。設備密碼不回傳，只回 `password_set`；操作紀錄只寫設備 ID、設備數與固定說明，不寫憑證或 API 原始錯誤。
+
+管理者可在「備份版本」按下載，取得指定代數的原始組態附件，供還原或離線稽核使用。下載採獨立 POST、CSRF、handler 權限與同設備版本驗證，檔案不經一般 JSON API 或列表回傳；每次下載都寫入操作稽核。附件可能含設備密碼、金鑰或其他機密設定，應儲存於受管位置並避免以未加密管道傳遞。
 
 差異以設備模型輸出做換行正規化，尚未增加跨廠牌的時間戳忽略規則；不同設備的雜訊需真實樣本後設定。每份預覽約 8 KiB，過長明確標示截斷。備份與稽核目前不自動清除，啟用前應規劃容量、監控剩餘空間與保存政策。
 
@@ -52,7 +54,7 @@ Web 不接收原始內容，只收到差異預覽。已知設備密碼、密碼�
 
 ## 閘道契約
 
-輸入 `{action,actor,settings,device_id}`。動作為 `settings/status/save/test/run/tick/host_key_scan/host_key_confirm`，Web 不可直接暴露 tick。輸入 JSON 上限 256 KiB。排程另可執行 `--tick`，不接受其他命令列參數。
+輸入 `{action,actor,settings,device_id}`。動作為 `settings/status/save/test/run/tick/history/compare/download/host_key_scan/host_key_confirm`，Web 不可直接暴露 tick。輸入 JSON 上限 256 KiB。排程另可執行 `--tick`，不接受其他命令列參數。
 
 `settings`：`{enabled,interval_hours,devices:[{device_id,name,host,model,username,password,port,enabled}]}`。
 
@@ -101,6 +103,7 @@ API 仍使用 POST、CSRF 與 admin 權限：
 
 - `history`：`device_id` 正整數、`offset` 非負整數（預設 0）；`backup.history` 回傳執行紀錄、版本摘要、總筆數及分頁資訊。
 - `compare`：`device_id`、`from_version_id`、`to_version_id` 皆為正整數；兩個版本必須屬於同一設備。`backup.comparison` 回傳來源與目標版本時間、遮罩差異、新增／刪除行數及截斷旗標。
+- `download`：由受保護的 `ioc-backup-download.php` 呼叫；`device_id`、`version_id` 必須屬於同一設備。成功後僅作為附件串流輸出，單一版本上限 2 MiB。
 - `backup.history_devices` 提供可查歷史的設備，`configured` 區分目前仍有設定的設備。
 
 歷史查詢直接讀取本模組 SQLite，不需要備份引擎上線，也不會派送備份。版本列表不包含原始內容。比較從較舊或較新的指定來源往目標方向呈現，敏感內容保持遮罩；過長差異明確提示截斷。正式 VM 的頁面、權限與實際資料驗收仍須部署後進行。

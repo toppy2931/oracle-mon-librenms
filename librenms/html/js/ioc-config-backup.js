@@ -1,6 +1,6 @@
 /* IOC 設備組態備份：設定、執行紀錄與差異，使用純 DOM 建立畫面。 */
 'use strict';
-window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHandle, demo, openSettings }) {
+window.IocConfigBackup = function ({ h, section, table, api, downloadVersion, unavailable, canHandle, demo, openSettings }) {
   const endpoint = '/ioc-backup.php';
   const tokens = new WeakMap();
   const models = [['fortios', 'FortiGate'], ['ios', 'Cisco IOS'], ['junos', 'Juniper Junos'], ['routeros', 'MikroTik RouterOS']];
@@ -386,6 +386,14 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
     const from = h('select', { 'aria-label': '比較起始版本' });
     const to = h('select', { 'aria-label': '比較結束版本' });
     const compare = h('button', { type: 'button', class: 'btn', disabled: true }, '比較兩個版本');
+    const downloadMessage = h('div', { role: 'status', 'aria-live': 'polite' });
+    const download = async (deviceId, version, button) => {
+      if (typeof downloadVersion !== 'function') return;
+      button.disabled = true; downloadMessage.replaceChildren(note('正在下載版本 #' + version.id + '…'));
+      try { await downloadVersion(deviceId, version.id); downloadMessage.replaceChildren(note('已開始下載版本 #' + version.id + '。')); }
+      catch (e) { downloadMessage.replaceChildren(unavailable(e.message)); }
+      finally { button.disabled = false; }
+    };
     const updateSelections = () => {
       for (const select of [from, to]) {
         const selected = select.value;
@@ -414,7 +422,7 @@ window.IocConfigBackup = function ({ h, section, table, api, unavailable, canHan
         records.replaceChildren(note('執行紀錄共 ' + history.total_runs + ' 筆；內容版本共 ' + history.total_versions + ' 代。'),
           total > history.limit ? paginationControls(total, history.limit, historyPage, (page) => fetchPage(page * history.limit)) : h('span', { class: 'note' }, '共 ' + total + ' 筆'),
           section('備份執行紀錄', '內容沒有變更也會保留執行紀錄；每頁 ' + history.limit + ' 筆', history.runs.length ? table(['要求時間', '方式', '結果', '完成時間', '說明'], history.runs.map((r) => [time(r.requested_at), kinds[r.kind] || '備份', statuses[r.status] || '狀態無法辨識', time(r.completed_at), r.message || ''])) : note('此頁沒有執行紀錄。')),
-          section('備份版本', '內容變更才建立新版本；首次成功備份為基準；每頁 ' + history.limit + ' 筆', history.versions.length ? table(['版本', '建立時間'], history.versions.map((v) => ['#' + v.id, time(v.created_at)])) : note('此頁沒有備份版本。')));
+          section('備份版本', '內容變更才建立新版本；首次成功備份為基準；下載檔可能包含設備機密設定，請妥善保管。', history.versions.length ? [table(['版本', '建立時間', '操作'], history.versions.map((v) => ['#' + v.id, time(v.created_at), h('button', { type: 'button', class: 'btn', onclick: async function () { await download(id, v, this); } }, '下載')])), downloadMessage] : note('此頁沒有備份版本。')));
       } catch (e) { if (requestSequence === sequence) records.replaceChildren(unavailable(e.message)); }
     };
     picker.addEventListener('change', () => { versions.clear(); historyPage.page = 0; from.value = ''; to.value = ''; updateSelections(); return fetchPage(0); });

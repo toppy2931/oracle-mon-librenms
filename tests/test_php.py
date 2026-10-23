@@ -162,6 +162,11 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
                 self.assertIn("Auth::check()", src, f.name)
                 self.assertIn("Ioc\\Access::canView($level)", src, f.name)
                 continue
+            if f.name == "ioc-backup-download.php":
+                self.assertIn("ioc_begin(true)", src, f.name)
+                self.assertIn("Access::requireHandler", src, f.name)
+                self.assertIn("Content-Disposition: attachment", src, f.name)
+                continue
             self.assertIn("ioc_begin(", src, "%s 沒有呼叫 ioc_begin()" % f.name)
             self.assertLess(src.index("ioc_begin("), src.index("ioc_json("), "%s 要先檢查才能回資料" % f.name)
 

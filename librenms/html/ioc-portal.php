@@ -321,6 +321,20 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     return data;
   }
 
+  async function downloadBackupVersion(deviceId, versionId) {
+    const res = await fetch('/ioc-backup-download.php', { method: 'POST', credentials: 'same-origin',
+      headers: { 'X-CSRF-Token': CFG.csrf, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ device_id: deviceId, version_id: versionId }) });
+    if (!res.ok) {
+      let data = null; try { data = await res.json(); } catch (e) { /* 安全錯誤訊息交由 HTTP 狀態處理 */ }
+      throw new Error((data && data.error) || ('下載失敗（HTTP ' + res.status + '）'));
+    }
+    const url = URL.createObjectURL(await res.blob());
+    const link = document.createElement('a'); link.href = url;
+    link.download = 'config-backup-device-' + deviceId + '-version-' + versionId + '.conf';
+    document.body.append(link); link.click(); link.remove(); setTimeout(() => URL.revokeObjectURL(url), 0);
+  }
+
   // ── 外框：左側導覽與頂列 ──
   // 導覽與頂列只建立一次，之後只就地更新文字與屬性。整個重建（replaceChildren）會讓鍵盤焦點掉光：
   // 頂列每秒更新一次、導覽每次切頁與每分鐘重新整理都會發生，鍵盤使用者就按不到鈴鐺與導覽按鈕。
@@ -892,7 +906,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
 
   const backupUnavailable = (box) => box.replaceChildren(unavailable('設備備份介面尚未載入，請重新整理或聯絡管理者'));
   const backupUi = typeof window.IocConfigBackup === 'function'
-    ? window.IocConfigBackup({ h, section, table, api, unavailable, canHandle: CAN_HANDLE, demo: CFG.demo, openSettings: () => setTab('settings') })
+    ? window.IocConfigBackup({ h, section, table, api, downloadVersion: downloadBackupVersion, unavailable, canHandle: CAN_HANDLE, demo: CFG.demo, openSettings: () => setTab('settings') })
     : { settings: backupUnavailable, governance: backupUnavailable };
   let backupBox = null;
   let settingsSeq = 0;   // 連續觸發載入時，只採用最後一次的回應
