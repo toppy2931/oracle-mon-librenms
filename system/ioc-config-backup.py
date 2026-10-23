@@ -202,8 +202,7 @@ begin
       result['prompt_detected'] = !terminator.nil?
       result['prompt_signature'] = {
         'ha_role_format' => candidate.match?(/\([^)]{1,32}\)/),
-        'terminator' => terminator || 'unknown',
-        'shape' => candidate.gsub(/[[:alnum:]_.-]/, 'x').gsub(/\([^)]{1,32}\)/, '(role)').byteslice(0, 96)
+        'terminator' => terminator || 'unknown'
       }
       result['stage'] = result['prompt_detected'] ? 'complete' : 'prompt_not_detected'
     end
@@ -259,11 +258,10 @@ puts JSON.generate(result)
         signature = data.get('prompt_signature')
         if isinstance(signature, dict) and result['shell']:
             term = signature.get('terminator')
-            shape = signature.get('shape')
-            if term in {'#', '$', '>', 'unknown'} and isinstance(shape, str) and len(shape) <= 96:
+            if term in {'#', '$', '>', 'unknown'}:
                 result['prompt'] = {'detected': data.get('prompt_detected') is True,
                                     'ha_role_format': signature.get('ha_role_format') is True,
-                                    'terminator': term, 'shape': re.sub(r'[^x() role#>$~.\\- ]', '?', shape)}
+                                    'terminator': term}
         return result
 
 

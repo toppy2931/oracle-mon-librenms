@@ -20,6 +20,18 @@ backup = load_module('ioc_config_backup', 'system/ioc-config-backup.py')
 
 
 class PromptProbeScriptTests(unittest.TestCase):
+    def test_probe_sanitizes_prompt_signature_without_error_or_hostname_leak(self):
+        result = backup.PromptProbe._safe({
+            'transport': True, 'pty': True, 'shell': True, 'stage': 'complete',
+            'prompt_detected': True,
+            'prompt_signature': {'terminator': '#', 'ha_role_format': True,
+                                 'shape': 'x(role) #\x1bsecret'},
+        })
+        self.assertEqual('complete', result['stage'])
+        self.assertEqual('#', result['prompt']['terminator'])
+        self.assertNotIn('shape', result['prompt'])
+        self.assertNotIn('secret', str(result))
+
     @unittest.skipUnless(shutil.which('ruby'), 'Ruby runtime unavailable')
     def test_probe_returns_after_open_shell_and_waits_for_prompt_after_banner(self):
         # 模擬不會自行關閉的互動 shell；診斷仍須在提示字元出現後返回。
