@@ -204,6 +204,36 @@ test('FortiGate REST fallback can run while Oxidized is unavailable', async () =
   assert.equal(walk(root).some((e) => e.tag === 'button' && text(e) === '\u8a3a\u65b7 SSH \u9023\u7dda'), false);
 });
 
+test('PAN-OS 只顯示已驗證 XML API，API Key 不回填且不需要 SSH 指紋', async () => {
+  const calls = []; const p = payload();
+  p.backup.adapters = [
+    { id: 'oxidized_cli', title: 'Oxidized SSH', models: ['ios', 'fortios'], credential: 'ssh', requires_host_key: true, requires_engine: true, can_diagnose: true },
+    { id: 'panos_xml_api', title: 'Palo Alto PAN-OS XML API', models: ['panos'], credential: 'api_token', credential_label: 'PAN-OS XML API Key', requires_host_key: false, requires_engine: false, can_diagnose: false },
+  ];
+  p.backup.settings.devices[0] = { device_id: 7, name: 'PAN-OS', host: '192.0.2.1', model: 'panos', username: '', port: 22, enabled: true, api_token_set: true, backup_backend: 'panos_xml_api' };
+  const root = h('div'); await create(async (url, body) => { calls.push(body); return p; }).settings(root);
+  const backend = findLabel(root, '備份方式');
+  assert.deepEqual(walk(backend).filter((e) => e.tag === 'option').map((e) => e.value), ['panos_xml_api']);
+  assert.ok(!text(root).includes('掃描 SSH 主機指紋'));
+  const fields = walk(root).filter((e) => e.type === 'password');
+  const apiKey = fields.at(-1); assert.equal(apiKey.value, ''); assert.equal(apiKey.required, false);
+  assert.ok(apiKey.placeholder.includes('已設定'));
+  apiKey.value = 'panos-key-only-for-request';
+  await walk(root).find((e) => e.tag === 'form').onsubmit({ preventDefault() {} });
+  const saved = calls.find((call) => call.action === 'save');
+  assert.equal(saved.settings.devices[0].backup_backend, 'panos_xml_api');
+  assert.equal(saved.settings.devices[0].api_token, 'panos-key-only-for-request');
+  assert.ok(!text(root).includes('panos-key-only-for-request'));
+});
+
+test('未驗證的 Extreme 與 AOS-CX 適配器不會出現在備份方式選單', async () => {
+  const p = payload();
+  p.backup.adapters = [{ id: 'oxidized_cli', title: 'Oxidized SSH', models: ['ios', 'fortios'], credential: 'ssh', requires_host_key: true, requires_engine: true, can_diagnose: true }];
+  const root = h('div'); await create(async () => p).settings(root);
+  assert.ok(!text(root).includes('Extreme OpenAPI'));
+  assert.ok(!text(root).includes('AOS-CX API'));
+});
+
 test('已排入的工作不顯示成備份成功；差異以文字節點呈現', async () => {
   const p = payload(); p.backup.runs = [{ device_name: 'fw', kind: 'test', status: 'queued', requested_at: '2026-10-22 01:00:00' }];
   p.backup.changes = [{ device_name: 'fw', detected_at: '2026-10-22 01:00:00', added: 1, removed: 1, diff: '+ <script>alert(1)</script>' }];

@@ -2,7 +2,15 @@
 
 ## 範圍與信任邊界
 
-本模組在 IOC「組態備份」專屬管理頁集中管理設備、帳號、固定間隔排程、備份紀錄與版本比較；一般設定頁只保留入口。第一版使用獨立受管 Oxidized，不修改既有 LibreNMS、Oxidized 或 RANCID 設定。支援 ios、fortios、junos、routeros，僅 SSH 22；每份政策最多 50 台，間隔 1 至 168 小時。實際設備相容性必須在隔離測試設備驗收。
+本模組在 IOC「組態備份」專屬管理頁集中管理設備、帳號、固定間隔排程、備份紀錄與版本比較；一般設定頁只保留入口。它以「共用治理核心＋受控廠牌適配器」採集組態，不修改既有 LibreNMS、Oxidized 或 RANCID 設定。每份政策最多 50 台，間隔 1 至 168 小時。實際設備相容性必須在隔離測試設備驗收。
+
+目前已驗證並開放的適配器如下：
+
+- `oxidized_cli`：Cisco IOS、FortiGate、Juniper Junos、MikroTik RouterOS；使用 SSH 22、帳密與已確認的 SSH 主機金鑰。
+- `fortigate_api`：FortiGate；使用專用 REST API Token 與 HTTPS。
+- `panos_xml_api`：Palo Alto PAN-OS；使用專用唯讀 XML API Key，以 POST `/api/` 匯出完整設定 XML。
+
+採集方式由管理者明確選擇，系統**不會**在 API 與 SSH 間自動切換。Extreme SwitchEngine／EXOS 與 Aruba AOS-CX 適配器僅登錄為未驗證能力，暫不會出現在管理畫面；Extreme VOSS／Fabric Engine、HPE ProCurve／ArubaOS-Switch 則待取得實機型號、韌體及唯讀帳號樣本後，才新增對應的 Oxidized 模型。
 
 設定頁不直接連線設備。PHP 經 root 白名單 helper 降權至 `oracle-backup`，與 Oxidized、排程使用相同專用帳號。所有請求走標準輸入 JSON，不以命令列傳遞密碼。
 
@@ -24,10 +32,10 @@
 
 ## 狀態與排程
 
-1. `save` 驗證政策，交易寫入資料庫並產生受管設定；回傳 `pending_apply`。**儲存不是生效。** 寫檔中斷時資料庫交易回復，下一次 tick 由資料庫重建檔案再套用。每台預設採 `oxidized`；僅 FortiGate 可由管理者明確改為 `fortigate_api` 備援，系統不會因 SSH 失敗自動切換協定。
+1. `save` 驗證政策，交易寫入資料庫並產生受管設定；回傳 `pending_apply`。**儲存不是生效。** 寫檔中斷時資料庫交易回復，下一次 tick 由資料庫重建檔案再套用。新設定預設採 `oxidized_cli`；FortiGate 可明確選 `fortigate_api`，PAN-OS 可明確選 `panos_xml_api`。既有的 `oxidized` 設定讀取時會安全正規化為 `oxidized_cli`。
 2. `tick` 檢查本機 Oxidized REST，重新載入 SSH 後端的設備來源並確認設備清單，再標示 `ready/applied`。未安裝、未啟動或回應不相容都顯示 `unavailable`，不宣稱 SSH 備份已備妥。
-3. `test`、`run` 只建立 `queued` 工作，不接受尚未儲存的帳密。Oxidized SSH 工作必須先有背景程序確認的已套用設定；明確選用 REST API 的 FortiGate 工作不依賴 Oxidized。
-4. `tick` 將等待中的工作送入對應後端：Oxidized 工作送至本機引擎，FortiGate REST API 工作由 `oracle-backup` 直接安全擷取。送出前持久化 `dispatched_at` 與前次完成時間；即使回應遺失，也不自動重送，避免同設備重複觸發。
+3. `test`、`run` 只建立 `queued` 工作，不接受尚未儲存的帳密。Oxidized SSH 工作必須先有背景程序確認的已套用設定；明確選用原生 API 的 FortiGate 或 PAN-OS 工作不依賴 Oxidized。
+4. `tick` 將等待中的工作送入對應後端：Oxidized 工作送至本機引擎，原生 API 工作由 `oracle-backup` 直接安全擷取。送出前持久化 `dispatched_at` 與前次完成時間；即使回應遺失，也不自動重送，避免同設備重複觸發。
 5. 後續 tick 必須取得新的 `last.start/end/status`，且開始時間不早於 `dispatched_at`，才接受此次採集。`/node/next` 的 `ok` 只代表排隊。
 6. `success` 結果還需取得非空、小於 2 MiB 且不含 FortiGate `--More--` 分頁提示的內容才能建立版本；失敗、空內容或分頁殘留都不覆蓋成功版本。相同內容為 `unchanged`，仍保留工作紀錄。
 7. 工作等待超過 15 分鐘為 `timeout`；Oxidized 本身 `timelimit=300`、`retries=0`。未取得成功證據不視為成功。
@@ -60,7 +68,7 @@ Oxidized `interval=0` 停用其初始與週期採集，只有 IOC 排程可觸�
 
 `settings`：`{enabled,interval_hours,devices:[{device_id,name,host,model,username,password,backup_backend,api_token,port,enabled}]}`。
 
-`password` 空白或省略保留相同 device_id 已存密碼；`api_token` 空白或省略保留同設備 Token。`backup_backend` 預設 `oxidized`；`fortigate_api` 僅接受 `fortios`，且首次需填 Token。REST 備援固定連至 `https://<受管設備>:443/api/v2/monitor/system/config/backup?scope=global`，先 POST、僅遇 404/405 改試一次 GET；禁用 Proxy、Redirect 與略過 TLS 驗證。自簽憑證須由維護人員將 CA 匯入 VM 信任鏈，不能以關閉驗證處理。FortiGate 應建立最小權限的專用 API 管理者並以 `trusthost` 限制 monitor VM 來源 IP。
+`password` 空白或省略保留相同 device_id 已存密碼；`api_token` 空白或省略保留同設備 Token／Key。`backup_backend` 預設 `oxidized_cli`；`fortigate_api` 僅接受 `fortios`，且首次需填 Token。`panos_xml_api` 僅接受 `panos`，且首次需填 PAN-OS XML API Key。FortiGate REST 固定連至 `https://<受管設備>:443/api/v2/monitor/system/config/backup?scope=global`，先 POST、僅遇 404/405 改試一次 GET。PAN-OS XML API 固定以 HTTPS POST 連至 `https://<受管設備>:443/api/`，請求本體為 `type=export&category=configuration&key=...`；Key 不置於 URL、前端回應、稽核或錯誤文字。兩者均禁用 Proxy、Redirect 與略過 TLS 驗證。自簽憑證須由維護人員將 CA 匯入 VM 信任鏈，不能以關閉驗證處理。每個 API 帳號／Key 都必須採最小唯讀權限並以來源 IP 限制保護。
 
 `password` 首次 Oxidized 設定必填。username 上限 128 字元、password 512 字元、actor 255 字元。來源為 Oxidized CSV，輸入不得含控制字元、`|`、Ruby 插值起始 `#{`。主機支援 IP 或安全 DNS 名稱；拒絕直接輸入 loopback、link-local、multicast、unspecified。DNS 解析及 SSH 連線仍屬可信管理端的設備納管權限，不是任意多租戶 SSRF 隔離措施。
 
@@ -100,6 +108,8 @@ Oxidized `interval=0` 停用其初始與週期採集，只有 IOC 排程可觸�
 - [Oxidized CLI](https://github.com/ytti/oxidized/blob/master/lib/oxidized/cli.rb)：home-dir，沒有 one-shot 參數。
 - [Oxidized-web API](https://github.com/ytti/oxidized-web/blob/master/lib/oxidized/web/webapp.rb)：reload、next、nodes、fetch；String 以 lines 陣列輸出 JSON，worker 會串接回原內容。
 - [Oxidized output](https://github.com/ytti/oxidized/blob/master/docs/Outputs.md)：file 儲存與 clean_obsolete_nodes 風險；此模組明確關閉清理。
+- [Palo Alto Export Files API](https://docs.paloaltonetworks.com/ngfw/api/pan-os-xml-api-request-types-and-actions/export-files-api)：以 `type=export` 與 `category=configuration` 匯出設定檔。
+- [PAN-OS XML API request structure](https://docs.paloaltonetworks.com/ngfw/api/getting-started/structure-of-a-pan-os-xml-api-request)：XML API 可使用 POST，API Key 為請求參數；本模組固定以 POST 本體傳遞，避免將 Key 放入 URL。
 
 ## 專屬管理頁與歷史查詢
 

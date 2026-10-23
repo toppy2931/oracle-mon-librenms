@@ -19,11 +19,60 @@ import time
 from datetime import datetime, timezone
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, HTTPSHandler, build_opener, ProxyHandler, HTTPRedirectHandler
-from urllib.parse import quote
+from urllib.parse import quote, urlencode
+from xml.etree import ElementTree
 
 STATE_DIR = '/var/lib/oracle-mon/config-backup'
 ENGINE_URL = 'http://127.0.0.1:8879'
-MODELS = {'ios', 'fortios', 'junos', 'routeros'}
+# 適配器登錄是所有備份後端的唯一能力描述來源。後端名稱維持既有
+# `backup_backend` 值，以免已儲存的設備設定需要資料遷移；`id` 則用於
+# 對外呈現及未來擴充。
+#
+# 未驗證的 API 適配器會保留在登錄中，但 available=False，前端及驗證
+# 流程都不能選用它們。這讓產品線能力可被明確追蹤，而不會猜測設備
+# 端點或把未完成的實作暴露給管理者。
+ADAPTER_REGISTRY = {
+    'oxidized_cli': {
+        'id': 'oxidized_cli', 'label': 'Oxidized SSH',
+        'models': ('ios', 'fortios', 'junos', 'routeros'),
+        'credential_kind': 'ssh_password', 'requires_known_host': True,
+        'depends_on_oxidized': True, 'supports_diagnose': True,
+        'available': True,
+    },
+    'fortigate_api': {
+        'id': 'fortigate_api', 'label': 'FortiGate REST API',
+        'models': ('fortios',), 'credential_kind': 'api_token',
+        'requires_known_host': False, 'depends_on_oxidized': False,
+        'supports_diagnose': False, 'available': True,
+    },
+    # PAN-OS XML API 已由專用適配器處理完整組態匯出；使用既有 api_token
+    # 私密欄位保存 API Key，不回傳至前端。
+    'panos_xml_api': {
+        'id': 'panos_xml_api', 'label': 'Palo Alto PAN-OS XML API',
+        'models': ('panos',), 'credential_kind': 'api_token',
+        'requires_known_host': False, 'depends_on_oxidized': False,
+        'supports_diagnose': False, 'available': True,
+    },
+    # 下列產品線的完整設定 API 路徑會隨 OS 與韌體改變。先登錄能力，
+    # 待實機驗收後才將 available 改為 True。
+    'extreme_api': {
+        'id': 'extreme_api', 'label': 'Extreme SwitchEngine API',
+        'models': ('extreme_exos',), 'credential_kind': 'api_token',
+        'requires_known_host': False, 'depends_on_oxidized': False,
+        'supports_diagnose': False, 'available': False,
+    },
+    'aoscx_api': {
+        'id': 'aoscx_api', 'label': 'Aruba AOS-CX API',
+        'models': ('aoscx',), 'credential_kind': 'api_token',
+        'requires_known_host': False, 'depends_on_oxidized': False,
+        'supports_diagnose': False, 'available': False,
+    },
+}
+
+# 現行已驗收、可由 Oxidized 讀取的模型。未來新增 Extreme VOSS／
+# Fabric Engine、HPE ProCurve／ArubaOS-Switch 前，必須先建立實機樣本。
+MODELS = {model for adapter in ADAPTER_REGISTRY.values() if adapter['available']
+          for model in adapter['models']}
 # FortiGate 的 `show` 會輸出分頁提示；必須使用可回應提示的互動式 shell，
 # 不能使用一次性 SSH exec channel，否則只會取得第一頁。
 ENGINE_MODELS = {'fortios': 'iocfortios'}
@@ -32,7 +81,42 @@ ENGINE_CONFIG_REVISION = 6
 LIMIT = 2 * 1024 * 1024
 HISTORY_PAGE_SIZE = 10
 DOWNLOAD_LIMIT = 2 * 1024 * 1024
-API_BACKENDS = {'oxidized', 'fortigate_api'}
+# 舊版設定使用 `oxidized`；只在讀取時相容，所有新儲存值一律採用
+# `oxidized_cli`，避免前後端對後端名稱有兩套語意。
+BACKEND_ALIASES = {'oxidized': 'oxidized_cli'}
+API_BACKENDS = set(ADAPTER_REGISTRY) | set(BACKEND_ALIASES)
+
+
+def canonical_backend(backend):
+    if not isinstance(backend, str):
+        raise BackupError('validation', '不支援此備份方式')
+    return BACKEND_ALIASES.get(backend, backend)
+
+
+def adapter_for_backend(backend):
+    """Return the registered adapter or raise a safe validation error."""
+    adapter = ADAPTER_REGISTRY.get(canonical_backend(backend))
+    if not isinstance(adapter, dict):
+        raise BackupError('validation', '不支援此備份方式')
+    return adapter
+
+
+def public_adapters():
+    """Return the non-sensitive adapter capability contract for the portal."""
+    fields = ('id', 'label', 'models', 'credential_kind', 'requires_known_host',
+              'depends_on_oxidized', 'supports_diagnose', 'available')
+    return [{field: adapter[field] for field in fields}
+            for adapter in ADAPTER_REGISTRY.values() if adapter['available'] is True]
+
+
+def adapter_for_device(device):
+    if not isinstance(device, dict):
+        raise BackupError('validation', '設備資料格式錯誤')
+    return adapter_for_backend(device.get('backup_backend', 'oxidized_cli'))
+
+
+def uses_oxidized(device):
+    return adapter_for_device(device)['depends_on_oxidized'] is True
 
 
 class BackupError(Exception):
@@ -210,6 +294,63 @@ class FortiGateApiBackup:
             raise BackupError('api_request_failed', 'FortiGate REST API 備份要求失敗，請確認 Token 權限與 TLS 信任') from None
 
 
+class PanOsXmlApiBackup:
+    """明確選用的 PAN-OS XML API 後端；只匯出完整組態且永遠驗證 TLS。"""
+
+    _TIMEOUT = 15
+
+    @staticmethod
+    def _configuration(raw, content_type):
+        """驗證 PAN-OS 匯出內容，拒絕錯誤回應、分頁殘留與不完整 XML。"""
+        if len(raw) > LIMIT:
+            raise BackupError('invalid_backup', 'PAN-OS XML API 回傳內容超過 2 MiB 上限')
+        if content_type in {'text/html', 'application/json'}:
+            raise BackupError('invalid_backup', 'PAN-OS XML API 未回傳設定檔內容')
+        try:
+            content = raw.decode('utf-8')
+        except UnicodeDecodeError:
+            raise BackupError('invalid_backup', 'PAN-OS XML API 回傳內容不是 UTF-8 XML 設定檔') from None
+        if not content.strip() or '\x00' in content or re.search(r'--more--', content, re.IGNORECASE):
+            raise BackupError('invalid_backup', 'PAN-OS XML API 回傳內容不完整或格式不正確')
+        # 禁止 DTD／實體宣告，避免解析器處理設備回傳的非設定 XML。
+        if re.search(r'<!\s*(?:doctype|entity)\b', content, re.IGNORECASE):
+            raise BackupError('invalid_backup', 'PAN-OS XML API 回傳內容不是安全的設定 XML')
+        try:
+            root = ElementTree.fromstring(content)
+        except ElementTree.ParseError:
+            raise BackupError('invalid_backup', 'PAN-OS XML API 回傳內容不是完整 XML 設定檔') from None
+        tag = root.tag.rsplit('}', 1)[-1] if isinstance(root.tag, str) else ''
+        if tag != 'config' or root.get('status') == 'error':
+            raise BackupError('invalid_backup', 'PAN-OS XML API 未回傳完整設定檔')
+        return content
+
+    def fetch(self, device):
+        """透過 PAN-OS XML API 匯出 running configuration。"""
+        token = device.get('api_token')
+        if not isinstance(token, str) or not token:
+            raise BackupError('api_key_required', '尚未設定 PAN-OS XML API Key')
+        host = device['host']
+        address = '[' + host + ']' if ':' in host else host
+        url = 'https://' + address + ':443/api/'
+        opener = build_opener(ProxyHandler({}), NoRedirect(), HTTPSHandler(context=ssl.create_default_context()))
+        body = urlencode({'type': 'export', 'category': 'configuration', 'key': token}).encode('ascii')
+        request = Request(url, data=body, method='POST', headers={
+            'Content-Type': 'application/x-www-form-urlencoded',
+            'Accept': 'application/xml, text/xml, application/octet-stream',
+        })
+        try:
+            with opener.open(request, timeout=self._TIMEOUT) as response:
+                raw = response.read(LIMIT + 1)
+                content_type = response.headers.get_content_type()
+            return self._configuration(raw, content_type)
+        except BackupError:
+            raise
+        except HTTPError:
+            raise BackupError('api_request_failed', 'PAN-OS XML API 拒絕匯出要求，請確認 API Key 權限與 TLS 信任') from None
+        except (OSError, URLError, ssl.SSLError):
+            raise BackupError('api_request_failed', '無法安全連線 PAN-OS XML API，請確認 TLS 憑證與網路') from None
+
+
 class Engine:
     def __init__(self):
         self.deadline = time.monotonic() + 4
@@ -260,7 +401,12 @@ class Worker:
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.engine = engine or Engine()
         self.probe_client = probe or PromptProbe()
-        self.api_backup = api_backup or FortiGateApiBackup()
+        # api_backup 保留為相容的 FortiGate 測試注入點；實際派送一律由
+        # adapter key 取用，避免不同原生 API 共用錯誤的採集器。
+        self.api_backups = {
+            'fortigate_api': api_backup or FortiGateApiBackup(),
+            'panos_xml_api': PanOsXmlApiBackup(),
+        }
         db_path = self.root / 'state.sqlite3'
         secure_path(db_path)
         self.db = sqlite3.connect(db_path, timeout=3, isolation_level=None)
@@ -321,10 +467,12 @@ class Worker:
     def public_settings(self):
         settings = self.settings()
         trusted = self.trusted_hosts()
-        settings['devices'] = [{**{k: v for k, v in d.items() if k not in {'password', 'api_token'}},
+        settings['devices'] = [{**{k: v for k, v in d.items() if k not in {'password', 'api_token', 'backup_backend'}},
+                                'backup_backend': canonical_backend(d.get('backup_backend', 'oxidized_cli')),
                                 'password_set': bool(d.get('password')),
                                 'api_token_set': bool(d.get('api_token')),
                                 'host_key_trusted': d['host'] in trusted} for d in settings['devices']]
+        settings['adapters'] = public_adapters()
         return settings
 
     def validate(self, submitted):
@@ -361,11 +509,16 @@ class Worker:
             model = item.get('model')
             if not isinstance(model, str) or model not in MODELS:
                 raise BackupError('validation', '尚未支援此設備類型')
-            backend = item.get('backup_backend', previous.get(ident, {}).get('backup_backend', 'oxidized'))
-            if backend not in API_BACKENDS or (backend == 'fortigate_api' and model != 'fortios'):
-                raise BackupError('validation', 'FortiGate REST API 僅支援 FortiGate 設備')
+            backend = canonical_backend(item.get('backup_backend', previous.get(ident, {}).get('backup_backend', 'oxidized_cli')))
+            adapter = adapter_for_backend(backend)
+            if not adapter['available']:
+                raise BackupError('validation', '此備份方式尚未完成實機驗證，暫不可使用')
+            if model not in adapter['models']:
+                raise BackupError('validation', adapter['label'] + '不支援此設備類型')
+            # API 後端固定使用各自的 HTTPS 預設連接埠；保留既有 port=22
+            # 儲存欄位以維持舊資料與 SSH 模式相容，且不讓使用者自訂連接埠。
             if type(item.get('port', 22)) is not int or item.get('port', 22) != 22:
-                raise BackupError('validation', '第一版僅支援 SSH 連接埠 22')
+                raise BackupError('validation', '目前不支援自訂備份連接埠')
             if type(item.get('enabled')) is not bool:
                 raise BackupError('validation', '請指定設備是否參與備份')
             password = item.get('password', '')
@@ -374,15 +527,20 @@ class Worker:
             token = item.get('api_token', '')
             if token == '':
                 token = previous.get(ident, {}).get('api_token', '')
-            if backend == 'oxidized' and not password:
+            if adapter['credential_kind'] == 'ssh_password' and not password:
                 raise BackupError('password_required', '首次設定 Oxidized SSH 備份時請填寫備份帳號密碼')
-            if backend == 'fortigate_api' and not token:
-                raise BackupError('api_token_required', '首次設定 FortiGate REST API 時請填寫 API Token')
-            password = safe_text(password, '設備密碼', 512, allow_empty=backend == 'fortigate_api')
-            token = safe_text(token, 'REST API Token', 1024, allow_empty=backend == 'oxidized')
+            if adapter['credential_kind'] == 'api_token' and not token:
+                if backend == 'panos_xml_api':
+                    raise BackupError('api_key_required', '首次設定 PAN-OS XML API 時請填寫 API Key')
+                raise BackupError('api_token_required', '首次設定原生 API 備份時請填寫 API Token')
+            password = safe_text(password, '設備密碼', 512,
+                                 allow_empty=adapter['credential_kind'] != 'ssh_password')
+            token = safe_text(token, 'REST API Token', 1024,
+                              allow_empty=adapter['credential_kind'] != 'api_token')
             result.append({'device_id': ident, 'name': safe_text(item.get('name'), '設備名稱', 128),
                            'host': host, 'model': model,
-                           'username': safe_text(item.get('username'), '設備帳號', 128, allow_empty=backend == 'fortigate_api'),
+                           'username': safe_text(item.get('username'), '設備帳號', 128,
+                                                 allow_empty=adapter['credential_kind'] != 'ssh_password'),
                            'password': password, 'api_token': token, 'backup_backend': backend,
                            'port': 22, 'enabled': item['enabled']})
         return {'enabled': submitted['enabled'], 'interval_hours': interval, 'devices': result}
@@ -440,7 +598,7 @@ end
 """)
         lines = ['|'.join([d['host'], d['host'], ENGINE_MODELS.get(d['model'], d['model']), d['username'], d['password'],
                            'true' if d['model'] == 'fortios' else 'false'])
-                 for d in self.settings()['devices'] if d['enabled'] and d.get('backup_backend', 'oxidized') == 'oxidized']
+                 for d in self.settings()['devices'] if d['enabled'] and uses_oxidized(d)]
         self.write_private(home / 'router.db', '\n'.join(lines) + ('\n' if lines else ''))
 
     def applied_engine(self, retry=True):
@@ -455,7 +613,7 @@ end
             nodes = self.engine.request('/nodes.json')
             if not isinstance(nodes, list) or any(not isinstance(n, dict) or not isinstance(n.get('name'), str) or (n.get('last') is not None and not isinstance(n.get('last'), dict)) for n in nodes):
                 raise BackupError('invalid_response', '備份工具節點回應格式不相容')
-            expected = {d['host'] for d in settings['devices'] if d['enabled'] and d.get('backup_backend', 'oxidized') == 'oxidized'}
+            expected = {d['host'] for d in settings['devices'] if d['enabled'] and uses_oxidized(d)}
             actual = {n.get('name') for n in nodes if isinstance(n, dict)}
             if self.get_meta('applied_revision') != revision or actual != expected:
                 if not retry:
@@ -463,7 +621,7 @@ end
                     return out, nodes
                 self.engine.request('/reload.json')
                 nodes = self.engine.request('/nodes.json')
-                expected = {d['host'] for d in settings['devices'] if d['enabled'] and d.get('backup_backend', 'oxidized') == 'oxidized'}
+                expected = {d['host'] for d in settings['devices'] if d['enabled'] and uses_oxidized(d)}
                 if not isinstance(nodes, list) or {n.get('name') for n in nodes if isinstance(n, dict)} != expected:
                     out.update(state='pending_apply', message='設備清單尚未套用，請檢查受管備份服務')
                     return out, []
@@ -508,8 +666,15 @@ end
         fingerprint = 'SHA256:' + base64.b64encode(hashlib.sha256(blob).digest()).decode('ascii').rstrip('=')
         return {'host': expected_host, 'algorithm': parts[1], 'key': parts[2], 'fingerprint': fingerprint}
 
-    def scan_host_key(self, ident, actor):
+    def configured_ssh_device(self, ident):
+        """Return a configured device only when its selected adapter uses SSH."""
         device = self.configured_device(ident)
+        if adapter_for_device(device)['requires_known_host'] is not True:
+            raise BackupError('validation', '此備份方式不使用 SSH 主機金鑰驗證')
+        return device
+
+    def scan_host_key(self, ident, actor):
+        device = self.configured_ssh_device(ident)
         try:
             completed = subprocess.run(
                 ['/usr/bin/ssh-keyscan', '-T', '4', '-t', 'ed25519', '--', device['host']],
@@ -533,7 +698,7 @@ end
         }
 
     def confirm_host_key(self, ident, token, fingerprint, actor):
-        device = self.configured_device(ident)
+        device = self.configured_ssh_device(ident)
         if not isinstance(token, str) or len(token) > 128 or not isinstance(fingerprint, str) or len(fingerprint) > 128:
             raise BackupError('validation', 'SSH 身分指紋確認資料格式不正確')
         candidates = self.get_meta('host_key_candidates', {})
@@ -575,7 +740,7 @@ end
                 'fingerprint': verified['fingerprint'], 'trusted': True, 'already_trusted': already_trusted}
 
     def diagnose(self, ident, actor):
-        device = self.configured_device(ident)
+        device = self.configured_ssh_device(ident)
         known_hosts = self.root / '.ssh' / 'known_hosts'
         if device['host'] not in self.trusted_hosts():
             outcome = {'device_id': device['device_id'], 'outcome': 'failed', 'stage': 'host_key_untrusted',
@@ -614,11 +779,16 @@ end
                             (utcnow(), last.get('end'), '已送交備份工具，等待完成證據', run['id']))
             if claimed.rowcount != 1:
                 continue
-            if device.get('backup_backend', 'oxidized') == 'fortigate_api':
-                try:
-                    status, version, message = self.store_version(run, self.api_backup.fetch(device))
-                except BackupError as error:
-                    status, version, message = 'failed', None, error.message
+            backend = canonical_backend(device.get('backup_backend', 'oxidized_cli'))
+            if not uses_oxidized(device):
+                client = self.api_backups.get(backend)
+                if client is None:
+                    status, version, message = 'failed', None, '此原生 API 備份方式尚未安裝'
+                else:
+                    try:
+                        status, version, message = self.store_version(run, client.fetch(device))
+                    except BackupError as error:
+                        status, version, message = 'failed', None, error.message
                 self.db.execute('UPDATE runs SET status=?,completed_at=?,message=?,version_id=? WHERE id=?',
                                 (status, utcnow(), message, version, run['id']))
                 continue
@@ -818,7 +988,7 @@ end
                 if type(ident) is not int:
                     raise BackupError('validation', '請指定設備識別碼')
                 device = self.configured_device(ident)
-                if device.get('backup_backend', 'oxidized') == 'oxidized' and not engine['applied']:
+                if uses_oxidized(device) and not engine['applied']:
                     raise BackupError('unavailable', engine['message'])
                 self.queue(ident, 'test' if action == 'test' else 'manual')
                 self.audit(actor, action, '設備識別碼：' + str(ident))
@@ -839,7 +1009,7 @@ end
                 if self.settings()['enabled']:
                     count = 0
                     for device in self.settings()['devices']:
-                        if not device['enabled'] or (device.get('backup_backend', 'oxidized') == 'oxidized' and not engine['applied']):
+                        if not device['enabled'] or (uses_oxidized(device) and not engine['applied']):
                             continue
                         recent = self.db.execute('SELECT * FROM runs WHERE device_id=? ORDER BY id DESC LIMIT 1', (device['device_id'],)).fetchone()
                         if recent and (recent['status'] == 'queued' or (datetime.now(timezone.utc) - timestamp(recent['requested_at'])).total_seconds() < self.settings()['interval_hours'] * 3600):
@@ -849,7 +1019,7 @@ end
                         count += 1
                         if count >= 5:
                             break
-                if engine['applied'] or any(d.get('backup_backend', 'oxidized') == 'fortigate_api' and d.get('enabled') for d in self.settings()['devices']):
+                if engine['applied'] or any(not uses_oxidized(d) and d.get('enabled') for d in self.settings()['devices']):
                     self.dispatch_pending(nodes)
             result = self.response(engine)
             if action == 'history':

@@ -192,6 +192,63 @@ class BackupTests(unittest.TestCase):
         with self.assertRaises(backup.BackupError) as error: self.save()
         self.assertEqual('api_token_required', error.exception.code)
 
+    def test_panos_xml_api_exports_complete_config_with_post_body_key(self):
+        class Headers:
+            def get_content_type(self): return 'application/xml'
+        class Response:
+            headers = Headers()
+            def read(self, _limit): return b'<?xml version="1.0"?><config version="10.2.0"><devices/></config>'
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+        calls = []
+        class Opener:
+            def open(self, request, timeout):
+                calls.append((request.get_method(), request.full_url, request.data, timeout))
+                return Response()
+        with patch.object(backup, 'build_opener', return_value=Opener()):
+            content = backup.PanOsXmlApiBackup().fetch({'host': '192.0.2.5', 'api_token': 'pan-key-secret'})
+        self.assertIn('<config version="10.2.0">', content)
+        self.assertEqual([('POST', 'https://192.0.2.5:443/api/',
+                          b'type=export&category=configuration&key=pan-key-secret', 15)], calls)
+        self.assertNotIn('pan-key-secret', calls[0][1])
+
+    def test_panos_xml_api_rejects_error_or_incomplete_xml_without_key_leak(self):
+        class Headers:
+            def get_content_type(self): return 'application/xml'
+        class Response:
+            headers = Headers()
+            def __init__(self, content): self.content = content
+            def read(self, _limit): return self.content
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+        for body in [
+            b'<response status="error"><msg>pan-key-secret</msg></response>',
+            b'<!DOCTYPE config [<!ENTITY xxe "blocked">]><config>&xxe;</config>',
+            b'<config><devices></config>',
+            b'<config>--More--</config>',
+        ]:
+            with self.subTest(body=body):
+                class Opener:
+                    def open(self, _request, timeout): return Response(body)
+                with patch.object(backup, 'build_opener', return_value=Opener()):
+                    with self.assertRaises(backup.BackupError) as error:
+                        backup.PanOsXmlApiBackup().fetch({'host': '192.0.2.5', 'api_token': 'pan-key-secret'})
+                self.assertEqual('invalid_backup', error.exception.code)
+                self.assertNotIn('pan-key-secret', error.exception.message)
+
+    def test_panos_xml_api_requires_key_and_redacts_transport_errors(self):
+        with self.assertRaises(backup.BackupError) as missing:
+            backup.PanOsXmlApiBackup().fetch({'host': '192.0.2.5', 'api_token': ''})
+        self.assertEqual('api_key_required', missing.exception.code)
+        class Opener:
+            def open(self, _request, timeout):
+                raise backup.HTTPError('https://192.0.2.5/api/', 403, 'pan-key-secret', None, None)
+        with patch.object(backup, 'build_opener', return_value=Opener()):
+            with self.assertRaises(backup.BackupError) as error:
+                backup.PanOsXmlApiBackup().fetch({'host': '192.0.2.5', 'api_token': 'pan-key-secret'})
+        self.assertEqual('api_request_failed', error.exception.code)
+        self.assertNotIn('pan-key-secret', error.exception.message)
+
     def test_history_paginates_all_runs_and_versions_after_device_removal(self):
         self.save()
         for n in range(25):
@@ -594,6 +651,62 @@ class BackupTests(unittest.TestCase):
             self.call('host_key_confirm', device_id=7, token=candidate['token'], fingerprint=candidate['fingerprint'])
         self.assertEqual('host_key_conflict', error.exception.code)
 
+    def test_adapter_registry_exposes_only_verified_adapters_and_capabilities(self):
+        settings = self.call('status')['settings']
+        adapters = {item['id']: item for item in settings['adapters']}
+        self.assertEqual({'oxidized_cli', 'fortigate_api', 'panos_xml_api'}, set(adapters))
+        self.assertNotIn('extreme_api', adapters)
+        self.assertNotIn('aoscx_api', adapters)
+        self.assertTrue(adapters['oxidized_cli']['requires_known_host'])
+        self.assertTrue(adapters['oxidized_cli']['depends_on_oxidized'])
+        self.assertTrue(adapters['oxidized_cli']['supports_diagnose'])
+        self.assertEqual('api_token', adapters['panos_xml_api']['credential_kind'])
+        self.assertFalse(adapters['panos_xml_api']['requires_known_host'])
+
+    def test_legacy_oxidized_backend_is_saved_as_canonical_adapter_key(self):
+        self.settings['devices'][0]['backup_backend'] = 'oxidized'
+        self.save()
+        device = self.call('status')['settings']['devices'][0]
+        self.assertEqual('oxidized_cli', device['backup_backend'])
+        router = (self.worker.root / 'oxidized' / 'router.db').read_text(encoding='utf-8')
+        self.assertIn('|ios|', router)
+
+    def test_unverified_adapter_and_invalid_adapter_model_are_rejected(self):
+        self.settings['devices'][0].update({'model': 'extreme_exos', 'backup_backend': 'extreme_api',
+                                            'api_token': 'test-token', 'password': '', 'username': ''})
+        with self.assertRaises(backup.BackupError) as unavailable:
+            self.save()
+        self.assertEqual('validation', unavailable.exception.code)
+
+        self.settings['devices'][0].update({'model': 'ios', 'backup_backend': 'panos_xml_api',
+                                            'api_token': 'test-token', 'password': '', 'username': ''})
+        with self.assertRaises(backup.BackupError) as mismatch:
+            self.save()
+        self.assertEqual('validation', mismatch.exception.code)
+
+        self.settings['devices'][0].update({'model': 'panos', 'backup_backend': 'panos_xml_api',
+                                            'api_token': '', 'password': '', 'username': ''})
+        with self.assertRaises(backup.BackupError) as missing_key:
+            self.save()
+        self.assertEqual('api_key_required', missing_key.exception.code)
+
+    def test_panos_api_does_not_require_oxidized_or_ssh_host_key(self):
+        self.settings['devices'][0].update({'model': 'panos', 'backup_backend': 'panos_xml_api',
+                                            'api_token': 'panos-key', 'password': '', 'username': ''})
+        self.engine.online = False
+        self.call('save', settings=self.settings)
+        api = FakeApiBackup('<config version="10.2"></config>')
+        self.worker.api_backups['panos_xml_api'] = api
+        self.call('run', device_id=7)
+        outcome = self.call('status')
+        self.assertEqual('success', outcome['runs'][0]['status'])
+        self.assertEqual(1, len(api.calls))
+        with self.assertRaises(backup.BackupError) as scan:
+            self.call('host_key_scan', device_id=7)
+        self.assertEqual('validation', scan.exception.code)
+        with self.assertRaises(backup.BackupError) as diagnose:
+            self.call('diagnose', device_id=7)
+        self.assertEqual('validation', diagnose.exception.code)
     def test_save_during_run_rejected(self):
         self.save()
         self.call('run', device_id=7)

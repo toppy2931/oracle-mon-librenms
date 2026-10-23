@@ -3,7 +3,14 @@
 window.IocConfigBackup = function ({ h, section, table, api, downloadVersion, unavailable, canHandle, demo, openSettings }) {
   const endpoint = '/ioc-backup.php';
   const tokens = new WeakMap();
-  const models = [['fortios', 'FortiGate'], ['ios', 'Cisco IOS'], ['junos', 'Juniper Junos'], ['routeros', 'MikroTik RouterOS']];
+  const models = [['fortios', 'FortiGate'], ['panos', 'Palo Alto PAN-OS'], ['ios', 'Cisco IOS'], ['junos', 'Juniper Junos'], ['routeros', 'MikroTik RouterOS']];
+  // 網頁只使用服務端白名單的已驗證適配器；fallback 僅供升級期間舊回應相容。
+  const defaultAdapters = [
+    { id: 'oxidized_cli', title: 'Oxidized SSH', models: ['ios', 'fortios', 'junos', 'routeros'], credential: 'ssh', requires_host_key: true, requires_engine: true, can_diagnose: true },
+    { id: 'fortigate_api', title: 'FortiGate REST API', models: ['fortios'], credential: 'api_token', credential_label: 'FortiGate REST API Token', requires_host_key: false, requires_engine: false, can_diagnose: false },
+    { id: 'panos_xml_api', title: 'Palo Alto PAN-OS XML API', models: ['panos'], credential: 'api_token', credential_label: 'PAN-OS XML API Key', requires_host_key: false, requires_engine: false, can_diagnose: false },
+  ];
+  const canonicalBackend = (value) => value === 'oxidized' ? 'oxidized_cli' : value;
   const statuses = { queued: '等待設備備份完成', success: '備份完成', unchanged: '備份完成，設定沒有變更', failed: '備份失敗', timeout: '備份逾時' };
   const kinds = { test: '測試備份', manual: '手動備份', scheduled: '排程備份' };
   const time = (s) => {
@@ -99,12 +106,16 @@ window.IocConfigBackup = function ({ h, section, table, api, downloadVersion, un
     const b = response.backup;
     const settings = b.settings;
     const catalog = response.devices;
+    const adapterRegistry = Array.isArray(b.adapters) && b.adapters.length ? b.adapters : defaultAdapters;
+    const adapterFor = (backend) => adapterRegistry.find((adapter) => adapter.id === canonicalBackend(backend || 'oxidized_cli'));
+    const adaptersForModel = (model) => adapterRegistry.filter((adapter) => Array.isArray(adapter.models) && adapter.models.includes(model));
+    const backendTitle = (backend) => (adapterFor(backend) || {}).title || 'Oxidized SSH';
     const message = h('div', { role: 'status', 'aria-live': 'polite' });
     const enabled = h('input', { type: 'checkbox', checked: settings.enabled });
     const interval = h('select', { 'aria-label': '備份頻率' }, [1, 6, 12, 24, 48, 168].map((n) => h('option', { value: String(n) }, n === 168 ? '每週一次' : '每 ' + n + ' 小時')));
     if (![1, 6, 12, 24, 48, 168].includes(settings.interval_hours)) interval.append(h('option', { value: String(settings.interval_hours) }, '每 ' + settings.interval_hours + ' 小時'));
     interval.value = String(settings.interval_hours);
-    const entries = settings.devices.map((d) => Object.assign({ password: '', api_token: '', backup_backend: 'oxidized' }, d));
+    const entries = settings.devices.map((d) => Object.assign({ password: '', api_token: '', backup_backend: 'oxidized_cli' }, d, { backup_backend: canonicalBackend(d.backup_backend || 'oxidized_cli') }));
     // SSH 主機金鑰必須逐台確認，絕不可因為新增設備而自動信任。
     // 後端契約：host_key_scan 回傳 backup.host_key（device_id、host、algorithm、fingerprint、token、expires_at、trusted），
     // host_key_confirm 只接受已掃描的一次性 token 與原始 fingerprint；前端的勾選代表管理者已完成設備端核對。
@@ -145,9 +156,11 @@ window.IocConfigBackup = function ({ h, section, table, api, downloadVersion, un
       const rows = entries.map((entry) => {
         const info = deviceInfo(entry);
         const hostKey = hostKeyStates.get(Number(entry.device_id));
-        const trust = hostKey && (hostKey.trusted || hostKey.status === 'trusted') ? '已驗證' : '待確認';
+        const adapter = adapterFor(entry.backup_backend);
+        const trust = adapter && adapter.requires_host_key === false ? '不適用（TLS）'
+          : hostKey && (hostKey.trusted || hostKey.status === 'trusted') ? '已驗證' : '待確認';
         return [info.name, info.host, models.find(([value]) => value === entry.model)?.[1] || entry.model,
-          entry.username || '尚未設定', entry.backup_backend === 'fortigate_api' ? 'FortiGate REST API' : 'Oxidized SSH', trust, entry.enabled ? '已納入' : '已停用',
+          entry.username || '尚未設定', backendTitle(entry.backup_backend), trust, entry.enabled ? '已納入' : '已停用',
           h('div', { class: 'toolbar' },
             h('button', { class: 'btn', type: 'button', onclick: () => { captureEditor(); selected = entry; drawEditor(); } }, '編輯'),
             h('button', { class: 'btn', type: 'button', onclick: () => {
@@ -187,27 +200,35 @@ window.IocConfigBackup = function ({ h, section, table, api, downloadVersion, un
       model.value = current.model || 'fortios';
       const username = h('input', { type: 'text', maxlength: 128, autocomplete: 'off', required: true, style: 'width:100%' });
       username.value = current.username || '';
-      const backend = h('select', { 'aria-label': '備份方式', style: 'width:100%' },
-        h('option', { value: 'oxidized' }, 'Oxidized SSH（預設）'),
-        h('option', { value: 'fortigate_api', disabled: model.value !== 'fortios' }, 'FortiGate REST API（備援）'));
-      backend.value = current.backup_backend || 'oxidized';
+      const backend = h('select', { 'aria-label': '備份方式', style: 'width:100%' });
       const password = h('input', { type: 'password', maxlength: 512, autocomplete: 'new-password', style: 'width:100%',
         placeholder: current.password_set ? '已設定；留白可沿用' : '請輸入設備備份帳號的密碼' });
       password.value = current.password || '';
       const apiToken = h('input', { type: 'password', maxlength: 1024, autocomplete: 'new-password', style: 'width:100%',
-        placeholder: current.api_token_set ? '已設定；留白可沿用' : '僅 REST API 備援需要填寫' });
+        placeholder: current.api_token_set ? '已設定；留白可沿用' : '僅原生 API 適配器需要填寫' });
       apiToken.value = current.api_token || '';
       const active = h('input', { type: 'checkbox', checked: current.enabled !== false });
+      const apiTokenLabel = h('span', null, 'API Token／Key');
+      const apiTokenField = h('label', { style: 'display:block;margin:8px 0' }, apiTokenLabel, apiToken);
+      const resetBackendOptions = () => {
+        const currentValue = canonicalBackend(backend.value || current.backup_backend || 'oxidized_cli');
+        const available = adaptersForModel(model.value);
+        backend.replaceChildren(...available.map((adapter) => h('option', { value: adapter.id }, adapter.title)));
+        backend.value = available.some((adapter) => adapter.id === currentValue) ? currentValue : (available[0] || {}).id || '';
+      };
       const updatePasswordRule = () => {
         const same = current.device_id && select.value === String(current.device_id);
-        const api = backend.value === 'fortigate_api';
+        const adapter = adapterFor(backend.value);
+        const api = adapter && adapter.credential === 'api_token';
         password.required = !api && (!same || !current.password_set);
         apiToken.required = api && !current.api_token_set;
-        password.disabled = api;
-        username.disabled = api;
+        password.disabled = !!api;
+        username.disabled = !!api;
         username.required = !api;
         apiToken.disabled = !api;
         password.placeholder = same && current.password_set ? '已設定；留白可沿用' : '請輸入此設備的密碼';
+        apiTokenLabel.textContent = (adapter && adapter.credential_label) || 'API Token／Key';
+        apiTokenField.hidden = !api;
       };
       let candidate = null;
       const hostKeyArea = h('div');
@@ -243,6 +264,11 @@ window.IocConfigBackup = function ({ h, section, table, api, downloadVersion, un
           label('我已在設備端核對以上指紋完全一致', confirm), trust);
       };
       const drawHostKey = () => {
+        const adapter = adapterFor(backend.value);
+        if (!adapter || adapter.requires_host_key !== true) {
+          hostKeyArea.replaceChildren(note('此原生 API 適配器使用 HTTPS 與系統信任的 TLS 憑證，不使用 SSH 主機金鑰。'));
+          return;
+        }
         const scan = h('button', { class: 'btn', type: 'button', disabled: !select.value }, '掃描 SSH 主機指紋');
         scan.addEventListener('click', async () => {
           scan.disabled = true; hostKeyMessage.replaceChildren(note('正在讀取設備的 SSH 主機指紋…'));
@@ -259,9 +285,7 @@ window.IocConfigBackup = function ({ h, section, table, api, downloadVersion, un
       };
       backend.addEventListener('change', () => { updatePasswordRule(); drawHostKey(); });
       model.addEventListener('change', () => {
-        const apiOption = walk(backend).find((e) => e.tag === 'option' && e.value === 'fortigate_api');
-        if (apiOption) apiOption.disabled = model.value !== 'fortios';
-        if (model.value !== 'fortios' && backend.value === 'fortigate_api') backend.value = 'oxidized';
+        resetBackendOptions();
         updatePasswordRule(); drawHostKey();
       });
       select.addEventListener('change', () => {
@@ -276,7 +300,7 @@ window.IocConfigBackup = function ({ h, section, table, api, downloadVersion, un
         }
         current.device_id = nextDeviceId;
         updatePasswordRule(); candidate = null; drawDevices(); drawHostKey();
-      }); updatePasswordRule();
+      }); resetBackendOptions(); updatePasswordRule();
       editorFields = { select, model, username, password, apiToken, backend, active };
       editor.replaceChildren(h('fieldset', { style: 'border:1px solid var(--line);border-radius:10px;margin:12px 0;padding:12px' },
         h('legend', null, '設備備份設定'), label(selectingNewDevice ? '設備' : '已固定設備', deviceField),
@@ -285,8 +309,7 @@ window.IocConfigBackup = function ({ h, section, table, api, downloadVersion, un
           : note('此設備已儲存，設備名稱與連線位址已固定；如需更換設備，請先移除此筆後再新增。'),
         label('設備品牌／系統', model), label('備份方式', backend),
         h('div', { class: 'grid even' }, label('備份帳號', username), label('備份密碼', password)),
-        label('FortiGate REST API Token', apiToken),
-        label('納入備份', active), note('預設使用 Oxidized SSH。REST API 備援僅支援 FortiGate，固定使用 HTTPS、系統信任的 TLS 憑證與專用 Token；不會自動切換。'), hostKeyArea));
+        apiTokenField, label('納入備份', active), note('僅列出已驗證適配器：FortiGate REST API 與 PAN-OS XML API 固定使用 HTTPS、系統信任的 TLS 憑證及專用唯讀 Token／Key；不會自動切換至 SSH。'), hostKeyArea));
       drawHostKey();
     };
     drawDevices(); drawEditor();
@@ -294,7 +317,7 @@ window.IocConfigBackup = function ({ h, section, table, api, downloadVersion, un
     const add = h('button', { class: 'btn', type: 'button', onclick: () => {
       captureEditor();
       if (entries.length >= 50) return;
-      selected = { device_id: null, model: 'fortios', username: '', password: '', api_token: '', password_set: false, api_token_set: false, backup_backend: 'oxidized', enabled: true, draft: true };
+      selected = { device_id: null, model: 'fortios', username: '', password: '', api_token: '', password_set: false, api_token_set: false, backup_backend: 'oxidized_cli', enabled: true, draft: true };
       entries.push(selected); drawDevices(); drawEditor();
     } }, '＋ 加入設備');
     const validationMessage = () => {
@@ -320,7 +343,7 @@ window.IocConfigBackup = function ({ h, section, table, api, downloadVersion, un
       try {
         const r = await request('save', { settings: { enabled: enabled.checked, interval_hours: Number(interval.value), devices: entries.map((entry) => ({
           device_id: Number(entry.device_id), model: entry.model, username: entry.username,
-          password: entry.password, api_token: entry.api_token, backup_backend: entry.backup_backend || 'oxidized', port: 22, enabled: entry.enabled,
+          password: entry.password, api_token: entry.api_token, backup_backend: canonicalBackend(entry.backup_backend || 'oxidized_cli'), port: 22, enabled: entry.enabled,
         })) } });
         entries.forEach((entry) => { entry.password = ''; delete entry.draft; });
         if (editorFields) editorFields.password.value = '';
@@ -341,6 +364,8 @@ window.IocConfigBackup = function ({ h, section, table, api, downloadVersion, un
   function renderGovernance(root, response) {
     const renderToken = {}; tokens.set(root, renderToken);
     const b = response.backup;
+    const adapterRegistry = Array.isArray(b.adapters) && b.adapters.length ? b.adapters : defaultAdapters;
+    const adapterFor = (backend) => adapterRegistry.find((adapter) => adapter.id === canonicalBackend(backend || 'oxidized_cli'));
     const message = h('div', { role: 'status', 'aria-live': 'polite' });
     const action = async (kind, id, button) => {
       button.disabled = true;
@@ -368,11 +393,12 @@ window.IocConfigBackup = function ({ h, section, table, api, downloadVersion, un
     const runsPage = { page: 0 }, changesPage = { page: 0 }, auditPage = { page: 0 };
     const drawDevices = () => {
     const devices = b.settings.devices.filter((d) => (d.name + ' ' + d.host).toLowerCase().includes(search.value.toLowerCase())).map((d) => {
-      const usesSsh = d.backup_backend !== 'fortigate_api';
-      const unavailableForDevice = !d.enabled || (usesSsh && !ready);
+      const adapter = adapterFor(d.backup_backend);
+      const requiresEngine = !adapter || adapter.requires_engine === true;
+      const unavailableForDevice = !d.enabled || (requiresEngine && !ready);
       const test = h('button', { class: 'btn', type: 'button', disabled: unavailableForDevice }, '測試並建立備份');
       const run = h('button', { class: 'btn', type: 'button', disabled: unavailableForDevice }, '立即備份');
-      const diagnose = usesSsh ? h('button', { class: 'btn', type: 'button', disabled: !d.enabled }, '診斷 SSH 連線') : null;
+      const diagnose = adapter && adapter.can_diagnose === true ? h('button', { class: 'btn', type: 'button', disabled: !d.enabled }, '診斷 SSH 連線') : null;
       test.addEventListener('click', () => action('test', d.device_id, test));
       run.addEventListener('click', () => action('run', d.device_id, run));
       if (diagnose) diagnose.addEventListener('click', () => action('diagnose', d.device_id, diagnose));

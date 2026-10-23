@@ -8,6 +8,45 @@ final class ConfigBackupService
 {
     private const HISTORY_PAGE_SIZE = 10;
 
+    /**
+     * 受控備份適配器目錄。這是 Web 邊界的唯一允許清單；前端只會取得
+     * visible=true 的摘要，不能自行宣告未驗證的 HTTP 端點或後端。
+     *
+     * API 型適配器共用 api_token 私密欄位，名稱依適配器顯示為 Token 或 API Key。
+     * 這個欄位只會送入本機受限 worker，永遠不會出現在 status 回應。
+     */
+    private const ADAPTERS = [
+        'oxidized_cli' => [
+            'title' => 'Oxidized SSH',
+            'models' => ['ios', 'fortios', 'junos', 'routeros'],
+            'credential' => 'ssh', 'requires_host_key' => true, 'requires_engine' => true,
+            'can_diagnose' => true, 'visible' => true,
+        ],
+        'fortigate_api' => [
+            'title' => 'FortiGate REST API',
+            'models' => ['fortios'],
+            'credential' => 'api_token', 'credential_label' => 'FortiGate REST API Token',
+            'requires_host_key' => false, 'requires_engine' => false, 'can_diagnose' => false, 'visible' => true,
+        ],
+        'panos_xml_api' => [
+            'title' => 'Palo Alto PAN-OS XML API',
+            'models' => ['panos'],
+            'credential' => 'api_token', 'credential_label' => 'PAN-OS XML API Key',
+            'requires_host_key' => false, 'requires_engine' => false, 'can_diagnose' => false, 'visible' => true,
+        ],
+        // 僅登錄，不對管理者開放；需先以實機／韌體樣本驗證完整匯出端點。
+        'extreme_api' => [
+            'title' => 'Extreme OpenAPI', 'models' => ['extreme_exos'], 'credential' => 'api_token',
+            'requires_host_key' => false, 'requires_engine' => false, 'can_diagnose' => false, 'visible' => false,
+        ],
+        'aoscx_api' => [
+            'title' => 'Aruba AOS-CX API', 'models' => ['aoscx'], 'credential' => 'api_token',
+            'requires_host_key' => false, 'requires_engine' => false, 'can_diagnose' => false, 'visible' => false,
+        ],
+    ];
+    private const LEGACY_BACKENDS = ['oxidized' => 'oxidized_cli'];
+    private const MODELS = ['ios', 'fortios', 'junos', 'routeros', 'panos'];
+
     /** @var callable(array):array */
     private $transport;
     /** @var array<int,array{device_id:int,name:string,host:string}> */
@@ -51,23 +90,25 @@ final class ConfigBackupService
             $id = $row['device_id'];
             $trusted = $this->devices[$id];
             $seen[$id] = true;
-            $backend = $row['backup_backend'] ?? 'oxidized';
-            if (!in_array($row['model'] ?? null, ['ios', 'fortios', 'junos', 'routeros'], true)
-                || !in_array($backend, ['oxidized', 'fortigate_api'], true)
-                || ($backend === 'fortigate_api' && ($row['model'] ?? null) !== 'fortios')
+            $backend = $this->canonicalBackend($row['backup_backend'] ?? 'oxidized_cli');
+            $adapter = self::ADAPTERS[$backend] ?? null;
+            if (!in_array($row['model'] ?? null, self::MODELS, true)
+                || !is_array($adapter) || $adapter['visible'] !== true
+                || !in_array($row['model'], $adapter['models'], true)
                 || ($row['port'] ?? null) !== 22 || !is_bool($row['enabled'] ?? null)) {
-                throw new ValidationError(['請選擇支援的設備類型、備份方式、SSH 連接埠 22 與設備啟用狀態']);
+                throw new ValidationError(['請選擇已驗證支援的設備類型、備份方式、SSH 連接埠 22 與設備啟用狀態']);
             }
             $username = $row['username'] ?? null;
             $password = $row['password'] ?? '';
             $apiToken = $row['api_token'] ?? '';
-            if (!is_string($username) || ($backend === 'oxidized' && trim($username) === '') || mb_strlen($username, 'UTF-8') > 128
+            $usesSsh = $adapter['credential'] === 'ssh';
+            if (!is_string($username) || ($usesSsh && trim($username) === '') || mb_strlen($username, 'UTF-8') > 128
                 || ($username !== '' && preg_match('/[\x00-\x20\x7f]/', $username))
                 || !is_string($password) || mb_strlen($password, 'UTF-8') > 512
                 || preg_match('/[\x00-\x1f\x7f]/', $password)
                 || !is_string($apiToken) || mb_strlen($apiToken, 'UTF-8') > 1024
                 || preg_match('/[\x00-\x1f\x7f]/', $apiToken)) {
-                throw new ValidationError(['請輸入有效的備份帳號、密碼與 REST API Token；留空表示沿用']);
+                throw new ValidationError(['請輸入有效的備份帳號、密碼與 API Token／Key；留空表示沿用']);
             }
             $host = (string) $trusted['host'];
             $name = mb_substr((string) $trusted['name'], 0, 128, 'UTF-8');
@@ -78,7 +119,7 @@ final class ConfigBackupService
             foreach ([$username, $password, $apiToken, $name] as $value) {
                 if (strpos($value, '|') !== false || strpos($value, '#{') !== false
                     || preg_match('/[\x00-\x1f\x7f]/', $value)) {
-                    throw new ValidationError(['設備名稱、帳號或密碼包含備份工具不支援的字元']);
+                    throw new ValidationError(['設備名稱、帳號、密碼或 API 憑證包含備份工具不支援的字元']);
                 }
             }
             $clean[] = [
@@ -231,7 +272,9 @@ final class ConfigBackupService
                 'validation' => '備份設定不完整，請重新確認',
                 'password_required' => '首次設定 Oxidized SSH 備份時請輸入備份密碼',
                 'api_token_required' => '首次設定 FortiGate REST API 時請輸入 API Token',
-                'api_request_failed' => 'FortiGate REST API 備份要求失敗，請確認 Token 權限與 TLS 憑證信任',
+                'api_request_failed' => '原生 API 備份要求失敗，請確認 Token／Key 權限與 TLS 憑證信任',
+                'api_key_required' => '首次設定 PAN-OS XML API 時請輸入 API Key',
+                'panos_api_request_failed' => 'PAN-OS XML API 備份要求失敗，請確認 API Key 權限與 TLS 憑證信任',
                 'busy' => '備份工作正在執行，請稍後再試',
                 'unavailable' => '備份工具尚未就緒，請聯絡管理者',
                 'unsafe_state' => '備份設定儲存位置不安全，請聯絡管理者',
@@ -275,7 +318,7 @@ final class ConfigBackupService
                 'enabled' => ($row['enabled'] ?? false) === true,
                 'password_set' => ($row['password_set'] ?? false) === true,
                 'api_token_set' => ($row['api_token_set'] ?? false) === true,
-                'backup_backend' => in_array($row['backup_backend'] ?? 'oxidized', ['oxidized', 'fortigate_api'], true) ? ($row['backup_backend'] ?? 'oxidized') : 'oxidized',
+                'backup_backend' => $this->safeBackend($row['backup_backend'] ?? 'oxidized_cli'),
                 'host_key_trusted' => ($row['host_key_trusted'] ?? false) === true,
             ];
         }
@@ -374,6 +417,7 @@ final class ConfigBackupService
             'runs' => $runs,
             'changes' => $changes,
             'audit' => $audit,
+            'adapters' => $this->adapterSummaries($settings['adapters'] ?? null),
         ];
         if (isset($data['host_key']) && is_array($data['host_key'])) {
             $hostKey = $data['host_key'];
@@ -459,6 +503,72 @@ final class ConfigBackupService
                 'changed' => ($comparison['changed'] ?? false) === true, 'truncated' => ($comparison['truncated'] ?? false) === true];
         }
         return $result;
+    }
+
+    /** 將歷史 `oxidized` 設定安全升級為受控 `oxidized_cli` 名稱。 */
+    private function canonicalBackend($backend): string
+    {
+        if (!is_string($backend)) {
+            return '';
+        }
+        return self::LEGACY_BACKENDS[$backend] ?? $backend;
+    }
+
+    /** 對 UI 輸出前再限縮至已驗證適配器，未知值一律退回 SSH 預設。 */
+    private function safeBackend($backend): string
+    {
+        $backend = $this->canonicalBackend($backend);
+        return isset(self::ADAPTERS[$backend]) && self::ADAPTERS[$backend]['visible'] === true
+            ? $backend : 'oxidized_cli';
+    }
+
+    /** @return array<int,array<string,mixed>> 僅回傳已由 worker 驗證可用的受控適配器能力。 */
+    private function adapterSummaries($workerAdapters): array
+    {
+        // 舊 worker 尚未回傳登錄時保留可回退的正式適配器，讓升級不會讓既有設備消失。
+        // 新 worker 有回傳時，必須同時通過 worker available 與 PHP 靜態白名單兩層限制。
+        $workerById = [];
+        $hasWorkerRegistry = is_array($workerAdapters);
+        if ($hasWorkerRegistry) {
+            foreach ($workerAdapters as $worker) {
+                if (!is_array($worker) || !is_string($worker['id'] ?? null) || ($worker['available'] ?? false) !== true) {
+                    continue;
+                }
+                $workerById[$worker['id']] = $worker;
+            }
+        }
+        $summaries = [];
+        foreach (self::ADAPTERS as $id => $adapter) {
+            if ($adapter['visible'] !== true || ($hasWorkerRegistry && !isset($workerById[$id]))) {
+                continue;
+            }
+            $worker = $workerById[$id] ?? null;
+            if (is_array($worker)) {
+                $models = $worker['models'] ?? null;
+                if (!is_array($models) || array_values($models) !== $adapter['models']) {
+                    continue;
+                }
+                $credential = $worker['credential_kind'] ?? '';
+                $expectedCredential = $adapter['credential'] === 'ssh' ? 'ssh_password' : 'api_token';
+                if ($credential !== $expectedCredential
+                    || ($worker['requires_known_host'] ?? null) !== $adapter['requires_host_key']
+                    || ($worker['depends_on_oxidized'] ?? null) !== $adapter['requires_engine']
+                    || ($worker['supports_diagnose'] ?? null) !== $adapter['can_diagnose']) {
+                    continue;
+                }
+            }
+            $summaries[] = [
+                'id' => $id,
+                'title' => $adapter['title'],
+                'models' => $adapter['models'],
+                'credential' => $adapter['credential'],
+                'credential_label' => $adapter['credential_label'] ?? null,
+                'requires_host_key' => $adapter['requires_host_key'] === true,
+                'requires_engine' => $adapter['requires_engine'] === true,
+                'can_diagnose' => $adapter['can_diagnose'] === true,
+            ];
+        }
+        return $summaries;
     }
 
     private function text($value): string

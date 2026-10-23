@@ -99,6 +99,25 @@ test('組態備份：FortiGate REST 備援只允許 FortiGate，Token 不回傳�
     assertThrows(ValidationError::class, fn () => $svc->save($settings, 'admin', Access::HANDLER));
 });
 
+test('組態備份：PAN-OS XML API 只允許 PAN-OS，API Key 不回傳且未驗證適配器不開放', function () {
+    $request = null;
+    $svc = cbService(function ($value) use (&$request) { $request = $value; return cbReply(); });
+    $settings = cbSettings();
+    $settings['devices'][0] = [
+        'device_id' => 7, 'model' => 'panos', 'username' => '', 'password' => '',
+        'backup_backend' => 'panos_xml_api', 'api_token' => 'panos-key-secret', 'port' => 22, 'enabled' => true,
+    ];
+    $data = $svc->save($settings, 'admin', Access::HANDLER);
+    assertSame('panos_xml_api', $request['settings']['devices'][0]['backup_backend']);
+    assertSame('panos-key-secret', $request['settings']['devices'][0]['api_token']);
+    assertTrue(strpos(json_encode($data), 'panos-key-secret') === false);
+    $settings['devices'][0]['model'] = 'ios';
+    assertThrows(ValidationError::class, fn () => $svc->save($settings, 'admin', Access::HANDLER));
+    $settings['devices'][0]['model'] = 'panos';
+    $settings['devices'][0]['backup_backend'] = 'extreme_api';
+    assertThrows(ValidationError::class, fn () => $svc->save($settings, 'admin', Access::HANDLER));
+});
+
 test('組態備份：工具失敗與例外一律安全回覆',function(){
     foreach ([fn()=>['ok'=>false,'error'=>['code'=>'failure','message'=>'secret-123']],fn()=>['ok'=>true],function(){throw new RuntimeException('secret-123');}] as $transport) {
         $e=assertThrows(IocError::class,fn()=>cbService($transport)->status(Access::HANDLER));
