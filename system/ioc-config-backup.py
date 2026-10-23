@@ -27,7 +27,7 @@ MODELS = {'ios', 'fortios', 'junos', 'routeros'}
 # 不能使用一次性 SSH exec channel，否則只會取得第一頁。
 ENGINE_MODELS = {'fortios': 'iocfortios'}
 # 變更受管 Oxidized 輸出或模型時遞增，以迫使既有設定重新載入。
-ENGINE_CONFIG_REVISION = 4
+ENGINE_CONFIG_REVISION = 5
 LIMIT = 2 * 1024 * 1024
 HISTORY_PAGE_SIZE = 10
 DOWNLOAD_LIMIT = 2 * 1024 * 1024
@@ -254,9 +254,14 @@ class Worker:
         # JSON 是 YAML 子集，無需新增 YAML 依賴；來源分隔符不允許出現在輸入。
         self.write_private(home / 'config', json.dumps(config, ensure_ascii=False, indent=2))
         # 不修改系統安裝的 Oxidized 模型；僅在 IOC 受管目錄補強 FortiGate 分頁處理。
-        self.write_private(models / 'iocfortios.rb', """require 'oxidized/model/fortios'
+        self.write_private(models / 'iocfortios.rb', r"""require 'oxidized/model/fortios'
 
 class IocFortiOS < FortiOS
+  # Oxidized 0.37.0 的內建模式無法辨識 FortiGate HA 常見的
+  # "hostname(Primary) #" 提示字元，會在互動式 shell 等待到逾時。
+  # 此規則與上游修正版本一致，允許主機名稱中的括號。
+  prompt /^(\(\w\) )?([-\w.~()]+(\s[(\w\-.)]+)?~?\s?[#>$]\s?)$/
+
   # 部分 FortiOS 版本在 --More-- 後附帶 CR、退格或下一頁內容，
   # 內建嚴格比對可能漏接，造成只保存第一頁組態。
   expect /--More--/ do |data, re|

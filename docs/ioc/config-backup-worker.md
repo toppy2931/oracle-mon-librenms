@@ -34,7 +34,7 @@
 
 Oxidized `interval=0` 停用其初始與週期採集，只有 IOC 排程可觸發。此版本是固定間隔，不是「每天幾點」或週曆排程；每台依最近要求時間計算間隔，停機恢復後每台補一筆，不重播所有漏跑時段。每個 tick 最多建立及發送 5 筆、讀取 5 份完成內容；HTTP 單次上限 1 秒、共用 4 秒時間預算，未完成留到下一分鐘。FortiGate 會以每台 `ssh_no_exec=true` 使用互動式 SSH shell，以便回應 `--More--` 分頁提示；其他設備不受此設定影響。
 
-`update.sh` 會先透過受限入口重建這份設定，再只重啟原本已在運行的 `ioc-config-backup-oxidized.service`。這是讓 Oxidized 載入 SSH 輸入模式等啟動期設定所必需的步驟；尚未啟用的服務不會被更新程序自動啟用。
+`update.sh` 會先透過受限入口重建這份設定，再只重啟原本已在運行的 `ioc-config-backup-oxidized.service`。這是讓 Oxidized 載入 SSH 輸入模式等啟動期設定所必需的步驟；尚未啟用的服務不會被更新程序自動啟用。IOC 專用 FortiGate 模型也包含上游對 HA 提示字元（例如 `hostname(Primary) #`）的修正，避免互動 shell 在 `show` 後等候提示字元直到逾時。
 
 `status/settings` 純讀已保存狀態，不執行 HTTP。工具狀態是最近一次 tick 的快照，含 `checked_at`；超過三分鐘未更新會顯示 unavailable 並拒絕新的手動工作；維護人員應確認 timer 運作。執行中的工作會禁止更改政策。停用全域排程會停止新增週期工作，已排隊工作繼續完成；手動備份仍可使用。
 

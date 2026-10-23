@@ -436,6 +436,7 @@ class BackupTests(unittest.TestCase):
         self.assertIn('|iocfortios|', router)
         self.assertTrue(router.rstrip().endswith('|true'))
         self.assertIn('class IocFortiOS < FortiOS', model)
+        self.assertIn('[-\\w.~()]+', model)
         self.assertIn('expect /--More--/', model)
         self.assertIn("send ' '", model)
         self.assertNotIn('exec true', model)
