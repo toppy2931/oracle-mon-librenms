@@ -24,7 +24,10 @@ $exists = static function (string $table) use ($pdo): bool {
     return (int) $st->fetchColumn() > 0;
 };
 
-$tables = ['ioc_cases', 'ioc_case_history', 'ioc_settings', 'ioc_settings_history'];
+$tables = ['ioc_cases', 'ioc_case_history', 'ioc_settings', 'ioc_settings_history',
+    'ioc_audit_catalogs', 'ioc_audit_controls', 'ioc_audit_cycles', 'ioc_audit_evidence',
+    'ioc_audit_assessments', 'ioc_audit_assessment_history', 'ioc_audit_remediation',
+    'ioc_audit_remediation_history', 'ioc_audit_events'];
 $before = array_map($exists, $tables);
 
 foreach (Ioc\Schema::statements() as $sql) {

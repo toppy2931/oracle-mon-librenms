@@ -21,6 +21,7 @@ install -d -m 755 "$ORACLE_MON_DIR/admin" "$LIBRENMS_DIR/html/js"
 install -m 644 -o root -g root "$HERE/ioc-config-backup.py" "$ORACLE_MON_DIR/admin/ioc-config-backup.py"
 install -m 750 -o root -g "$LIBRENMS_USER" "$HERE/../collector/admin/manage-config-backup.sh" "$ORACLE_MON_DIR/admin/manage-config-backup.sh"
 install -m 644 -o "$LIBRENMS_USER" -g "$LIBRENMS_USER" "$HERE/../librenms/html/js/ioc-config-backup.js" "$LIBRENMS_DIR/html/js/ioc-config-backup.js"
+install -m 644 -o "$LIBRENMS_USER" -g "$LIBRENMS_USER" "$HERE/../librenms/html/js/ioc-audit.js" "$LIBRENMS_DIR/html/js/ioc-audit.js"
 for unit in ioc-config-backup-oxidized.service ioc-config-backup.service ioc-config-backup.timer; do
     install -m 644 -o root -g root "$HERE/$unit" "/etc/systemd/system/$unit"
 done

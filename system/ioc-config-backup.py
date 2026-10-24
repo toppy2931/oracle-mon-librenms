@@ -928,6 +928,14 @@ end
                 'total_runs': self.db.execute('SELECT COUNT(*) FROM runs WHERE device_id=?', (ident,)).fetchone()[0],
                 'total_versions': self.db.execute('SELECT COUNT(*) FROM versions WHERE device_id=?', (ident,)).fetchone()[0]}
 
+    def version_metadata(self, request):
+        ident = self.identifier(request.get('device_id'))
+        version = self.identifier(request.get('version_id'))
+        row = self.db.execute("SELECT id,device_id,created_at,digest,length(CAST(content AS BLOB)) AS bytes,CASE WHEN instr(content, '--More--')=0 THEN 1 ELSE 0 END AS complete FROM versions WHERE device_id=? AND id=?", (ident, version)).fetchone()
+        if row is None:
+            raise BackupError('validation', '版本不存在或不屬於此設備')
+        return dict(row)
+
     def compare(self, request):
         ident = self.identifier(request.get('device_id'))
         first = self.identifier(request.get('from_version_id'))
@@ -978,11 +986,11 @@ end
         return engine
 
     def dispatch(self, request):
-        if not isinstance(request, dict) or request.get('action') not in {'settings', 'status', 'prepare_engine', 'save', 'test', 'run', 'tick', 'history', 'compare', 'download', 'host_key_scan', 'host_key_confirm', 'diagnose'}:
+        if not isinstance(request, dict) or request.get('action') not in {'settings', 'status', 'prepare_engine', 'save', 'test', 'run', 'tick', 'history', 'version_metadata', 'compare', 'download', 'host_key_scan', 'host_key_confirm', 'diagnose'}:
             raise BackupError('validation', '不支援的組態備份操作')
         action = request['action']
-        actor = safe_text(request.get('actor', 'system'), '操作者', 255, allow_empty=action in {'settings', 'status', 'history', 'compare'})
-        self.db.execute('BEGIN' if action in {'settings', 'status', 'history', 'compare'} else 'BEGIN IMMEDIATE')
+        actor = safe_text(request.get('actor', 'system'), '操作者', 255, allow_empty=action in {'settings', 'status', 'history', 'version_metadata', 'compare'})
+        self.db.execute('BEGIN' if action in {'settings', 'status', 'history', 'version_metadata', 'compare'} else 'BEGIN IMMEDIATE')
         try:
             engine = self.cached_engine()
             if action == 'prepare_engine':
@@ -1047,6 +1055,8 @@ end
             result = self.response(engine)
             if action == 'history':
                 result['history'] = self.history(request)
+            if action == 'version_metadata':
+                result['version_metadata'] = self.version_metadata(request)
             if action == 'compare':
                 result['comparison'] = self.compare(request)
             if action == 'download':

@@ -708,11 +708,14 @@ LibreNMS Web UI → 右上角頭像 → **API** → **Create API Token**，複�
 | 資料 | 路徑 | 頻率 | 工具 |
 |------|------|------|------|
 | LibreNMS DB | `/var/lib/mysql` | 每日 | `mysqldump --single-transaction librenms` |
+| IOC 稽核證據快照 | `/var/lib/oracle-mon/ioc-evidence/` | 與 LibreNMS DB 同次備份 | 受限權限的異地檔案備份；還原後執行 `system/ioc-audit-verify.php` 驗證雜湊 |
 | LibreNMS RRD | `/opt/librenms/rrd` | 每週 | `rsync` 或 LV snapshot |
 | LibreNMS config | `/opt/librenms/.env`、`/opt/librenms/config.php` | 每次修改後 | git |
 | jt-ipam DB | `/var/lib/postgresql` | 每日 | `pg_dump jt_ipam` |
 | jt-ipam config | `/etc/jt-ipam/` | 每次修改後 | rsync 異地 |
 | nginx config | `/etc/nginx/conf.d/`、`/etc/nginx/ssl/` | 每次修改後 | git |
+
+啟用「稽核與證據」後，備份工作須將 LibreNMS 資料庫與 IOC 證據快照納入同一個可一致還原的備份點。下方 cron 僅示範資料庫匯出；正式備份須另納入私有快照目錄，還原後依 [稽核與證據維運說明](ioc/audit-evidence.md) 驗證雜湊。
 
 #### 範例：每日 DB 備份 cron
 

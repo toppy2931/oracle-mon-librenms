@@ -92,6 +92,143 @@ SQL,
             'ALTER TABLE ioc_cases ADD COLUMN IF NOT EXISTS related_host VARCHAR(128) NULL',
             'ALTER TABLE ioc_cases ADD COLUMN IF NOT EXISTS impact_scope VARCHAR(200) NULL',
             'ALTER TABLE ioc_cases ADD COLUMN IF NOT EXISTS tags VARCHAR(200) NULL',
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_audit_catalogs (
+  id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  version_label VARCHAR(100) NOT NULL,
+  digest CHAR(64) NOT NULL,
+  active TINYINT(1) NOT NULL DEFAULT 0,
+  created_by VARCHAR(255) NOT NULL,
+  created_at DATETIME NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_ioc_audit_catalog_digest (digest)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_audit_controls (
+  id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  catalog_id INT UNSIGNED NOT NULL,
+  code VARCHAR(64) NOT NULL,
+  domain VARCHAR(100) NOT NULL,
+  title VARCHAR(200) NOT NULL,
+  requirement TEXT NOT NULL,
+  description TEXT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_ioc_audit_control_code (catalog_id, code),
+  CONSTRAINT fk_ioc_audit_control_catalog FOREIGN KEY (catalog_id) REFERENCES ioc_audit_catalogs (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_audit_cycles (
+  id INT UNSIGNED NOT NULL AUTO_INCREMENT,
+  catalog_id INT UNSIGNED NOT NULL,
+  title VARCHAR(150) NOT NULL,
+  starts_on DATE NOT NULL,
+  ends_on DATE NOT NULL,
+  is_current TINYINT(1) NOT NULL DEFAULT 0,
+  created_by VARCHAR(255) NOT NULL,
+  created_at DATETIME NOT NULL,
+  PRIMARY KEY (id),
+  CONSTRAINT fk_ioc_audit_cycle_catalog FOREIGN KEY (catalog_id) REFERENCES ioc_audit_catalogs (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            'ALTER TABLE ioc_audit_cycles ADD COLUMN IF NOT EXISTS is_current TINYINT(1) NOT NULL DEFAULT 0',
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_audit_evidence (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  cycle_id INT UNSIGNED NOT NULL,
+  control_id INT UNSIGNED NOT NULL,
+  kind VARCHAR(24) NOT NULL,
+  source_ref VARCHAR(200) NOT NULL,
+  source_from DATETIME NULL,
+  source_to DATETIME NULL,
+  snapshot_name CHAR(37) NULL,
+  sha256 CHAR(64) NULL,
+  bytes INT UNSIGNED NULL,
+  item_count INT UNSIGNED NULL,
+  truncated TINYINT(1) NOT NULL DEFAULT 0,
+  captured_by VARCHAR(255) NOT NULL,
+  captured_at DATETIME NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_ioc_audit_evidence_control (cycle_id, control_id),
+  CONSTRAINT fk_ioc_audit_evidence_cycle FOREIGN KEY (cycle_id) REFERENCES ioc_audit_cycles (id),
+  CONSTRAINT fk_ioc_audit_evidence_control FOREIGN KEY (control_id) REFERENCES ioc_audit_controls (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_audit_assessments (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  cycle_id INT UNSIGNED NOT NULL,
+  control_id INT UNSIGNED NOT NULL,
+  status VARCHAR(16) NOT NULL,
+  reason TEXT NULL,
+  evidence_id BIGINT UNSIGNED NULL,
+  assessed_by VARCHAR(255) NOT NULL,
+  assessed_at DATETIME NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_ioc_audit_assessment (cycle_id, control_id),
+  CONSTRAINT fk_ioc_audit_assessment_cycle FOREIGN KEY (cycle_id) REFERENCES ioc_audit_cycles (id),
+  CONSTRAINT fk_ioc_audit_assessment_control FOREIGN KEY (control_id) REFERENCES ioc_audit_controls (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_audit_assessment_history (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  cycle_id INT UNSIGNED NOT NULL,
+  control_id INT UNSIGNED NOT NULL,
+  status VARCHAR(16) NOT NULL,
+  reason TEXT NULL,
+  evidence_id BIGINT UNSIGNED NULL,
+  actor VARCHAR(255) NOT NULL,
+  occurred_at DATETIME NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_ioc_audit_assessment_history (cycle_id, control_id, id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_audit_remediation (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  cycle_id INT UNSIGNED NOT NULL,
+  control_id INT UNSIGNED NOT NULL,
+  owner VARCHAR(255) NOT NULL,
+  due_on DATE NOT NULL,
+  status VARCHAR(16) NOT NULL,
+  note TEXT NULL,
+  closing_evidence_id BIGINT UNSIGNED NULL,
+  created_by VARCHAR(255) NOT NULL,
+  created_at DATETIME NOT NULL,
+  updated_at DATETIME NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_ioc_audit_remediation_cycle (cycle_id, status, due_on)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_audit_remediation_history (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  remediation_id BIGINT UNSIGNED NOT NULL,
+  status VARCHAR(16) NOT NULL,
+  owner VARCHAR(255) NOT NULL,
+  due_on DATE NOT NULL,
+  note TEXT NULL,
+  closing_evidence_id BIGINT UNSIGNED NULL,
+  actor VARCHAR(255) NOT NULL,
+  occurred_at DATETIME NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_ioc_audit_remediation_history (remediation_id, id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_audit_events (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  occurred_at DATETIME NOT NULL,
+  actor VARCHAR(255) NOT NULL,
+  action VARCHAR(32) NOT NULL,
+  target_type VARCHAR(24) NOT NULL,
+  target_id BIGINT UNSIGNED NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_ioc_audit_events_time (occurred_at, id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
         ];
     }
 }

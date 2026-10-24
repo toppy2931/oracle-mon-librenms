@@ -351,6 +351,17 @@ class BackupTests(unittest.TestCase):
         self.assertNotIn('content', history['versions'][0])
         self.assertEqual([], self.call('history', device_id=7, offset=40)['history']['versions'])
 
+    def test_version_metadata_exposes_hash_without_configuration_content(self):
+        self.save()
+        self.worker.store_version({'device_id': 7, 'device_name': 'router'}, 'hostname test-router\n')
+        metadata = self.call('version_metadata', device_id=7, version_id=1)['version_metadata']
+        self.assertEqual((1, 7, True), (metadata['id'], metadata['device_id'], bool(metadata['complete'])))
+        self.assertEqual(hashlib.sha256(b'hostname test-router\n').hexdigest(), metadata['digest'])
+        self.assertEqual(len(b'hostname test-router\n'), metadata['bytes'])
+        self.assertNotIn('content', metadata)
+        with self.assertRaises(backup.BackupError):
+            self.call('version_metadata', device_id=8, version_id=1)
+
     def test_compare_arbitrary_versions_masks_rotated_and_removed_credentials(self):
         self.settings['devices'][0]['password'] = 'uniqueOldValue'
         self.save()

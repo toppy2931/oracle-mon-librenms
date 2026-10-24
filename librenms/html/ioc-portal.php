@@ -36,6 +36,8 @@ $config_backup_js = __DIR__ . '/js/ioc-config-backup.js';
 $config_backup_js_version = is_readable($config_backup_js)
     ? substr(hash_file('sha256', $config_backup_js), 0, 16)
     : 'missing';
+$audit_js = __DIR__ . '/js/ioc-audit.js';
+$audit_js_version = is_readable($audit_js) ? substr(hash_file('sha256', $audit_js), 0, 16) : 'missing';
 
 $config = json_encode([
     'level'  => $level,
@@ -219,6 +221,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     <main id="view-settings" hidden></main>
     <main id="view-config" hidden></main>
     <main id="view-identity" hidden></main>
+    <main id="view-audit" hidden></main>
     <footer>日誌來自 Graylog（唯讀帳號），設備來自 LibreNMS，站點以設定頁的站點與網段為準（還沒設定任何站點時才用 LibreNMS 的「位置」），事件案存在 LibreNMS 資料庫。灰色的「尚未提供」項目還沒有資料來源，不會顯示假數字。</footer>
   </div>
 </div>
@@ -226,6 +229,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
 
 <script type="application/json" id="ioc-config"><?= $config ?></script>
 <script src="/js/ioc-config-backup.js?v=<?= htmlspecialchars($config_backup_js_version, ENT_QUOTES, 'UTF-8') ?>"></script>
+<script src="/js/ioc-audit.js?v=<?= htmlspecialchars($audit_js_version, ENT_QUOTES, 'UTF-8') ?>"></script>
 <script>
 (() => {
   'use strict';
@@ -244,9 +248,9 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     // 身分與稽核只有 admin 看得到（稽核軌跡會列出所有人的登入位址與失敗嘗試）；後端也會擋，這裡只是不顯示入口
     ...(CAN_HANDLE ? [{ key: 'identity', label: '身分與稽核', title: '身分與稽核', sub: '帳號與角色、稽核軌跡、主機的遠端登入' }] : []),
     ...(CAN_HANDLE ? [{ key: 'config', label: '組態備份', title: '組態備份管理', sub: '設備設定備份、執行紀錄與版本差異' }] : []),
+    { key: 'audit', label: '稽核與證據', title: '稽核與證據', sub: '控制項評估、來源證據與改善進度' },
     { sep: '尚未提供' },
     { key: 'risk', label: '風險與弱點', off: true },
-    { key: 'audit', label: '稽核與證據', off: true },
     { key: 'reports', label: '報表', off: true },
   ];
   const PAGES = NAV.filter((n) => n.key && !n.off).map((n) => n.key);
@@ -406,6 +410,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     // 設定頁每次進來都重新讀：別的管理者可能剛改過；已經在這一頁時再按導覽不重載，免得填到一半的值被清掉
     if (tab === 'settings' && changed) { loadSettings(); }
     if (tab === 'config' && !$('#view-config').firstChild) { backupUi.governance($('#view-config')); }
+    if (tab === 'audit' && changed) { auditUi.load(); }
     if (tab === 'identity' && (changed || !$('#view-identity').firstChild)) { loadIdentity(); }
     // 內網可視性每次切進來都重新讀（伺服器端有 60 秒快取，不會每次都打 Graylog）；已經在這一頁時再按導覽不重載
     if (tab === 'network' && (changed || !$('#view-network').firstChild)) { loadNetwork(); }
@@ -908,6 +913,9 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
   const backupUi = typeof window.IocConfigBackup === 'function'
     ? window.IocConfigBackup({ h, section, table, api, downloadVersion: downloadBackupVersion, unavailable, canHandle: CAN_HANDLE, demo: CFG.demo, openSettings: () => setTab('settings') })
     : { settings: backupUnavailable, governance: backupUnavailable };
+  const auditUi = typeof window.IocAudit === 'function'
+    ? window.IocAudit({ h, api, root: $('#view-audit'), toast, canHandle: CAN_HANDLE, csrf: CFG.csrf })
+    : { load: () => $('#view-audit').replaceChildren(unavailable('稽核與證據介面尚未載入，請重新整理')) };
   let backupBox = null;
   let settingsSeq = 0;   // 連續觸發載入時，只採用最後一次的回應
   let netSettings = null; // 內部網段的設定（伺服器回的 network）

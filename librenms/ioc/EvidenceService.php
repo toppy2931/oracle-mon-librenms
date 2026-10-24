@@ -72,6 +72,8 @@ final class EvidenceService
 
         return ['ok' => true, 'data' => [
             'window'     => ['from' => Time::toTaipei(gmdate('Y-m-d H:i:s', $from)), 'to' => Time::toTaipei(gmdate('Y-m-d H:i:s', $to))],
+            'window_utc' => ['from' => gmdate('Y-m-d H:i:s', $from), 'to' => gmdate('Y-m-d H:i:s', $to)],
+            'query'      => $query,
             'items'      => $items,
             'total'      => $total,
             'truncated'  => count($rows) >= self::LIMIT && $total > count($rows),

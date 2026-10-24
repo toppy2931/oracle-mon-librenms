@@ -195,6 +195,20 @@ final class ConfigBackupService
         return $this->request(['action' => 'history', 'actor' => '', 'device_id' => $deviceId, 'offset' => $offset]);
     }
 
+    /** 稽核連結只需要版本雜湊與完整性，不讀取原始設備設定。 */
+    public function versionMetadata(int $deviceId, int $versionId, ?string $level): array
+    {
+        $this->authorize($level);
+        $this->identifier($deviceId);
+        $this->identifier($versionId);
+        if (!isset($this->devices[$deviceId])) {
+            throw new ValidationError(['請選擇現有設備']);
+        }
+        $data = $this->request(['action' => 'version_metadata', 'actor' => '',
+            'device_id' => $deviceId, 'version_id' => $versionId]);
+        return $data['version_metadata'] ?? throw new IocError('備份版本中繼資料不完整');
+    }
+
     public function compare(int $deviceId, int $from, int $to, ?string $level): array
     {
         $this->authorize($level);
@@ -520,6 +534,18 @@ final class ConfigBackupService
                 'diff' => $this->redactDiff($comparison['diff'] ?? ''),
                 'added' => max(0, (int) ($comparison['added'] ?? 0)), 'removed' => max(0, (int) ($comparison['removed'] ?? 0)),
                 'changed' => ($comparison['changed'] ?? false) === true, 'truncated' => ($comparison['truncated'] ?? false) === true];
+        }
+        if (isset($data['version_metadata']) && is_array($data['version_metadata'])) {
+            $version = $data['version_metadata'];
+            $digest = (string) ($version['digest'] ?? '');
+            if (!preg_match('/\A[a-f0-9]{64}\z/D', $digest)) {
+                throw new IocError('備份版本雜湊不正確');
+            }
+            $result['version_metadata'] = ['id' => (int) ($version['id'] ?? 0),
+                'device_id' => (int) ($version['device_id'] ?? 0),
+                'created_at' => $this->text($version['created_at'] ?? ''), 'digest' => $digest,
+                'bytes' => max(0, (int) ($version['bytes'] ?? 0)),
+                'complete' => ($version['complete'] ?? 0) === 1 || ($version['complete'] ?? false) === true];
         }
         return $result;
     }

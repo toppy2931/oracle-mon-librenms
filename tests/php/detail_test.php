@@ -230,6 +230,9 @@ test('證據：查詢範圍是事件建立前 24 小時到建立後 1 小時，�
     assertSame(30, $src->calls[0]['size'], '時間軸最多 30 筆');
     assertSame(['log_type'], $src->calls[1]['groupBy']);
     assertSame(Time::toTaipei(gmdate('Y-m-d H:i:s', $created - 86400)), $r['data']['window']['from'], '畫面的時間是台北時間');
+    assertSame(['from' => gmdate('Y-m-d H:i:s', $created - 86400), 'to' => gmdate('Y-m-d H:i:s', $created + 3600)],
+        $r['data']['window_utc'], '快照必須保存與實際查詢完全相同的 UTC 區間');
+    assertSame('(user_name:"administrator") AND NOT ioc_demo:true', $r['data']['query'], '快照必須保存實際查詢條件');
 });
 
 test('證據：範例資料模式只查範例資料，兩者不混雜', function () {

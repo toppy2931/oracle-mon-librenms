@@ -49,6 +49,9 @@ install -m 644 -o "$LIBRENMS_USER" -g "$LIBRENMS_USER" "$HERE/librenms/pages/app
 say "更新 IOC 入口函式庫與事件案資料表（冪等）"
 IOC_LIB_DST="$LIBRENMS_DIR/includes/ioc"
 mkdir -p "$IOC_LIB_DST"
+say "準備 IOC 私有證據快照目錄"
+install -d -m 700 -o "$LIBRENMS_USER" -g "$LIBRENMS_USER" /var/lib/oracle-mon/ioc-evidence
+sudo -u "$LIBRENMS_USER" test -w /var/lib/oracle-mon/ioc-evidence || { echo 'IOC 證據目錄無法由 LibreNMS 寫入'; exit 1; }
 for f in "$HERE"/librenms/ioc/*.php; do
     [ -e "$f" ] && install -m 644 -o "$LIBRENMS_USER" -g "$LIBRENMS_USER" "$f" "$IOC_LIB_DST/$(basename "$f")"
 done
