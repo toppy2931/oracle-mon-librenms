@@ -44,6 +44,7 @@ $config = json_encode([
     'user'   => (string) Auth::user()->username,
     'csrf'   => csrf_token(),
     'demo'   => $demo,
+    'networkRanges' => Ioc\NetworkVisibilityService::RANGE_LABELS,
     'labels' => [
         'caseStatus'   => Ioc\Labels::CASE_STATUS,
         'caseSeverity' => Ioc\Labels::CASE_SEVERITY,
@@ -1120,15 +1121,26 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
   // ── 內網可視性（admin 與 global-read 都能看，全部唯讀）──
   // 各區塊各自成敗：取不到就寫「無法取得：原因」，沒有防火牆日誌也不能是 0 或「沒有異常」（OPS-006）。
   let networkSeq = 0;                        // 連續觸發載入時，只採用最後一次的回應
+  let networkRange = 86400;
+  const networkRanges = Object.entries(CFG.networkRanges).map(([seconds, label]) => [Number(seconds), label]);
+  function networkToolbar(message) {
+    return h('div', { class: 'toolbar', style: 'margin:0' },
+      h('label', null, '統計區間 ', h('select', { 'aria-label': '內網可視性統計區間', value: String(networkRange), onchange: (ev) => {
+        networkRange = Number(ev.target.value);
+        loadNetwork();
+      } }, networkRanges.map(([seconds, label]) => h('option', { value: String(seconds), selected: seconds === networkRange }, label)))),
+      h('button', { class: 'btn', type: 'button', onclick: loadNetwork }, '重新整理'),
+      message ? h('span', { class: 'note', style: 'margin:0' }, message) : null);
+  }
   async function loadNetwork() {
     const seq = ++networkSeq;
     const root = $('#view-network');
-    root.replaceChildren(h('p', { class: 'note' }, '載入中…（要查多次 Graylog，第一次可能要幾秒）'));
+    root.replaceChildren(networkToolbar(), h('p', { class: 'note' }, '載入中…（要查多次 Graylog，第一次可能要幾秒）'));
     try {
-      const r = await api('/ioc-network.php', { action: 'get', demo: CFG.demo });
+      const r = await api('/ioc-network.php', { action: 'get', demo: CFG.demo, range_seconds: networkRange });
       if (seq === networkSeq) renderNetwork(r.network);
     } catch (e) {
-      if (seq === networkSeq) root.replaceChildren(unavailable(e.message));
+      if (seq === networkSeq) root.replaceChildren(networkToolbar(), unavailable(e.message));
     }
   }
 
@@ -1139,15 +1151,13 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
       + ' 個為中風險、≥ ' + r.probe_high + ' 個為高風險）；被擋下：內部對內部、經過防火牆轉送的連線被擋下（連到防火牆本身或送到網段廣播位址的封包不算；累積 ≥ ' + r.blocked_medium + ' 次為中風險，否則低風險）。'
       + '廣播與探索類的埠（' + r.noise_ports.join('、') + '）不算。這組規則是提案版，之後可依實際情況調整。';
     $('#view-network').replaceChildren(
-      h('div', { class: 'toolbar', style: 'margin:0' },
-        h('button', { class: 'btn', type: 'button', onclick: loadNetwork }, '重新整理'),
-        h('span', { class: 'note', style: 'margin:0' }, '統計期間：' + n.meta.range_label + '，「較前期」是和' + n.meta.previous_label + '比較；更新於 ' + n.meta.generated_at + '（伺服器端快取 60 秒）。')),
+      networkToolbar('統計期間：' + n.meta.range_label + '，「較前期」是和' + n.meta.previous_label + '比較；更新於 ' + n.meta.generated_at + '（伺服器端快取 60 秒）。'),
       h('p', { class: 'note', style: 'margin-top:4px' },
         nets ? '內部網段：' + nets.join('、') + (CAN_HANDLE ? '（到「設定」頁修改）。' : '（由管理者在「設定」頁維護）。') : '',
         '資料來源是防火牆日誌，所以只看得到經過防火牆的流量；同一個網段內、不經過防火牆的流量看不到（那需要旁路感測器，目前沒有）。'),
       h('section', { class: 'grid kpis4' }, n.kpi.map(kpiCard)),
       h('section', { class: 'grid even' },
-        section('東西向流量趨勢', '每 ' + r.bucket_hours + ' 小時一格，左舊右新', renderEwTrend(n.trend)),
+        section('東西向流量趨勢', '每 ' + r.bucket_label + '一格，左舊右新', renderEwTrend(n.trend, n.meta.range_label)),
         section('Top Talkers', '內部來源依流量排名（前 ' + r.talkers + ' 名）', renderTalkers(n.talkers, n.trend.ok && n.trend.data.empty_buckets > 0))),
       h('section', { class: 'grid' },
         section('異常連線清單', n.meta.range_label + '，嚴重的在前', [renderAnomalies(n.anomalies), h('p', { class: 'note' }, rule)])),
@@ -1156,7 +1166,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
           '尚未接入：目前沒有旁路感測器，所以看不到不經過防火牆的內網流量，也沒有 NSM（網路安全監控）的資料。接入後這裡才會有內容。'))));
   }
 
-  function renderEwTrend(sec) {
+  function renderEwTrend(sec, rangeLabel) {
     if (!sec.ok) return unavailable(sec.error);
     const d = sec.data;
     const W = 360, H = 150, padL = 8, padT = 16, padB = 22;
@@ -1178,9 +1188,9 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
       h('div', { class: 'legend' },
         h('span', null, h('i', { style: 'background:#3a577d' }), '經過防火牆的轉送流量'),
         h('span', null, h('i', { style: 'background:#61a8ff' }), '其中內部對內部（長條上方是占比）')),
-      h('p', { class: 'note' }, '24 小時合計：轉送流量 ' + d.total_label + '，內部對內部 ' + d.east_label + '（' + d.share + '%）。格子下方是該格的起始時間（台北時間）。'),
+      h('p', { class: 'note' }, rangeLabel + '合計：轉送流量 ' + d.total_label + '，內部對內部 ' + d.east_label + '（' + d.share + '%）。格子下方是該格的起始時間（台北時間）。'),
       d.empty_buckets > 0 ? h('p', { class: 'note warn' }, '有 ' + d.empty_buckets + ' 格沒有位元組數資料：那段時間沒有轉送流量，或位元組欄位（net_bytes）還沒開始寫入。'
-        + '更新 IOC 的防火牆 pipeline 之後，要等新的日誌進來才有值，之前的日誌補不回來，所以 24 小時合計與佔比只含有資料的時段。') : null];
+        + '更新 IOC 的防火牆 pipeline 之後，要等新的日誌進來才有值，之前的日誌補不回來，所以' + rangeLabel + '合計與佔比只含有資料的時段。') : null];
   }
 
   function renderTalkers(sec, partial) {

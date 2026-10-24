@@ -1,6 +1,6 @@
 <?php
 /**
- * ioc-network.php — 內網可視性 API（JSON，全部唯讀）。POST /ioc-network.php，內容 {"action": "get", "demo": true|false}
+ * ioc-network.php — 內網可視性 API（JSON，全部唯讀）。POST /ioc-network.php，內容 {"action": "get", "demo": true|false, "range_seconds": 1800|3600|14400|28800|43200|86400}
  *
  *   get   東西向流量佔比與趨勢、Top Talkers、異常連線清單與異常 SMB、IDS 告警（防火牆日誌，來自 Graylog）
  *
@@ -14,6 +14,7 @@ require realpath(__DIR__ . '/..') . '/includes/init.php';
 require realpath(__DIR__ . '/..') . '/includes/ioc/endpoint.php';
 
 use Illuminate\Support\Facades\Cache;
+use Ioc\NetworkVisibilityService;
 
 [$actor, $level] = ioc_begin(true);
 
@@ -30,9 +31,13 @@ try {
     switch ((string) ($in['action'] ?? '')) {
         case 'get':
             $demo = ($in['demo'] ?? false) === true;       // 只收真正的 true，不收字串
-            // 快取不分使用者：admin 與檢視者看到的內容一樣
-            $payload = Cache::remember(IOC_NETWORK_CACHE . ($demo ? 'demo' : 'live'), 60, static function () use ($demo, $level) {
-                return ioc_network($demo, $level);
+            $range = $in['range_seconds'] ?? NetworkVisibilityService::RANGE;
+            if (!is_int($range) || !isset(NetworkVisibilityService::RANGE_LABELS[$range])) {
+                ioc_fail(400, '不支援的統計期間');
+            }
+            // 快取不分使用者：admin 與檢視者看到的內容一樣；每個統計期間分開計算
+            $payload = Cache::remember(IOC_NETWORK_CACHE . ($demo ? 'demo' : 'live') . ':' . $range, 60, static function () use ($demo, $level, $range) {
+                return ioc_network($demo, $level, $range);
             });
             ioc_json(['network' => $payload]);
             // no break（ioc_json 會結束）

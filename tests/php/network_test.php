@@ -123,9 +123,9 @@ function nvSource(): FakeNetworkSource
     return $src;
 }
 
-function nvBuild(FakeNetworkSource $src, bool $demo = false, ?array $nets = IpNets::DEFAULTS, string $why = '', ?string $level = Access::VIEWER): array
+function nvBuild(FakeNetworkSource $src, bool $demo = false, ?array $nets = IpNets::DEFAULTS, string $why = '', ?string $level = Access::VIEWER, int $range = NetworkVisibilityService::RANGE): array
 {
-    return (new NetworkVisibilityService($src, $demo, NV_NOW))->build($nets, $why, $level);
+    return (new NetworkVisibilityService($src, $demo, NV_NOW, $range))->build($nets, $why, $level);
 }
 
 function nvKpi(array $d, string $key): array
@@ -365,6 +365,33 @@ test('內網可視性：東西向流量、Top Talkers、異常連線、SMB、KPI
     $ids = nvKpi($d, 'ids');
     assertSame([null, 'unknown', '尚未接入'], [$ids['value'], $ids['state'], $ids['na']], 'IPS 日誌一筆都沒有：尚未接入，不是 0');
     assertTrue(strpos($ids['sub'], '分不出來') !== false);
+});
+
+test('內網可視性：六種統計期間都使用等長前期、六個連續趨勢格，文字與查詢區間一致', function () {
+    foreach (NetworkVisibilityService::RANGE_LABELS as $range => $label) {
+        $src = nvSource();
+        $d = nvBuild($src, false, IpNets::DEFAULTS, '', Access::VIEWER, $range);
+        $bucket = intdiv($range, 6);
+        assertSame($range, $d['meta']['range_seconds']);
+        assertSame('最近 ' . $label, $d['meta']['range_label']);
+        assertSame('前一個 ' . $label, $d['meta']['previous_label']);
+        assertSame($bucket, $d['meta']['rules']['bucket_seconds']);
+        assertTrue(strpos(nvKpi($d, 'eastwest')['sub'], '前一個 ' . $label) !== false, 'KPI 的比較文字要跟著區間切換');
+        assertTrue(strpos(nvKpi($d, 'smb')['sub'], '前一個 ' . $label) !== false, 'SMB 的比較文字要跟著區間切換');
+        assertSame([nvIso(NV_NOW - $range), nvIso(NV_NOW)], [$src->calls[0]['from'], $src->calls[0]['to']], '涵蓋查詢區間 ' . $label);
+        foreach ($src->calls as $call) {
+            assertTrue($call['from'] >= nvIso(NV_NOW - 2 * $range) && $call['to'] <= nvIso(NV_NOW), '所有查詢都在所選區間或緊接前期：' . $label);
+        }
+        $bytes = array_values(array_filter($src->calls, static fn ($c) => $c['groupBy'] === ['log_type']));
+        assertSame(14, count($bytes), '六格各查總量及東西向，前期各查一次');
+        for ($i = 0; $i < 6; $i++) {
+            assertSame([nvIso(NV_NOW - $range + $i * $bucket), nvIso(NV_NOW - $range + ($i + 1) * $bucket)],
+                [$bytes[2 * $i]['from'], $bytes[2 * $i]['to']], '第 ' . ($i + 1) . ' 格 ' . $label);
+        }
+        assertSame([nvIso(NV_NOW - 2 * $range), nvIso(NV_NOW - $range)], [$bytes[12]['from'], $bytes[12]['to']], '前期 ' . $label);
+        assertSame(6, count($d['trend']['data']['buckets']));
+    }
+    assertThrows(ValidationError::class, static fn () => nvBuild(nvSource(), false, IpNets::DEFAULTS, '', Access::VIEWER, 7200));
 });
 
 test('內網可視性：查詢條件——一律用絕對時間、排除範例資料、內部網段轉成前綴、先查優先的區塊', function () {

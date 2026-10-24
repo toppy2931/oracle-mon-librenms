@@ -6,14 +6,14 @@ namespace Ioc;
 /**
  * 內網可視性（簡報第 6 張）：用防火牆日誌看內部網路裡的流量。只讀 Graylog，沒有任何寫入。
  *
- *  - 東西向流量：內部對內部（兩端都在「內部網段」）的位元組數占經過防火牆的轉送流量的比例，加近 24 小時每 4 小時一格的趨勢，
- *    與前一個 24 小時比較。
+ *  - 東西向流量：內部對內部（兩端都在「內部網段」）的位元組數占經過防火牆的轉送流量的比例，
+ *    趨勢分成六格，與緊接的前一個相同長度區間比較。
  *  - Top Talkers：內部來源依位元組數排名（前 5 名）。
  *  - 異常連線與異常 SMB：沒有基線可比，只能用規則。規則（提案版，常數在下面，要調就改常數與測試）：
- *      橫向探測：同一個內部來源、同一個目的埠，在 24 小時內連到 ≥ PROBE_MIN 個不同的內部主機；
+ *      橫向探測：同一個內部來源、同一個目的埠，在所選區間內連到 ≥ PROBE_MIN 個不同的內部主機；
  *      被擋下：內部對內部的「轉送流量」（cat 是 traffic:forward）被防火牆擋下（已經算橫向探測的同一來源同一埠不重複列）；
  *        FortiGate 自己收發的 traffic:local（連到防火牆本身、送到網段廣播位址的封包）不算，見 deniedForward()。
- *    異常 SMB ＝ 目的埠 445 的異常；數量是「被標記的內部來源數」，並與前一個 24 小時比較。
+ *    異常 SMB ＝ 目的埠 445 的異常；數量是「被標記的內部來源數」，並與前一個區間比較。
  *  - IDS 告警：FortiGate 的 IPS／異常偵測日誌（cat 是 utm:ips、utm:anomaly）。沒有收到就明講「尚未接入」，不放數字。
  *
  * 鐵則同總覽（OPS-006）：資料取不到、沒有防火牆日誌、日誌沒有位元組欄位，都明確寫原因（['ok'=>false,'error'=>…]），
@@ -30,6 +30,7 @@ final class NetworkVisibilityService
     public const RANGE         = 86400;   // 最近 24 小時
     public const BUCKET        = 14400;   // 趨勢每一格 4 小時
     public const BUCKETS       = 6;       // 6 格剛好 24 小時
+    public const RANGE_LABELS  = [1800 => '30 分鐘', 3600 => '1 小時', 14400 => '4 小時', 28800 => '8 小時', 43200 => '12 小時', 86400 => '24 小時'];
     public const GROUP_LIMIT   = 100;     // 分組查詢每一層的上限；碰到上限要標示「結果可能不完整」
     public const TALKER_LIMIT  = 200;
     public const TALKERS       = 5;
@@ -55,12 +56,19 @@ final class NetworkVisibilityService
     private WindowedLogSource $logs;
     private bool $demo;
     private int $now;
+    private int $range;
+    private int $bucket;
 
-    public function __construct(WindowedLogSource $logs, bool $demo = false, ?int $now = null)
+    public function __construct(WindowedLogSource $logs, bool $demo = false, ?int $now = null, int $range = self::RANGE)
     {
+        if (!isset(self::RANGE_LABELS[$range])) {
+            throw new ValidationError(['不支援的統計期間']);
+        }
         $this->logs = $logs;
         $this->demo = $demo;
         $this->now  = $now ?? time();
+        $this->range = $range;
+        $this->bucket = intdiv($range, self::BUCKETS);
     }
 
     /**
@@ -74,14 +82,16 @@ final class NetworkVisibilityService
         }
         $meta = [
             'generated_at'   => Time::toTaipei(gmdate('Y-m-d H:i:s', $this->now)),
-            'range_label'    => '最近 24 小時',
-            'previous_label' => '前一個 24 小時',
+            'range_seconds'  => $this->range,
+            'range_label'    => '最近 ' . $this->rangeText(),
+            'previous_label' => $this->previousText(),
             'demo'           => $this->demo,
             'nets'           => $nets,
             'rules'          => [
                 'probe_min' => self::PROBE_MIN, 'probe_medium' => self::PROBE_MEDIUM, 'probe_high' => self::PROBE_HIGH,
                 'blocked_medium' => self::BLOCKED_MEDIUM, 'smb_port' => self::SMB_PORT, 'noise_ports' => self::NOISE_PORTS,
-                'bucket_hours' => intdiv(self::BUCKET, 3600), 'talkers' => self::TALKERS,
+                'bucket_seconds' => $this->bucket, 'bucket_label' => self::durationText($this->bucket),
+                'bucket_hours' => $this->bucket / 3600, 'talkers' => self::TALKERS,
             ],
         ];
         if ($nets === null) {
@@ -150,7 +160,7 @@ final class NetworkVisibilityService
             return $source['error'];
         }
         if ($source['data']['firewall'] === 0) {
-            return '最近 24 小時沒有收到防火牆的日誌（還沒接入，或已經中斷了），沒有資料可顯示，不代表沒有流量';
+            return '最近 ' . $this->rangeText() . '沒有收到防火牆的日誌（還沒接入，或已經中斷了），沒有資料可顯示，不代表沒有流量';
         }
         if ($source['data']['forward'] === 0) {
             return '收到了防火牆日誌，但沒有「轉送流量」（cat 是 ' . self::FORWARD . '）的紀錄：防火牆沒有記錄轉送流量，或日誌欄位和預期不同，無法分析內網流量';
@@ -159,7 +169,7 @@ final class NetworkVisibilityService
     }
 
     /**
-     * 東西向流量趨勢：每 4 小時一格的轉送流量總量與內部對內部的量，加前一個 24 小時的總量。
+     * 東西向流量趨勢：六格轉送流量總量與內部對內部的量，加前一個等長區間的總量。
      *
      * @param string[] $nets
      * @return array<string,mixed>
@@ -168,22 +178,22 @@ final class NetworkVisibilityService
     {
         $fwd = $this->fwd();
         $ew  = $fwd . ' AND ' . $this->both($nets);
-        $start = $this->now - self::RANGE;
+        $start = $this->now - $this->range;
         $buckets = [];
         $total = $east = 0;
         for ($i = 0; $i < self::BUCKETS; $i++) {
-            $from = $start + $i * self::BUCKET;
-            $t = $this->bytes($fwd, $from, $from + self::BUCKET);
-            $e = $this->bytes($ew, $from, $from + self::BUCKET);
+            $from = $start + $i * $this->bucket;
+            $t = $this->bytes($fwd, $from, $from + $this->bucket);
+            $e = $this->bytes($ew, $from, $from + $this->bucket);
             $label = Time::toTaipei(gmdate('Y-m-d H:i:s', $from), 'H:i');
             $share = $t > 0 ? (int) round(100 * $e / $t) : null;
-            $hours = intdiv(self::BUCKET, 3600);
+            $duration = self::durationText($this->bucket);
             $buckets[] = [
                 'label' => $label, 'total' => $t, 'east_west' => $e, 'share' => $share,
                 // 0 位元組有兩種可能：那段時間真的沒有轉送流量，或位元組欄位還沒開始寫入（剛套用 pipeline）；這裡分不出來，兩種都寫
                 'text'  => $t === 0
-                    ? sprintf('%s 起 %d 小時：沒有位元組數資料（沒有轉送流量，或位元組欄位還沒開始寫入）', $label, $hours)
-                    : sprintf('%s 起 %d 小時：轉送流量 %s，內部對內部 %s（%s）', $label, $hours, self::humanBytes($t), self::humanBytes($e), $share . '%'),
+                    ? sprintf('%s 起 %s：沒有位元組數資料（沒有轉送流量，或位元組欄位還沒開始寫入）', $label, $duration)
+                    : sprintf('%s 起 %s：轉送流量 %s，內部對內部 %s（%s）', $label, $duration, self::humanBytes($t), self::humanBytes($e), $share . '%'),
             ];
             $total += $t;
             $east  += $e;
@@ -191,19 +201,19 @@ final class NetworkVisibilityService
         if ($total === 0) {
             throw new GraylogUnavailable(self::NO_BYTES);
         }
-        // 前一個 24 小時只是拿來比較：讀不到不拖垮整個區塊，畫面寫「沒有資料可比較」
+        // 前一個等長區間只是拿來比較：讀不到不拖垮整個區塊，畫面寫「沒有資料可比較」
         $previous = null;
         try {
-            $pStart = $this->now - 2 * self::RANGE;
-            $pt = $this->bytes($fwd, $pStart, $pStart + self::RANGE);
-            $pe = $this->bytes($ew, $pStart, $pStart + self::RANGE);
+            $pStart = $this->now - 2 * $this->range;
+            $pt = $this->bytes($fwd, $pStart, $pStart + $this->range);
+            $pe = $this->bytes($ew, $pStart, $pStart + $this->range);
             $previous = ['total' => $pt, 'east_west' => $pe, 'share' => $pt > 0 ? (int) round(100 * $pe / $pt) : null];
         } catch (GraylogUnavailable $ex) {
             $previous = null;
         }
         return [
             'buckets'     => $buckets,
-            'bucket_hours' => intdiv(self::BUCKET, 3600),
+            'bucket_hours' => $this->bucket / 3600,
             'total'       => $total,
             'east_west'   => $east,
             'share'       => (int) round(100 * $east / $total),
@@ -369,7 +379,7 @@ final class NetworkVisibilityService
     }
 
     /**
-     * 前一個 24 小時被標記的 SMB 來源數（同一套規則，只查目的埠 445）。讀不到回傳 null，只影響「較前期」的比較。
+     * 前一個等長區間被標記的 SMB 來源數（同一套規則，只查目的埠 445）。讀不到回傳 null，只影響「較前期」的比較。
      *
      * @param string[] $nets
      */
@@ -510,8 +520,8 @@ final class NetworkVisibilityService
             $d = $b['trend']['data'];
             $p = $d['previous'];
             $cmp = ($p === null || $p['share'] === null)
-                ? '前一個 24 小時沒有資料可比較'
-                : ($d['share'] === $p['share'] ? '與前一個 24 小時相同' : sprintf('較前一個 24 小時%s %d 個百分點', $d['share'] > $p['share'] ? '高了' : '低了', abs($d['share'] - $p['share'])));
+                ? $this->previousText() . '沒有資料可比較'
+                : ($d['share'] === $p['share'] ? '與' . $this->previousText() . '相同' : sprintf('較%s%s %d 個百分點', $this->previousText(), $d['share'] > $p['share'] ? '高了' : '低了', abs($d['share'] - $p['share'])));
             $part = $d['empty_buckets'] > 0 ? sprintf(' · 只有 %d／%d 格有位元組數資料', self::BUCKETS - $d['empty_buckets'], self::BUCKETS) : '';
             $east = ['key' => 'eastwest', 'label' => '東西向流量佔比', 'value' => $d['share'] . '%', 'state' => 'info',
                 'sub' => sprintf('內部對內部 %s ／ 轉送流量共 %s · %s%s', $d['east_label'], $d['total_label'], $cmp, $part), 'na' => null];
@@ -524,7 +534,7 @@ final class NetworkVisibilityService
             $d = $b['anomalies']['data'];
             $n = $d['smb']['sources'];
             $smb = ['key' => 'smb', 'label' => '異常 SMB 來源', 'value' => $n, 'state' => $n === 0 ? 'good' : ($n < 5 ? 'warn' : 'bad'),
-                'sub' => sprintf('目的埠 %d 的內部來源 · %s%s', self::SMB_PORT, self::changeText($n, $d['smb']['previous']), $d['capped'] ? ' · 結果可能不完整' : ''), 'na' => null];
+                'sub' => sprintf('目的埠 %d 的內部來源 · %s%s', self::SMB_PORT, $this->changeText($n, $d['smb']['previous']), $d['capped'] ? ' · 結果可能不完整' : ''), 'na' => null];
             $lv = $d['levels'];
             $anom = ['key' => 'anomalies', 'label' => '異常連線', 'value' => $d['total'], 'state' => $d['total'] === 0 ? 'good' : ($lv['high'] > 0 ? 'bad' : 'warn'),
                 'sub' => sprintf('高 %d · 中 %d · 低 %d（每筆是一個來源加一個目的埠）%s', $lv['high'], $lv['medium'], $lv['low'], $d['capped'] ? ' · 結果可能不完整' : ''), 'na' => null];
@@ -533,26 +543,27 @@ final class NetworkVisibilityService
         if (!$b['ids']['ok']) {
             $ids = $unknown('ids', 'IDS 告警', $b['ids']['error']);
         } elseif (!$b['ids']['data']['seen']) {
-            $ids = $unknown('ids', 'IDS 告警', '最近 24 小時沒有收到 IPS 日誌（FortiGate 沒開 IPS 日誌，或這段期間真的沒有攻擊，這裡分不出來）', '尚未接入');
+            $ids = $unknown('ids', 'IDS 告警', '最近 ' . $this->rangeText() . '沒有收到 IPS 日誌（FortiGate 沒開 IPS 日誌，或這段期間真的沒有攻擊，這裡分不出來）', '尚未接入');
         } else {
             $d = $b['ids']['data'];
             $ids = ['key' => 'ids', 'label' => 'IDS 告警', 'value' => $d['count'], 'state' => 'warn',
-                'sub' => 'FortiGate 的 IPS 與異常偵測日誌 · ' . self::changeText($d['count'], $d['previous']), 'na' => null];
+                'sub' => 'FortiGate 的 IPS 與異常偵測日誌 · ' . $this->changeText($d['count'], $d['previous']), 'na' => null];
         }
         return [$east, $smb, $anom, $ids];
     }
 
-    /** 與前一個 24 小時比較的文字。前期讀不到是 null。 */
-    private static function changeText(int $cur, ?int $prev): string
+    /** 與前一個等長區間比較的文字。前期讀不到是 null。 */
+    private function changeText(int $cur, ?int $prev): string
     {
+        $previous = $this->previousText();
         if ($prev === null) {
-            return '前一個 24 小時的資料無法取得';
+            return $previous . '的資料無法取得';
         }
         if ($prev === 0) {
-            return $cur === 0 ? '前一個 24 小時也是 0' : '前一個 24 小時是 0';
+            return $cur === 0 ? $previous . '也是 0' : $previous . '是 0';
         }
         $pct = (int) round(100 * ($cur - $prev) / $prev);
-        return $pct === 0 ? '與前一個 24 小時持平' : sprintf('較前一個 24 小時%s %d%%', $pct > 0 ? '增加' : '減少', abs($pct));
+        return $pct === 0 ? '與' . $previous . '持平' : sprintf('較%s%s %d%%', $previous, $pct > 0 ? '增加' : '減少', abs($pct));
     }
 
     // ── 工具 ────────────────────────────────────────────────────────────
@@ -590,11 +601,31 @@ final class NetworkVisibilityService
         return OverviewService::demoFilter($query, $this->demo);
     }
 
-    /** 往前數第 $back 個 24 小時（0＝最近 24 小時）的 [起, 迄]，UTC 的 ISO 8601。 */
+    private function rangeText(): string
+    {
+        return self::RANGE_LABELS[$this->range];
+    }
+
+    private function previousText(): string
+    {
+        return '前一個 ' . $this->rangeText();
+    }
+
+    private static function durationText(int $seconds): string
+    {
+        if ($seconds < 3600) {
+            return intdiv($seconds, 60) . ' 分鐘';
+        }
+        $hours = intdiv($seconds, 3600);
+        $minutes = intdiv($seconds % 3600, 60);
+        return $hours . ' 小時' . ($minutes ? ' ' . $minutes . ' 分鐘' : '');
+    }
+
+    /** 往前數第 $back 個等長區間的 [起, 迄]，UTC 的 ISO 8601。 */
     private function window(int $back): array
     {
-        $to = $this->now - $back * self::RANGE;
-        return [$this->iso($to - self::RANGE), $this->iso($to)];
+        $to = $this->now - $back * $this->range;
+        return [$this->iso($to - $this->range), $this->iso($to)];
     }
 
     private function iso(int $ts): string

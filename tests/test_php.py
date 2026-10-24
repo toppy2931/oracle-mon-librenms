@@ -271,7 +271,12 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
         src = (ROOT / "librenms" / "html" / "ioc-network.php").read_text(encoding="utf-8")
         self.assertIn("ioc_begin(true)", src, "內網可視性 API 只接受 POST")
         self.assertIn("=== true", src, "demo 旗標只收真正的 true，不收字串")
-        self.assertIn("IOC_NETWORK_CACHE . ($demo ? 'demo' : 'live')", src, "快取要分正式與範例資料")
+        self.assertIn("IOC_NETWORK_CACHE . ($demo ? 'demo' : 'live') . ':' . $range", src, "快取要分正式／範例資料與統計期間")
+        self.assertIn("is_int($range)", src, "統計期間只能接受 JSON 整數")
+        self.assertIn("NetworkVisibilityService::RANGE_LABELS[$range]", src, "統計期間要用白名單")
+        portal = (ROOT / "librenms" / "html" / "ioc-portal.php").read_text(encoding="utf-8")
+        self.assertIn("'networkRanges' => Ioc\\NetworkVisibilityService::RANGE_LABELS", portal, "選單與 API 要共用同一份期間白名單")
+        self.assertIn("range_seconds: networkRange", portal, "選定期間要送到 API")
         self.assertLess(src.index("ioc_begin("), src.index("ioc_network("), "要先檢查登入與角色才能查 Graylog")
         endpoint = (ROOT / "librenms" / "ioc" / "endpoint.php").read_text(encoding="utf-8")
         self.assertNotRegex(endpoint, r"IpNets::DEFAULTS", "endpoint 不能自己套預設網段；內部網段讀不到要傳 null，由服務標「無法取得」")
@@ -288,6 +293,7 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
         endpoint = (ROOT / "librenms" / "ioc" / "endpoint.php").read_text(encoding="utf-8")
         fn = re.search(r"function ioc_network_cache_forget\(\).*?\n\}\n", endpoint, re.S).group(0)
         self.assertIn("IOC_NETWORK_CACHE", fn)
+        self.assertIn("NetworkVisibilityService::RANGE_LABELS", fn, "所有統計區間的快取都要清除")
 
     def test_overview_and_network_page_share_one_definition_of_internal(self):
         """資安頁的「防火牆阻擋來源」與內網可視性都要用設定頁的內部網段；不能各寫一套（曾經一邊寫死 RFC1918、另一邊用設定）。"""

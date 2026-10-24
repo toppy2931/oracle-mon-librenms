@@ -31,13 +31,15 @@ use Ioc\UnavailableLogSource;
 
 const IOC_READER_CONF = '/etc/oracle-mon/graylog-reader.conf';
 const IOC_OVERVIEW_CACHE = 'ioc:overview:v4:';     // 後面接 live 或 demo；總覽的伺服器端快取（20 秒）。內容形狀改了就要升版號
-const IOC_NETWORK_CACHE = 'ioc:network:v1:';       // 同上，內網可視性的快取（60 秒，查詢次數多）；內部網段的設定一改就要清掉
+const IOC_NETWORK_CACHE = 'ioc:network:v2:';       // 依統計期間與 demo 模式分開快取；內部網段一改就要清掉
 
 /** 內部網段的設定有異動就讓內網可視性的快取失效，否則 60 秒內畫面還是用舊網段算的。 */
 function ioc_network_cache_forget(): void
 {
-    foreach (['live', 'demo'] as $k) {
-        \Illuminate\Support\Facades\Cache::forget(IOC_NETWORK_CACHE . $k);
+    foreach (['live', 'demo'] as $mode) {
+        foreach (array_keys(NetworkVisibilityService::RANGE_LABELS) as $range) {
+            \Illuminate\Support\Facades\Cache::forget(IOC_NETWORK_CACHE . $mode . ':' . $range);
+        }
     }
 }
 
@@ -305,7 +307,7 @@ function ioc_audit_trail($in, string $level): array
  *
  * @return array<string,mixed>
  */
-function ioc_network(bool $demo, string $level): array
+function ioc_network(bool $demo, string $level, int $range = NetworkVisibilityService::RANGE): array
 {
     try {
         $logs = GraylogClient::fromConf(IOC_READER_CONF);
@@ -322,7 +324,7 @@ function ioc_network(bool $demo, string $level): array
         error_log('[ioc] internal nets: ' . $e->getMessage());
         $why = $e instanceof \Ioc\IocError ? $e->getMessage() : '無法讀取內部網段的設定（資料表還沒建立？）';
     }
-    return (new NetworkVisibilityService($logs, $demo))->build($nets, $why, $level);
+    return (new NetworkVisibilityService($logs, $demo, null, $range))->build($nets, $why, $level);
 }
 
 /**
