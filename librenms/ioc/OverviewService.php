@@ -41,16 +41,21 @@ final class OverviewService
     private LogSource $logs;
     private bool $demo;
     private int $now;
+    private int $range;
     /** @var string[]|null 內部網段（設定頁的「內部網段」）；null＝設定讀不到，分內外的區塊要標「無法取得」，不能套預設網段 */
     private ?array $nets;
 
     /** @param string[]|null $nets 內部網段（整理過的 CIDR）；沒傳就是預設的私有位址，傳 null 表示設定讀不到 */
-    public function __construct(LogSource $logs, bool $demo = false, ?int $now = null, ?array $nets = IpNets::DEFAULTS)
+    public function __construct(LogSource $logs, bool $demo = false, ?int $now = null, ?array $nets = IpNets::DEFAULTS, int $range = self::RANGE)
     {
+        if (!isset(NetworkVisibilityService::RANGE_LABELS[$range])) {
+            throw new ValidationError(['不支援的統計期間']);
+        }
         $this->logs = $logs;
         $this->demo = $demo;
         $this->now  = $now ?? time();
         $this->nets = $nets;
+        $this->range = $range;
     }
 
     /**
@@ -67,7 +72,8 @@ final class OverviewService
         return [
             'meta' => [
                 'generated_at' => Time::toTaipei(gmdate('Y-m-d H:i:s', $this->now)),
-                'range_label'  => '最近 24 小時',
+                'range_seconds' => $this->range,
+                'range_label'  => '最近 ' . NetworkVisibilityService::RANGE_LABELS[$this->range],
                 'demo'         => $this->demo,
             ],
             'kpi'      => $this->kpi($devices, $cases, $coverage, $suspicious, $login),
@@ -91,7 +97,7 @@ final class OverviewService
     /** @return array<int,array<string,mixed>> */
     private function coverage(): array
     {
-        $rows = $this->logs->aggregate($this->q('_exists_:log_type'), self::RANGE, ['log_type'], ['count', 'latest:timestamp'], 20);
+        $rows = $this->logs->aggregate($this->q('_exists_:log_type'), $this->range, ['log_type'], ['count', 'latest:timestamp'], 20);
         $by   = [];
         foreach ($rows as $r) {
             $by[(string) ($r['log_type'] ?? '')] = $r;
@@ -126,12 +132,12 @@ final class OverviewService
     private function suspicious(): array
     {
         $q       = $this->q('event_action:(' . implode(' OR ', self::SUSPICIOUS) . ')');
-        $byType  = $this->logs->aggregate($q, self::RANGE, ['log_type'], ['count'], 20);
+        $byType  = $this->logs->aggregate($q, $this->range, ['log_type'], ['count'], 20);
         $events  = 0;
         foreach ($byType as $r) {
             $events += (int) ($r['count'] ?? 0);
         }
-        $users = $this->logs->aggregate($q . ' AND _exists_:user_name', self::RANGE, ['user_name'], ['count'], self::GROUP_LIMIT);
+        $users = $this->logs->aggregate($q . ' AND _exists_:user_name', $this->range, ['user_name'], ['count'], self::GROUP_LIMIT);
         return ['events' => $events, 'accounts' => count($users), 'accounts_capped' => count($users) >= self::GROUP_LIMIT];
     }
 
@@ -140,7 +146,7 @@ final class OverviewService
     {
         $rows = $this->logs->messages(
             $this->q('_exists_:event_action AND NOT log_type:firewall'),
-            self::RANGE,
+            $this->range,
             ['timestamp', 'user_name', 'event_action', 'src_ip', 'host_name', 'severity', 'log_type'],
             15
         );
@@ -167,7 +173,7 @@ final class OverviewService
     private function accounts(): array
     {
         $q    = $this->q('event_action:(' . implode(' OR ', self::SUSPICIOUS) . ') AND _exists_:user_name');
-        $rows = $this->logs->aggregate($q, self::RANGE, ['user_name', 'src_ip'], ['count'], self::GROUP_LIMIT);
+        $rows = $this->logs->aggregate($q, $this->range, ['user_name', 'src_ip'], ['count'], self::GROUP_LIMIT);
         usort($rows, static fn ($a, $b) => (int) ($b['count'] ?? 0) <=> (int) ($a['count'] ?? 0));
         $items = [];
         foreach (array_slice($rows, 0, 10) as $r) {
@@ -195,7 +201,7 @@ final class OverviewService
             throw new GraylogUnavailable('內部網段的設定讀不到，無法分辨內部與外部來源（請管理者到「設定」頁檢查）');
         }
         $q = $this->q('event_action:fw_deny AND _exists_:src_ip AND NOT dst_ip:"255.255.255.255" AND NOT dst_ip:224.* AND NOT dst_ip:239.*');
-        $rows = $this->logs->aggregate($q, self::RANGE, ['src_ip'], ['count'], self::GROUP_LIMIT);
+        $rows = $this->logs->aggregate($q, $this->range, ['src_ip'], ['count'], self::GROUP_LIMIT);
         $internal = [];
         $internalEvents = 0;
         $externalEvents = 0;
@@ -266,12 +272,16 @@ final class OverviewService
             $susp = $unknown('suspicious', '可疑登入事件', $suspicious['error']);
         } elseif ($login !== null && $login['all_missing']) {
             // 會產生登入事件的來源一個都沒接入：0 筆是「沒有日誌」，不是「沒有可疑事件」，不能顯示成綠色的 0
-            $susp = $unknown('suspicious', '可疑登入事件', '尚未接入任何登入類來源（' . implode('、', $login['missing']) . '），無法判斷', '尚未接入');
+            $missing = $this->range === self::RANGE ? '尚未接入' : '所選期間無資料';
+            $why = $this->range === self::RANGE
+                ? '尚未接入任何登入類來源（' . implode('、', $login['missing']) . '），無法判斷'
+                : '所選期間未收到任何登入類來源（' . implode('、', $login['missing']) . '）的日誌，無法判斷';
+            $susp = $unknown('suspicious', '可疑登入事件', $why, $missing);
         } else {
             $d = $suspicious['data'];
             $sub = sprintf('登入失敗／帳號鎖定／高權限操作 · 涉及 %s%d 個帳號', $d['accounts_capped'] ? '至少 ' : '', $d['accounts']);
             if ($login !== null && $login['missing'] !== []) {
-                $sub .= sprintf(' · %s尚未接入，不含其事件', implode('、', $login['missing']));
+                $sub .= sprintf(' · %s%s，不含其事件', implode('、', $login['missing']), $this->range === self::RANGE ? '尚未接入' : '在所選期間無資料');
             }
             $susp = ['key' => 'suspicious', 'label' => '可疑登入事件', 'value' => $d['events'],
                 'state' => $d['events'] === 0 ? 'good' : ($d['events'] < 10 ? 'warn' : 'bad'),
@@ -290,7 +300,7 @@ final class OverviewService
                 $notes[] = sprintf('%d 類來源不是正常接收', $late);
             }
             if ($none > 0) {
-                $notes[] = sprintf('%d 類來源尚未接入', $none);
+                $notes[] = sprintf('%d 類來源%s', $none, $this->range === self::RANGE ? '尚未接入' : '在所選期間無資料');
             }
             $src = ['key' => 'sources', 'label' => '資料來源連線', 'value' => $okSrc . '/' . $total,
                 'state' => $okSrc === $total ? 'good' : ($okSrc === 0 ? 'bad' : 'warn'),
@@ -350,7 +360,7 @@ final class OverviewService
     }
 
     /**
-     * 登入類來源（會產生登入、帳號、權限事件的 log_type）有哪幾類 24 小時內完全沒有資料。
+     * 登入類來源（會產生登入、帳號、權限事件的 log_type）有哪幾類在所選期間內完全沒有資料。
      *
      * @param array<string,mixed> $coverage
      * @return array{missing:string[],all_missing:bool}|null 涵蓋資料取不到時回傳 null（不知道）

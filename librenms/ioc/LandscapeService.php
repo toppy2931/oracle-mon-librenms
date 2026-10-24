@@ -17,11 +17,16 @@ final class LandscapeService
     public const RANKING_LIMIT = 5;
 
     private int $now;
+    private ?int $rangeSeconds;
 
     /** @param int|null $now 固定「現在」（Unix 時間），測試用 */
-    public function __construct(?int $now = null)
+    public function __construct(?int $now = null, ?int $rangeSeconds = null)
     {
+        if ($rangeSeconds !== null && !isset(NetworkVisibilityService::RANGE_LABELS[$rangeSeconds])) {
+            throw new ValidationError(['不支援的統計期間']);
+        }
         $this->now = $now ?? time();
+        $this->rangeSeconds = $rangeSeconds;
     }
 
     /**
@@ -160,6 +165,9 @@ final class LandscapeService
      */
     private function trend(array $rows): array
     {
+        if ($this->rangeSeconds !== null) {
+            return $this->windowTrend($rows, $this->rangeSeconds);
+        }
         $tz   = new \DateTimeZone('Asia/Taipei');
         $days = [];
         $idx  = [];
@@ -184,6 +192,30 @@ final class LandscapeService
         }
         // 資料層有筆數上限（保留最新的）。碰到上限就標示：較早的日期可能少算，不能默默當成「那幾天比較少」
         return ['days' => $days, 'series' => $series, 'total' => $total, 'capped' => count($rows) >= CaseRepo::CREATED_SINCE_LIMIT];
+    }
+
+    /** 所選區間分成六個連續時段；以建立時間計數，既有案件狀態不影響趨勢。 */
+    private function windowTrend(array $rows, int $range): array
+    {
+        $bucket = intdiv($range, 6);
+        $start = $this->now - $range;
+        $labels = [];
+        for ($i = 0; $i < 6; $i++) {
+            $labels[] = Time::toTaipei(gmdate('Y-m-d H:i:s', $start + $i * $bucket), 'H:i');
+        }
+        $series = ['high' => array_fill(0, 6, 0), 'medium' => array_fill(0, 6, 0), 'low' => array_fill(0, 6, 0)];
+        $total = 0;
+        foreach ($rows as $row) {
+            $ts = Time::parse($row['created_at']);
+            if ($ts === null || $ts < $start || $ts > $this->now || !isset($series[$row['severity']])) {
+                continue;
+            }
+            $index = min(5, intdiv($ts - $start, $bucket));
+            $series[$row['severity']][$index]++;
+            $total++;
+        }
+        return ['labels' => $labels, 'series' => $series, 'total' => $total,
+            'capped' => count($rows) >= CaseRepo::CREATED_SINCE_LIMIT];
     }
 
     // ── 站點 ────────────────────────────────────────────────────────────

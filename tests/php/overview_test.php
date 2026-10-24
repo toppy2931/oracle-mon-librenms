@@ -25,13 +25,13 @@ final class FakeLogSource implements LogSource
 
     public function aggregate(string $query, int $rangeSeconds, array $groupBy, array $metrics, int $limit = 100): array
     {
-        $this->calls[] = ['kind' => 'aggregate', 'query' => $query, 'groupBy' => $groupBy, 'metrics' => $metrics];
+        $this->calls[] = ['kind' => 'aggregate', 'query' => $query, 'range' => $rangeSeconds, 'groupBy' => $groupBy, 'metrics' => $metrics];
         return ($this->agg)($query, $groupBy, $metrics);
     }
 
     public function messages(string $query, int $rangeSeconds, array $fields, int $size): array
     {
-        $this->calls[] = ['kind' => 'messages', 'query' => $query, 'groupBy' => [], 'metrics' => []];
+        $this->calls[] = ['kind' => 'messages', 'query' => $query, 'range' => $rangeSeconds, 'groupBy' => [], 'metrics' => []];
         return ($this->msg)($query, $fields, $size);
     }
 }
@@ -119,6 +119,19 @@ test('總覽：一切正常時各區塊與 KPI 都有值', function () {
     assertSame(['ok', 'ok', 'ok', 'ok'], array_column($o['coverage']['data'], 'status'));
     assertSame(false, $o['meta']['demo']);
     assertSame('最近 24 小時', $o['meta']['range_label']);
+});
+
+test('總覽：六種統計期間都套用到每個 Graylog 查詢，並拒絕其他值', function () {
+    foreach (Ioc\NetworkVisibilityService::RANGE_LABELS as $seconds => $label) {
+        $source = healthySource();
+        $overview = (new OverviewService($source, false, NOW, Ioc\IpNets::DEFAULTS, $seconds))->build(devices(), cases());
+        assertSame([$seconds, '最近 ' . $label], [$overview['meta']['range_seconds'], $overview['meta']['range_label']]);
+        assertTrue(count($source->calls) >= 5);
+        foreach ($source->calls as $call) {
+            assertSame($seconds, $call['range'], '日誌查詢期間 ' . $label);
+        }
+    }
+    assertThrows(Ioc\ValidationError::class, static fn () => new OverviewService(healthySource(), false, NOW, null, 7200));
 });
 
 test('總覽：Graylog 無法連線時，相關區塊標示無法取得，數字是 null 而不是 0，其他區塊照常', function () {

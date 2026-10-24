@@ -238,6 +238,8 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
   const CAN_HANDLE = CFG.level === 'handler';
   const REFRESH_MS = 60000;
   const state = { tab: 'overview', filter: 'open', selected: null, form: null, overview: null, loadedAt: 0, overviewError: null, summary: null, refreshSettingsPreview: null };
+  let overviewRange = 86400;
+  let overviewSeq = 0;
 
   // 左側導覽。off＝簡報有、但目前沒有資料來源的項目：顯示成停用，不能點進去看到空白或假數字
   const NAV = [
@@ -444,8 +446,9 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
   const emptyNote = (base) => {
     const s = state.overview && state.overview.login_sources;
     if (!s || !s.missing.length) return base;
-    if (s.all_missing) return '尚未接入任何登入類來源（' + s.missing.join('、') + '），沒有資料可顯示，不代表沒有事件。';
-    return base + '（' + s.missing.join('、') + '尚未接入，不含其事件）';
+    const period = state.overview.meta.range_label;
+    if (s.all_missing) return period + '未收到任何登入類來源（' + s.missing.join('、') + '）的日誌，沒有資料可顯示，不代表沒有事件。';
+    return base + '（' + s.missing.join('、') + '在' + period + '沒有日誌，不含其事件）';
   };
   const section = (title, hint, body) => h('div', { class: 'card' },
     h('div', { class: 'card-h' }, h('h2', null, title), h('span', null, hint)), h('div', { class: 'card-b' }, body));
@@ -468,10 +471,10 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
       sec.data.map((r) => [r.time, r.user || '—', r.action, r.src_ip || '—', r.host || '—', r.type, levelBadge(r.level)]));
   }
 
-  function renderCoverage(sec) {
+  function renderCoverage(sec, rangeLabel) {
     if (!sec.ok) return unavailable(sec.error);
-    const labels = { ok: '正常接收', delayed: '延遲', stale: '中斷', none: '待接入', unknown: '無法判斷' };
-    return table(['系統類型', '目前狀態', '最後收到資料', '24 小時筆數'],
+    const labels = { ok: '正常接收', delayed: '延遲', stale: '中斷', none: '期間無資料', unknown: '無法判斷' };
+    return table(['系統類型', '目前狀態', '最後收到資料', rangeLabel + '筆數'],
       sec.data.map((c) => [c.label, badge(labels[c.status], stateOf[c.status]), c.last, c.status === 'none' ? '—' : fmt(c.count)]));
   }
 
@@ -480,14 +483,14 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     return h('button', { class: 'btn', type: 'button', onclick: () => { state.form = prefill; state.selected = null; setTab('cases'); } }, '建立事件案');
   }
 
-  function renderAttention(accounts, denied) {
+  function renderAttention(accounts, denied, rangeLabel) {
     const blocks = [];
     blocks.push(h('h3', { class: 'note' }, '可疑登入的帳號與來源'));
     if (!accounts.ok) blocks.push(unavailable(accounts.error));
     else if (!accounts.data.items.length) blocks.push(h('p', { class: 'note' }, emptyNote('沒有可疑的登入事件。')));
     else {
       accounts.data.items.forEach((a) => blocks.push(h('div', { class: 'row' },
-        h('div', null, h('div', { class: 't' }, a.user + (a.src_ip ? ' · ' + a.src_ip : '')), h('div', { class: 'd' }, '24 小時內 ' + fmt(a.count) + ' 次可疑事件')),
+        h('div', null, h('div', { class: 't' }, a.user + (a.src_ip ? ' · ' + a.src_ip : '')), h('div', { class: 'd' }, rangeLabel + '內 ' + fmt(a.count) + ' 次可疑事件')),
         h('div', { class: 'row' }, levelBadge({ high: '高', medium: '中', low: '低' }[a.level]),
           createButton({ title: '可疑登入：' + a.user + (a.src_ip ? '（' + a.src_ip + '）' : ''), severity: LEVEL_TO_SEVERITY[a.level],
             category: 'suspicious_login', subject_user: a.user, subject_ip: a.src_ip,
@@ -555,10 +558,11 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     ];
   }
 
-  function renderTrend(sec) {
+  function renderTrend(sec, rangeLabel) {
     if (!sec.ok) return unavailable(sec.error);
     const t = sec.data;
-    const W = 560, H = 170, L = 30, R = 8, T = 10, B = 22, n = t.days.length;
+    const labels = t.labels || t.days;
+    const W = 560, H = 170, L = 30, R = 8, T = 10, B = 22, n = labels.length;
     const max = Math.max(1, ...t.series.high, ...t.series.medium, ...t.series.low);
     const x = (i) => L + (W - L - R) * i / Math.max(1, n - 1);
     const y = (v) => T + (H - T - B) * (1 - v / max);
@@ -570,11 +574,12 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     });
     const lines = Object.keys(colors).map((k) => sv('polyline', { fill: 'none', stroke: colors[k], 'stroke-width': 2, 'stroke-linejoin': 'round',
       points: t.series[k].map((v, i) => x(i).toFixed(1) + ',' + y(v).toFixed(1)).join(' ') }));
-    const ticks = [0, Math.floor((n - 1) / 2), n - 1].map((i) => sv('text', { x: x(i), y: H - 6, 'text-anchor': i === 0 ? 'start' : (i === n - 1 ? 'end' : 'middle') }, t.days[i].slice(5)));
+    const ticks = [0, Math.floor((n - 1) / 2), n - 1].map((i) => sv('text', { x: x(i), y: H - 6, 'text-anchor': i === 0 ? 'start' : (i === n - 1 ? 'end' : 'middle') }, t.labels ? labels[i] : labels[i].slice(5)));
     return [
-      sv('svg', { viewBox: '0 0 ' + W + ' ' + H, class: 'chart', role: 'img', 'aria-label': '近 ' + n + ' 日新建事件案數，依嚴重性分三條線，共 ' + t.total + ' 件' }, grid, lines, ticks),
+      sv('svg', { viewBox: '0 0 ' + W + ' ' + H, class: 'chart', role: 'img', 'aria-label': rangeLabel + '新建事件案數，依嚴重性分三條線，共 ' + t.total + ' 件' }, grid, lines, ticks),
       h('div', { class: 'legend' }, Object.keys(colors).map((k) => h('span', null, h('i', { style: 'background:' + colors[k] }), names[k]))),
-      t.total === 0 ? h('p', { class: 'note' }, '最近 ' + n + ' 日沒有新建的事件案。') : null,
+      t.total === 0 ? h('p', { class: 'note' }, rangeLabel + '沒有新建的事件案。') : null,
+      t.capped ? h('p', { class: 'note warn' }, '事件案數量超過查詢上限，較早時段可能少算。') : null,
     ];
   }
 
@@ -637,29 +642,45 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
         h('td', null, badge(c.status_label, STATUS_COLOR[c.status] || 'gray')), h('td', null, c.assignee || '—')))));
   }
 
+  function overviewToolbar() {
+    const ranges = Object.entries(CFG.networkRanges).map(([seconds, label]) => [Number(seconds), label]);
+    return h('div', { class: 'toolbar', style: 'margin:0' },
+      h('label', null, '統計區間 ', h('select', { 'aria-label': '維運總覽統計區間', onchange: (ev) => {
+        overviewRange = Number(ev.target.value);
+        state.overview = null;
+        state.overviewError = null;
+        state.loadedAt = 0;
+        renderOverview(); renderSecurity(); renderTopbar();
+        loadOverview();
+      } }, ranges.map(([seconds, label]) => h('option', { value: String(seconds), selected: seconds === overviewRange }, label)))),
+      h('button', { class: 'btn', type: 'button', onclick: loadOverview }, '重新整理'),
+      h('span', { class: 'note', style: 'margin:0' }, '日誌與新建事件案依所選期間統計；站點、設備及待處理事件為目前狀態，可用率固定為最近 24 小時。'));
+  }
+
   function renderOverview() {
     const ov = state.overview;
     const root = $('#view-overview');
     if (!ov) {
-      root.replaceChildren(state.overviewError ? unavailable(state.overviewError) : h('p', { class: 'note' }, '載入中…'));
+      root.replaceChildren(overviewToolbar(), state.overviewError ? unavailable(state.overviewError) : h('p', { class: 'note' }, '載入中…'));
       return;
     }
     const L = ov.landscape;
     if (!L) {
-      root.replaceChildren(unavailable('伺服器沒有回傳總覽資料，請重新整理頁面'));
+      root.replaceChildren(overviewToolbar(), unavailable('伺服器沒有回傳總覽資料，請重新整理頁面'));
       return;
     }
     root.replaceChildren(
+      overviewToolbar(),
       h('section', { class: 'grid kpis6' }, L.kpi.map(kpiCard)),
       h('section', { class: 'grid three' },
         section('整體風險概況', '分數越高越好', renderRisk(L.risk)),
-        section('近 30 日新建事件案', '依嚴重性', renderTrend(L.trend)),
+        section('新建事件案趨勢', ov.meta.range_label + '，依嚴重性', renderTrend(L.trend, ov.meta.range_label)),
         section('站點分佈', '以設定頁的站點與網段為準（還沒設定時依 LibreNMS 的位置）', renderSites(L.sites))),
       h('section', { class: 'grid even' },
         section('站點健康度排行', '離線設備比例高的在前', renderRanking(L.ranking)),
         section('最新事件', '事件案，最近更新的在前', renderLatest(L.latest_cases))),
       h('section', { class: 'grid even' },
-        section('各類系統資料是否都有進來？', '資料涵蓋與新鮮度（' + ov.meta.range_label + '）', renderCoverage(ov.coverage)),
+        section('各類系統資料是否都有進來？', '資料涵蓋與新鮮度（' + ov.meta.range_label + '）', renderCoverage(ov.coverage, ov.meta.range_label)),
         section('需要關注的設備', '維運視角', renderDevices(ov.devices))));
   }
 
@@ -676,15 +697,21 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
       h('section', { class: 'grid kpis2' }, [pick('suspicious'), pick('sources')].filter(Boolean).map(kpiCard)),
       h('section', { class: 'grid two' },
         section('誰在什麼設備上做了什麼？', '使用者、來源位址與設備關聯', renderActivity(ov.activity)),
-        section('最需要注意的帳號與來源', ov.meta.range_label, renderAttention(ov.attention.accounts, ov.attention.denied_sources))));
+        section('最需要注意的帳號與來源', ov.meta.range_label, renderAttention(ov.attention.accounts, ov.attention.denied_sources, ov.meta.range_label))));
   }
 
   async function loadOverview() {
+    const seq = ++overviewSeq;
     try {
-      state.overview = await api('/ioc-data.php' + (CFG.demo ? '?demo=1' : ''));
+      const query = new URLSearchParams({ range_seconds: String(overviewRange) });
+      if (CFG.demo) query.set('demo', '1');
+      const overview = await api('/ioc-data.php?' + query.toString());
+      if (seq !== overviewSeq) return;
+      state.overview = overview;
       state.loadedAt = Date.now();
       state.overviewError = null;
     } catch (e) {
+      if (seq !== overviewSeq) return;
       state.overviewError = e.message;
     }
     renderOverview(); renderSecurity(); renderBanner(); renderTopbar();

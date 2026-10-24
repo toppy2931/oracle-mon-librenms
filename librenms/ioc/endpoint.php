@@ -30,7 +30,7 @@ use Ioc\Sites;
 use Ioc\UnavailableLogSource;
 
 const IOC_READER_CONF = '/etc/oracle-mon/graylog-reader.conf';
-const IOC_OVERVIEW_CACHE = 'ioc:overview:v4:';     // 後面接 live 或 demo；總覽的伺服器端快取（20 秒）。內容形狀改了就要升版號
+const IOC_OVERVIEW_CACHE = 'ioc:overview:v5:';     // 依統計期間與 demo 模式分開快取（20 秒）
 const IOC_NETWORK_CACHE = 'ioc:network:v2:';       // 依統計期間與 demo 模式分開快取；內部網段一改就要清掉
 
 /** 內部網段的設定有異動就讓內網可視性的快取失效，否則 60 秒內畫面還是用舊網段算的。 */
@@ -49,8 +49,10 @@ function ioc_network_cache_forget(): void
  */
 function ioc_overview_cache_forget(): void
 {
-    foreach (['live', 'demo'] as $k) {
-        \Illuminate\Support\Facades\Cache::forget(IOC_OVERVIEW_CACHE . $k);
+    foreach (['live', 'demo'] as $mode) {
+        foreach (array_keys(NetworkVisibilityService::RANGE_LABELS) as $range) {
+            \Illuminate\Support\Facades\Cache::forget(IOC_OVERVIEW_CACHE . $mode . ':' . $range);
+        }
     }
 }
 
@@ -404,7 +406,7 @@ function ioc_fleet(?Sites $sites = null): ?Fleet
 }
 
 /** @return array<string,mixed> */
-function ioc_overview(bool $demo, string $level): array
+function ioc_overview(bool $demo, string $level, int $range = OverviewService::RANGE): array
 {
     try {
         $logs = GraylogClient::fromConf(IOC_READER_CONF);
@@ -428,7 +430,7 @@ function ioc_overview(bool $demo, string $level): array
         $cases  = $svc->summary($level);
         $open   = $svc->openBySeverity($level);
         $latest = array_map([CaseView::class, 'row'], $svc->listCases(['status' => '', 'limit' => LandscapeService::LATEST_CASES], $level)['items']);
-        $trend  = $svc->createdWithin(LandscapeService::TREND_DAYS, $level);
+        $trend  = $svc->createdInLast($range, $level);
     } catch (\Throwable $e) {
         error_log('[ioc] cases: ' . $e->getMessage());
         $cases = $open = $latest = $trend = null;              // 例如資料表還沒建立：事件案相關的區塊整組標「無法取得」
@@ -445,8 +447,9 @@ function ioc_overview(bool $demo, string $level): array
         error_log('[ioc] internal nets: ' . $e->getMessage());
         $nets = null;                             // 讀不到內部網段：「防火牆阻擋的來源」分不出內外，該區塊標「無法取得」，不套預設網段
     }
-    $overview = (new OverviewService($logs, $demo, null, $nets))->build($fleet === null ? null : $fleet->legacy(), $cases);
-    $overview['landscape'] = (new LandscapeService())->build($fleet, $cases, $open, $latest, $trend, $overview['coverage'], $thresholds, $sitesWarning);
+    $now = time();
+    $overview = (new OverviewService($logs, $demo, $now, $nets, $range))->build($fleet === null ? null : $fleet->legacy(), $cases);
+    $overview['landscape'] = (new LandscapeService($now, $range))->build($fleet, $cases, $open, $latest, $trend, $overview['coverage'], $thresholds, $sitesWarning);
     return $overview;
 }
 

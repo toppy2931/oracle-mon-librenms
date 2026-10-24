@@ -157,6 +157,17 @@ final class CaseService
         return $this->repo->createdSince($since);
     }
 
+    /** 所選統計期間內建立的案件，只讀取繪製趨勢所需的時間與嚴重性。 */
+    public function createdInLast(int $rangeSeconds, ?string $level): array
+    {
+        $this->requireView($level);
+        if (!isset(NetworkVisibilityService::RANGE_LABELS[$rangeSeconds])) {
+            throw new ValidationError(['不支援的統計期間']);
+        }
+        $since = gmdate('Y-m-d H:i:s', (int) strtotime(($this->now)() . ' UTC') - $rangeSeconds);
+        return $this->repo->createdSince($since);
+    }
+
     public function transition(int $id, string $to, string $actor, ?string $level, ?string $resolution = null, ?string $note = null): void
     {
         $this->requireHandler($level);

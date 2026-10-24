@@ -301,7 +301,7 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
         self.assertIn("IpNets::contains($this->nets", overview)
         self.assertNotIn("FILTER_FLAG_NO_PRIV_RANGE", overview, "不要再用 PHP 內建的私有位址判斷")
         endpoint = (ROOT / "librenms" / "ioc" / "endpoint.php").read_text(encoding="utf-8")
-        self.assertRegex(endpoint, r"(?s)internalNets\(\$level\);\s*\} catch \(\\Throwable \$e\) \{.*?\$nets = null;.*?new OverviewService\(\$logs, \$demo, null, \$nets\)",
+        self.assertRegex(endpoint, r"(?s)internalNets\(\$level\);\s*\} catch \(\\Throwable \$e\) \{.*?\$nets = null;.*?new OverviewService\(\$logs, \$demo, \$now, \$nets, \$range\)",
                          "內部網段讀不到要傳 null，由總覽標「無法取得」，不能套預設網段")
 
     def test_network_service_never_reads_raw_messages_or_uses_relative_ranges(self):

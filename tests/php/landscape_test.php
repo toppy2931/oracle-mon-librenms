@@ -241,6 +241,18 @@ test('事件案：趨勢用的建立時間只取最近 N+1 天內的，需要檢
     assertThrows(AccessDenied::class, fn () => $svc->createdWithin(30, null));
 });
 
+test('事件案：所選短期間從精確 UTC 起點讀取，且需要檢視權限', function () {
+    $repo = new MemoryCaseRepo();
+    $now = '2026-10-20 08:00:00';
+    $svc = new CaseService($repo, fn () => $now);
+    foreach (['2026-10-20 07:29:59', '2026-10-20 07:30:00', '2026-10-20 07:59:59'] as $at) {
+        $repo->insertCase(['title' => 't', 'severity' => 'low', 'status' => 'new', 'created_at' => $at, 'updated_at' => $at]);
+    }
+    assertSame(['2026-10-20 07:59:59', '2026-10-20 07:30:00'], array_column($svc->createdInLast(1800, Access::VIEWER), 'created_at'));
+    assertThrows(AccessDenied::class, fn () => $svc->createdInLast(1800, null));
+    assertThrows(Ioc\ValidationError::class, fn () => $svc->createdInLast(7200, Access::VIEWER));
+});
+
 // ── LandscapeService ────────────────────────────────────────────────
 
 function lsFleet(): Fleet
@@ -472,6 +484,26 @@ test('總覽：近 30 日趨勢：台北時間分日、依嚴重性分線，範�
     assertSame([0, 1], [$t['series']['medium'][29], $t['series']['medium'][28]]);
     assertSame(3, $t['total']);
     assertSame(0, array_sum($t['series']['high']) - 1, '只有今天那一筆高風險');
+});
+
+test('總覽：短期間事件趨勢分六格，起迄與邊界不漏算也不混入區間外資料', function () {
+    $start = LS_NOW - 1800;
+    $at = static fn (int $ts) => gmdate('Y-m-d H:i:s', $ts);
+    $rows = [
+        ['created_at' => $at($start - 1), 'severity' => 'high'],
+        ['created_at' => $at($start), 'severity' => 'high'],
+        ['created_at' => $at($start + 299), 'severity' => 'medium'],
+        ['created_at' => $at($start + 300), 'severity' => 'low'],
+        ['created_at' => $at(LS_NOW), 'severity' => 'high'],
+        ['created_at' => $at(LS_NOW + 1), 'severity' => 'high'],
+    ];
+    $result = (new LandscapeService(LS_NOW, 1800))->build(lsFleet(), null, null, [], $rows, lsCoverage(), RiskScore::DEFAULT_THRESHOLDS);
+    $trend = $result['trend']['data'];
+    assertSame(6, count($trend['labels']));
+    assertSame([1, 0, 0, 0, 0, 1], $trend['series']['high']);
+    assertSame([1, 0, 0, 0, 0, 0], $trend['series']['medium']);
+    assertSame([0, 1, 0, 0, 0, 0], $trend['series']['low']);
+    assertSame(4, $trend['total']);
 });
 
 test('總覽：沒有任何事件案時，趨勢是 30 天的 0（資料表讀得到，這是真的 0）', function () {
