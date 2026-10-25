@@ -1,0 +1,11 @@
+[Unit]
+Description=Run agentless Linux audit checks daily
+
+[Timer]
+OnBootSec=10min
+OnUnitInactiveSec=1d
+RandomizedDelaySec=5min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

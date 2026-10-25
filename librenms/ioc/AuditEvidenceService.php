@@ -145,7 +145,7 @@ final class AuditEvidenceService
         }
         $counts['assessed'] = $counts['total'] - $counts['unreviewed'];
         $rem = $this->one('SELECT COUNT(*) AS total,COALESCE(SUM(CASE WHEN status<>\'done\' AND due_on<CURRENT_DATE() THEN 1 ELSE 0 END),0) AS overdue,COALESCE(SUM(CASE WHEN status=\'done\' THEN 1 ELSE 0 END),0) AS done FROM ioc_audit_remediation WHERE cycle_id=?', [(int) $cycle['id']]);
-        $snap = $this->one('SELECT COUNT(*) AS snapshots,COALESCE(SUM(bytes),0) AS bytes FROM ioc_audit_evidence WHERE cycle_id=? AND kind=\'case_snapshot\'', [(int) $cycle['id']]);
+        $snap = $this->one('SELECT COUNT(*) AS snapshots,COALESCE(SUM(bytes),0) AS bytes FROM ioc_audit_evidence WHERE cycle_id=? AND kind IN (\'case_snapshot\',\'auto_snapshot\')', [(int) $cycle['id']]);
         $counts += ['remediations' => (int) $rem['total'], 'overdue' => (int) $rem['overdue'], 'remediations_done' => (int) $rem['done'],
             'snapshots' => (int) $snap['snapshots'], 'snapshot_bytes' => (int) $snap['bytes']];
         return ['ready' => true, 'message' => null, 'catalog' => $catalog['version_label'],
@@ -157,7 +157,7 @@ final class AuditEvidenceService
     public function detail(int $cycleId, ?string $level): array
     {
         Access::requireHandler($level, '只有管理者可以檢視稽核明細');
-        $stored = $this->one('SELECT COALESCE(SUM(bytes),0) AS used_bytes FROM ioc_audit_evidence WHERE kind=\'case_snapshot\'');
+        $stored = $this->one("SELECT (SELECT COALESCE(SUM(bytes),0) FROM ioc_audit_evidence WHERE kind IN ('case_snapshot','auto_snapshot')) + (SELECT COALESCE(SUM(bytes),0) FROM ioc_audit_auto_evidence WHERE snapshot_name IS NOT NULL) AS used_bytes");
         $storage = ['storage_free_bytes' => $this->store->freeBytes(), 'storage_used_bytes' => (int) $stored['used_bytes']];
         $events = $this->all('SELECT occurred_at,actor,action,target_type,target_id FROM ioc_audit_events ORDER BY id DESC LIMIT 100');
         $catalogs = $this->all('SELECT id,version_label,digest,active,created_at FROM ioc_audit_catalogs ORDER BY id DESC LIMIT 50');
@@ -293,7 +293,7 @@ final class AuditEvidenceService
     {
         $this->admin($level, $actor);
         $row = $this->requireRow('SELECT * FROM ioc_audit_evidence WHERE id=?', [$id]);
-        if ($row['kind'] !== 'case_snapshot') { throw new ValidationError(['此證據只有來源連結，沒有可下載快照']); }
+        if (!in_array($row['kind'], ['case_snapshot', 'auto_snapshot'], true)) { throw new ValidationError(['此證據只有來源連結，沒有可下載快照']); }
         $content = $this->store->get((string) $row['snapshot_name'], (string) $row['sha256'], (int) $row['bytes']);
         $this->event($actor, 'evidence_download', 'evidence', $id);
         return ['content' => $content, 'filename' => 'ioc-evidence-' . $id . '.json'];

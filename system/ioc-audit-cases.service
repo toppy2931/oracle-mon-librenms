@@ -1,0 +1,21 @@
+[Unit]
+Description=IOC mapped closed-case evidence capture
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=librenms
+Group=librenms
+Environment=LIBRENMS_DIR=/opt/librenms
+ExecStart=/usr/bin/php /opt/oracle-mon/admin/ioc-audit-cases.php
+TimeoutStartSec=120
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/oracle-mon/ioc-evidence

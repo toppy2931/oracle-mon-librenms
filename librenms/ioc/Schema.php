@@ -229,6 +229,173 @@ CREATE TABLE IF NOT EXISTS ioc_audit_events (
   KEY idx_ioc_audit_events_time (occurred_at, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 SQL,
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_audit_assets (
+  id INT UNSIGNED NOT NULL,
+  name VARCHAR(200) NOT NULL,
+  address VARCHAR(255) NOT NULL,
+  kind VARCHAR(16) NOT NULL,
+  readiness VARCHAR(24) NOT NULL,
+  reason VARCHAR(120) NOT NULL DEFAULT '',
+  os_confirmed TINYINT(1) NOT NULL DEFAULT 1,
+  last_seen_at DATETIME NOT NULL,
+  requested_at DATETIME NULL,
+  PRIMARY KEY (id),
+  KEY idx_ioc_audit_assets_kind (kind, readiness)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            'ALTER TABLE ioc_audit_assets ADD COLUMN IF NOT EXISTS requested_at DATETIME NULL',
+            'ALTER TABLE ioc_audit_assets ADD COLUMN IF NOT EXISTS os_confirmed TINYINT(1) NOT NULL DEFAULT 1',
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_audit_packs (
+  pack_key VARCHAR(40) NOT NULL,
+  version INT UNSIGNED NOT NULL,
+  enabled TINYINT(1) NOT NULL DEFAULT 0,
+  updated_by VARCHAR(255) NOT NULL,
+  updated_at DATETIME NOT NULL,
+  PRIMARY KEY (pack_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_audit_mappings (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  cycle_id INT UNSIGNED NOT NULL,
+  control_id INT UNSIGNED NOT NULL,
+  pack_key VARCHAR(40) NOT NULL,
+  pack_version INT UNSIGNED NOT NULL DEFAULT 1,
+  rule_id VARCHAR(80) NOT NULL,
+  active TINYINT(1) NOT NULL DEFAULT 1,
+  created_by VARCHAR(255) NOT NULL,
+  created_at DATETIME NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_ioc_audit_mapping (cycle_id, control_id, pack_key, rule_id),
+  KEY idx_ioc_audit_mapping_control (cycle_id, control_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            'ALTER TABLE ioc_audit_mappings ADD COLUMN IF NOT EXISTS pack_version INT UNSIGNED NOT NULL DEFAULT 1',
+            'ALTER TABLE ioc_audit_mappings ADD COLUMN IF NOT EXISTS active TINYINT(1) NOT NULL DEFAULT 1',
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_audit_runs (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  asset_id INT UNSIGNED NULL,
+  source VARCHAR(32) NOT NULL,
+  source_revision VARCHAR(128) NOT NULL,
+  pack_key VARCHAR(40) NOT NULL,
+  pack_version INT UNSIGNED NOT NULL,
+  dedupe_key CHAR(64) NOT NULL,
+  status VARCHAR(20) NOT NULL,
+  error_code VARCHAR(48) NOT NULL DEFAULT '',
+  started_at DATETIME NOT NULL,
+  finished_at DATETIME NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_ioc_audit_run_dedupe (dedupe_key),
+  KEY idx_ioc_audit_run_asset (asset_id, pack_key, id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_audit_auto_evidence (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  run_id BIGINT UNSIGNED NOT NULL,
+  source_ref VARCHAR(200) NOT NULL,
+  snapshot_name CHAR(37) NULL,
+  sha256 CHAR(64) NOT NULL,
+  bytes INT UNSIGNED NOT NULL,
+  item_count INT UNSIGNED NOT NULL DEFAULT 0,
+  truncated TINYINT(1) NOT NULL DEFAULT 0,
+  source_from DATETIME NULL,
+  source_to DATETIME NULL,
+  captured_at DATETIME NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_ioc_audit_auto_evidence_run (run_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_audit_auto_links (
+  evidence_id BIGINT UNSIGNED NOT NULL,
+  cycle_id INT UNSIGNED NOT NULL,
+  control_id INT UNSIGNED NOT NULL,
+  PRIMARY KEY (evidence_id, cycle_id, control_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_audit_proposal_evidence (
+  proposal_id BIGINT UNSIGNED NOT NULL,
+  evidence_id BIGINT UNSIGNED NOT NULL,
+  PRIMARY KEY (proposal_id,evidence_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_audit_case_mappings (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  cycle_id INT UNSIGNED NOT NULL,
+  control_id INT UNSIGNED NOT NULL,
+  category VARCHAR(32) NOT NULL,
+  active TINYINT(1) NOT NULL DEFAULT 1,
+  created_by VARCHAR(255) NOT NULL,
+  created_at DATETIME NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_ioc_audit_case_mapping (cycle_id,control_id,category)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            'ALTER TABLE ioc_audit_case_mappings ADD COLUMN IF NOT EXISTS active TINYINT(1) NOT NULL DEFAULT 1',
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_audit_mapping_history (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  mapping_kind VARCHAR(16) NOT NULL,
+  mapping_id BIGINT UNSIGNED NOT NULL,
+  cycle_id INT UNSIGNED NOT NULL,
+  control_id INT UNSIGNED NOT NULL,
+  source_key VARCHAR(80) NOT NULL,
+  source_version INT UNSIGNED NOT NULL,
+  action VARCHAR(16) NOT NULL,
+  actor VARCHAR(255) NOT NULL,
+  occurred_at DATETIME NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_ioc_audit_mapping_history (cycle_id,mapping_kind,mapping_id,id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_audit_case_attempts (
+  case_id INT UNSIGNED NOT NULL,
+  cycle_id INT UNSIGNED NOT NULL,
+  control_id INT UNSIGNED NOT NULL,
+  closed_at DATETIME NOT NULL,
+  evidence_id BIGINT UNSIGNED NULL,
+  status VARCHAR(16) NOT NULL,
+  error_code VARCHAR(48) NOT NULL DEFAULT '',
+  attempted_at DATETIME NOT NULL,
+  PRIMARY KEY (case_id,cycle_id,control_id,closed_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_audit_results (
+  run_id BIGINT UNSIGNED NOT NULL,
+  rule_id VARCHAR(80) NOT NULL,
+  status VARCHAR(20) NOT NULL,
+  evidence_id BIGINT UNSIGNED NOT NULL,
+  PRIMARY KEY (run_id, rule_id),
+  KEY idx_ioc_audit_result_rule (rule_id, run_id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_audit_proposals (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  cycle_id INT UNSIGNED NOT NULL,
+  control_id INT UNSIGNED NOT NULL,
+  evidence_id BIGINT UNSIGNED NULL,
+  fingerprint CHAR(64) NOT NULL,
+  status VARCHAR(16) NOT NULL,
+  reason VARCHAR(200) NOT NULL,
+  review_state VARCHAR(16) NOT NULL DEFAULT 'pending',
+  reviewed_by VARCHAR(255) NULL,
+  review_reason VARCHAR(2000) NULL,
+  created_at DATETIME NOT NULL,
+  reviewed_at DATETIME NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_ioc_audit_proposal_fingerprint (fingerprint),
+  KEY idx_ioc_audit_proposal_pending (cycle_id, review_state, id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
         ];
     }
 }

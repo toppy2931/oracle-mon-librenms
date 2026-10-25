@@ -26,6 +26,8 @@ try {
     };
     $svc = new \Ioc\AuditEvidenceService(\Illuminate\Support\Facades\DB::connection()->getPdo(),
         new \Ioc\AuditSnapshotStore(), $caseSource, $backupSource);
+    $automation = new \Ioc\AuditAutomationService(\Illuminate\Support\Facades\DB::connection()->getPdo(),
+        new \Ioc\AuditSnapshotStore());
     $id = static function (string $key) use ($in): int {
         $v = $in[$key] ?? null;
         if (!is_int($v) || $v < 1 || $v > 2147483647) {
@@ -39,6 +41,39 @@ try {
     };
     switch ($action) {
         case 'summary': ioc_json(['summary' => $svc->summary($level)]);
+        case 'automation_state':
+            $rows = \Illuminate\Support\Facades\DB::table('devices')->where('disabled', 0)->where('ignore', 0)
+                ->get(['device_id', 'hostname', 'sysName', 'display', 'type', 'os', 'overwrite_ip', 'ip']);
+            $assets = [];
+            foreach ($rows as $device) {
+                $asset = \Ioc\AuditAssetDiscovery::fromLibreNms($device);
+                if ($asset !== null) { $assets[] = $asset; }
+            }
+            $automation->syncAssets($assets);
+            ioc_json(['automation' => $automation->state($level)]);
+        case 'automation_activate':
+            if (!is_bool($in['enabled'] ?? null)) { ioc_fail(400, '啟用狀態不正確'); }
+            $automation->activate($str('pack_key'), $in['enabled'], $actor, $level);
+            ioc_json(['ok' => true]);
+        case 'automation_map':
+            $automation->map($id('cycle_id'), $id('control_id'), $str('rule_id'), $actor, $level);
+            ioc_json(['ok' => true]);
+        case 'automation_map_case':
+            $automation->mapCase($id('cycle_id'), $id('control_id'), $str('category'), $actor, $level);
+            ioc_json(['ok' => true]);
+        case 'automation_unmap':
+            $automation->deactivateMapping($id('mapping_id'), $str('kind'), $actor, $level);
+            ioc_json(['ok' => true]);
+        case 'automation_run':
+            $automation->requestRun($id('asset_id'), $actor, $level);
+            ioc_json(['ok' => true]);
+        case 'automation_review':
+            $ids = $in['proposal_ids'] ?? null;
+            if (!is_array($ids)) { ioc_fail(400, '建議編號不正確'); }
+            $status = $in['status'] ?? null;
+            if ($status !== null && !is_string($status)) { ioc_fail(400, '判定狀態不正確'); }
+            $automation->review($ids, $str('decision'), $status, $str('reason'), $actor, $level);
+            ioc_json(['ok' => true]);
         case 'detail':
             $cycleId = $in['cycle_id'] ?? 0;
             if (!is_int($cycleId) || $cycleId < 0) { ioc_fail(400, '週期識別碼不正確'); }

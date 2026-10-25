@@ -18,7 +18,7 @@ if (!defined('IOC_LIB_LOADED')) {
         'IpNets', 'Sites', 'SettingsRepo', 'PdoSettingsRepo', 'SettingsService',
         'IdentityService', 'AuditTrail', 'HostLoginService', 'NetworkVisibilityService',
         'ConfigBackupGateway', 'ConfigBackupService',
-        'AuditEvidenceService', 'AuditSnapshotStore',
+        'AuditEvidenceService', 'AuditSnapshotStore', 'AuditAssetDiscovery', 'AuditAutomationService',
     ] as $f) {
         require_once __DIR__ . '/' . $f . '.php';
     }

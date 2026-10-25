@@ -46,6 +46,13 @@ say "移除 sudoers"
 for unit in ioc-config-backup.timer ioc-config-backup.service ioc-config-backup-oxidized.service; do
     systemctl disable --now "$unit" >/dev/null 2>&1 || true
 done
+for unit in ioc-audit.timer ioc-audit-network.timer ioc-audit-linux.timer ioc-audit-cases.timer \
+    ioc-audit.service ioc-audit-network.service ioc-audit-linux.service ioc-audit-cases.service; do
+    systemctl disable --now "$unit" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/$unit"
+done
+systemctl daemon-reload
+# 稽核證據、受限 SSH 金鑰與專用帳號保留，避免解除安裝時破壞歷史與憑證。
 rm -f /etc/sudoers.d/oracle-admin
 
 say "移除 snmpd managed block"

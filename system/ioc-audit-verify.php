@@ -11,8 +11,11 @@ $app->make(Illuminate\Contracts\Console\Kernel::class)->bootstrap();
 require "$library/bootstrap.php";
 
 $db = Illuminate\Support\Facades\DB::connection()->getPdo();
-$rows = $db->query("SELECT id,snapshot_name,sha256,bytes FROM ioc_audit_evidence WHERE kind='case_snapshot' ORDER BY id")
+$rows = $db->query("SELECT id,snapshot_name,sha256,bytes FROM ioc_audit_evidence WHERE kind IN ('case_snapshot','auto_snapshot') ORDER BY id")
     ->fetchAll(PDO::FETCH_ASSOC);
+$auto = $db->query('SELECT id,snapshot_name,sha256,bytes FROM ioc_audit_auto_evidence WHERE snapshot_name IS NOT NULL ORDER BY id')
+    ->fetchAll(PDO::FETCH_ASSOC);
+$rows = array_merge($rows, $auto);
 $store = new Ioc\AuditSnapshotStore();
 $failed = 0;
 foreach ($rows as $row) {

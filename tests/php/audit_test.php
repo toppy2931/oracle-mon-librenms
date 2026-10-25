@@ -35,3 +35,17 @@ test('私有證據快照下載前驗證大小與雜湊，不能用路徑跳脫',
         rmdir($root);
     }
 });
+
+test('LibreNMS 的 Linux 發行版與未確認伺服器都納入涵蓋清單', static function (): void {
+    $device = (object) ['device_id' => 22, 'hostname' => '192.0.2.22', 'sysName' => '',
+        'display' => '', 'type' => 'server', 'os' => 'ubuntu', 'overwrite_ip' => null, 'ip' => null];
+    $known = \Ioc\AuditAssetDiscovery::fromLibreNms($device);
+    assertSame('linux', $known['kind']);
+    assertSame(true, $known['os_confirmed']);
+    $device->os = 'generic';
+    $pending = \Ioc\AuditAssetDiscovery::fromLibreNms($device);
+    assertSame('linux', $pending['kind']);
+    assertSame(false, $pending['os_confirmed']);
+    $device->type = 'firewall';
+    assertSame('network', \Ioc\AuditAssetDiscovery::fromLibreNms($device)['kind']);
+});

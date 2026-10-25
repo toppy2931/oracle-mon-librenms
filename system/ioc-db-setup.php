@@ -27,7 +27,10 @@ $exists = static function (string $table) use ($pdo): bool {
 $tables = ['ioc_cases', 'ioc_case_history', 'ioc_settings', 'ioc_settings_history',
     'ioc_audit_catalogs', 'ioc_audit_controls', 'ioc_audit_cycles', 'ioc_audit_evidence',
     'ioc_audit_assessments', 'ioc_audit_assessment_history', 'ioc_audit_remediation',
-    'ioc_audit_remediation_history', 'ioc_audit_events'];
+    'ioc_audit_remediation_history', 'ioc_audit_events', 'ioc_audit_assets',
+    'ioc_audit_packs', 'ioc_audit_mappings', 'ioc_audit_runs', 'ioc_audit_auto_evidence',
+    'ioc_audit_auto_links', 'ioc_audit_proposal_evidence', 'ioc_audit_case_mappings', 'ioc_audit_case_attempts', 'ioc_audit_mapping_history',
+    'ioc_audit_results', 'ioc_audit_proposals'];
 $before = array_map($exists, $tables);
 
 foreach (Ioc\Schema::statements() as $sql) {

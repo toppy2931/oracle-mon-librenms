@@ -1,0 +1,11 @@
+[Unit]
+Description=Capture mapped closed IOC cases
+
+[Timer]
+OnBootSec=12min
+OnUnitInactiveSec=15min
+RandomizedDelaySec=2min
+Persistent=true
+
+[Install]
+WantedBy=timers.target

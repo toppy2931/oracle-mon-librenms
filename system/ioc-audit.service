@@ -1,0 +1,21 @@
+[Unit]
+Description=IOC bounded audit evidence scan
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=librenms
+Group=librenms
+Environment=LIBRENMS_DIR=/opt/librenms
+ExecStart=/usr/bin/php /opt/oracle-mon/admin/ioc-audit-tick.php
+TimeoutStartSec=270
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ReadWritePaths=/var/lib/oracle-mon/ioc-evidence
+CapabilityBoundingSet=
+RestrictSUIDSGID=yes
+LockPersonality=yes
+PrivateDevices=yes
+RestrictAddressFamilies=AF_UNIX

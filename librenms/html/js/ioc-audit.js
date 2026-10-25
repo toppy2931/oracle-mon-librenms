@@ -6,6 +6,8 @@
     let selectedCycle = 0;
     let selectedControl = 0;
     let detail = null;
+    let automation = null;
+    let automationError = '';
     let previewDigest = null;
     let csvText = '';
     const request = (body) => api('/ioc-audit.php', body);
@@ -15,7 +17,11 @@
     const button = (text, fn, primary) => h('button', { type: 'button', class: 'btn' + (primary ? ' primary' : ''), onclick: fn }, text);
     const field = (title, input) => h('div', null, h('label', null, title), input);
     const input = (type, value, attrs) => h('input', Object.assign({ type, value: value || '' }, attrs || {}));
-    const select = (items, value) => h('select', null, items.map(([key, label]) => h('option', { value: key, selected: String(key) === String(value) }, label)));
+    const select = (items, value) => {
+      const menu = h('select', null, items.map(([key, label]) => h('option', { value: key, selected: String(key) === String(value) }, label)));
+      menu.value = String(value);
+      return menu;
+    };
     const errText = (e) => (e.errors && e.errors.length ? e.errors.join('；') : e.message);
     const run = async (fn, success) => {
       try { await fn(); if (success) toast(success); await load(); }
@@ -29,12 +35,21 @@
         const summary = (await request({ action: 'summary' })).summary;
         detail = canHandle ? (await request({ action: 'detail', cycle_id: selectedCycle })).detail : null;
         if (detail && detail.selected_cycle) selectedCycle = detail.selected_cycle;
+        automation = null;
+        automationError = '';
+        if (canHandle) {
+          try { automation = (await request({ action: 'automation_state' })).automation; }
+          catch (e) { automationError = errText(e); }
+        }
         render(summary);
       } catch (e) { root.replaceChildren(card('稽核與證據', h('div', { class: 'alert' }, '無法取得稽核資料：' + errText(e)))); }
     }
 
     function render(summary) {
-      const sections = [card('評估摘要', summary.ready ? summaryView(summary) : h('div', { class: 'alert' }, summary.message || '未建立評估基準'))];
+      const sections = [];
+      if (canHandle) sections.push(automation ? automationView() : card('自動化工作台',
+        h('div', { class: 'alert' }, '無法取得自動化狀態：' + (automationError || '請稍後重新整理'))));
+      sections.push(card('評估摘要', summary.ready ? summaryView(summary) : h('div', { class: 'alert' }, summary.message || '未建立評估基準')));
       if (canHandle && detail) {
         sections.push(catalogView(), cycleView());
         if (detail.selected_cycle) sections.push(controlView());
@@ -42,6 +57,166 @@
       }
       sections.push(info('本頁保存的是內部稽核工作紀錄；尚未建立正式控制項時不計算符合率。事件案快照最多保存 30 筆標準化日誌，並非完整 Graylog 封存。'));
       root.replaceChildren(...sections);
+    }
+
+    function automationView() {
+      const a = automation;
+      const counts = a.counts || {};
+      const assets = a.assets || [];
+      const packs = a.packs || [];
+      const mappings = a.mappings || [];
+      const runs = a.runs || [];
+      const proposals = a.proposals || [];
+      const activeCycle = Number(detail && detail.current_cycle_id) || 0;
+      const controls = detail && detail.selected_cycle && Number(detail.selected_cycle) === activeCycle ? detail.controls || [] : [];
+      const statusLabels = { compliant: '符合', gap: '缺口', unknown: '待查', unreviewed: '未評估', not_applicable: '不適用' };
+      const sourceLabels = { backup: '組態備份', network: '網路設定', linux: 'Linux SSH', case: '事件案' };
+      const check = h('div', { class: 'counts', style: 'grid-template-columns:repeat(4,minmax(0,1fr))' },
+        [[counts.total, '發現資產'], [counts.ready, '已就緒'], [counts.pending, '待設定／待確認'],
+          [counts.source_errors, '來源故障'], [counts.pending_proposals, '待審建議'], [counts.stale, '過期證據'],
+          [counts.overdue, '改善逾期']].map(([value, label]) => h('div', { class: 'cnt' }, h('b', null, value == null ? 0 : value), label)));
+      const sections = [check, info('自動檢查只建立證據與判定建議；正式評估須由管理者核定。未建立正式控制項時，不計算符合率。')];
+      if (!activeCycle) sections.push(h('div', { class: 'alert' }, '尚無目前評估週期。可查看資產與技術檢查；請先啟用控制項目錄並建立週期，才能對應規則及核定建議。'));
+
+      sections.push(h('h3', { class: 'sec-h' }, '資產與就緒狀態'));
+      sections.push(assets.length ? table(['資產', '種類', '就緒狀態', '原因', '操作'], assets.map((asset) => [
+        asset.name || '#' + asset.id, asset.type || '—', asset.readiness || '待確認', asset.reason || '—',
+        asset.os_confirmed == null || Number(asset.os_confirmed) === 1 ?
+          automationButton('執行檢查', { action: 'automation_run', asset_id: Number(asset.id) }, '檢查已排入執行') : '待確認作業系統'
+      ])) : info('尚未發現資產。'));
+
+      sections.push(h('h3', { class: 'sec-h' }, '版本化檢查包與控制項對應'));
+      if (!packs.length) sections.push(info('尚無可用檢查包。'));
+      for (const pack of packs) {
+        const rules = pack.rules || [];
+        sections.push(h('div', { class: 'card', style: 'margin-bottom:10px' }, h('div', { class: 'card-b' },
+          h('div', { class: 'toolbar' }, h('strong', null, pack.key + '／' + pack.version),
+            info(pack.enabled ? '已啟用' : '未啟用'),
+            automationButton(pack.enabled ? '停用檢查包' : '啟用檢查包',
+              { action: 'automation_activate', pack_key: pack.key, enabled: !pack.enabled }, pack.enabled ? '檢查包已停用' : '檢查包已啟用')),
+          rules.length ? table(['檢查代碼', '檢查內容', '已對應控制項', '操作'], rules.map((rule) => [
+            rule.id, h('span', null, rule.title || rule.id, rule.description ? '：' + rule.description : ''),
+            mappings.filter((m) => String(m.rule_id) === String(rule.id)).length ? h('div', null,
+              mappings.filter((m) => String(m.rule_id) === String(rule.id)).map((m) => h('span', { class: 'toolbar' },
+                (m.control_code || '#' + m.control_id) + '（v' + (m.pack_version || '?') + '）',
+                automationButton('停用', { action: 'automation_unmap', mapping_id: Number(m.id), kind: 'rule' }, '對應已停用')))) : '尚未對應',
+            activeCycle && controls.length ? mappingControl(rule, controls, activeCycle) : '—'
+          ])) : info('此檢查包沒有規則。'))));
+      }
+
+      const categories = a.case_categories || [];
+      const caseMappings = a.case_mappings || [];
+      const caseAttempts = a.case_attempts || [];
+      sections.push(h('h3', { class: 'sec-h' }, '已結案事件案自動擷取'));
+      sections.push(info('先選擇事件類型及正式控制項；背景工作器只擷取已結案事件案的受限 Graylog 快照。查無資料與來源故障會分別記錄，不會自動判定符合。'));
+      if (activeCycle && controls.length && categories.length) {
+        const categoryChoice = select(categories.map((c) => [c.key, c.label]), categories[0].key);
+        const controlChoice = select([[0, '選擇控制項'], ...controls.map((c) => [c.id, c.code + '　' + c.title])], 0);
+        sections.push(h('div', { class: 'toolbar' }, categoryChoice, controlChoice,
+          button('啟用此類型擷取', () => {
+            const controlId = Number(controlChoice.value);
+            if (!controlId) { toast('請先選擇控制項', true); return; }
+            run(() => request({ action: 'automation_map_case', cycle_id: activeCycle,
+              control_id: controlId, category: categoryChoice.value }), '事件類型已對應');
+          })));
+      }
+      sections.push(caseMappings.length ? table(['事件類型', '控制項', '操作'], caseMappings.map((m) => [
+        (categories.find((c) => c.key === m.category) || {}).label || m.category, m.control_code || '#' + m.control_id,
+        automationButton('停用', { action: 'automation_unmap', mapping_id: Number(m.id), kind: 'case' }, '事件類型對應已停用')
+      ])) : info('尚未啟用任何事件類型擷取。'));
+      if (caseAttempts.length) sections.push(table(['事件案', '結果', '時間'], caseAttempts.map((entry) => [
+        '#' + entry.case_id, entry.status === 'captured' ? '快照已保存' :
+          entry.status === 'empty' ? '查無資料（已保存空結果）' : '來源故障', entry.attempted_at || '—'
+      ])));
+
+      sections.push(h('h3', { class: 'sec-h' }, '待審判定建議'));
+      if (!proposals.length) sections.push(info('目前沒有待審建議。'));
+      else sections.push(proposalReview(proposals, activeCycle, statusLabels));
+
+      const remediationHints = a.remediation_hints || [];
+      if (remediationHints.length) {
+        sections.push(h('h3', { class: 'sec-h' }, '改善事項待結案提醒'));
+        sections.push(info('最新技術檢查已通過；請先確認實際改善情形，再由管理者以既有流程結案。'));
+        sections.push(table(['改善事項', '控制項', '期限'], remediationHints.map((item) => [
+          '#' + item.id, item.control_code || '—', item.due_on || '—'
+        ])));
+      }
+
+      sections.push(h('h3', { class: 'sec-h' }, '近期檢查執行紀錄'));
+      sections.push(runs.length ? table(['資產', '來源', '狀態', '開始', '完成', '摘要'], runs.map((entry) => [
+        entry.asset_name || '—', sourceLabels[entry.source] || entry.source || '—', entry.status || '—',
+        entry.started_at || '—', entry.finished_at || '—', entry.summary || '—'
+      ])) : info('尚無檢查執行紀錄。'));
+      return card('自動化工作台', ...sections);
+    }
+
+    function automationButton(label, body, success) {
+      let control;
+      control = button(label, async () => {
+        control.disabled = true;
+        control.textContent = '處理中…';
+        try { await request(body); toast(success); await load(); }
+        catch (e) { toast(errText(e), true); control.disabled = false; control.textContent = label; }
+      });
+      return control;
+    }
+
+    function mappingControl(rule, controls, cycleId) {
+      const choices = select([[0, '選擇控制項'], ...controls.map((c) => [c.id, c.code + '　' + c.title])], 0);
+      return h('div', { class: 'toolbar' }, choices, button('建立對應', async (event) => {
+        const controlId = Number(choices.value);
+        if (!controlId) { toast('請先選擇控制項', true); return; }
+        const trigger = event.currentTarget;
+        trigger.disabled = true;
+        trigger.textContent = '處理中…';
+        try {
+          await request({ action: 'automation_map', cycle_id: cycleId, control_id: controlId, rule_id: rule.id });
+          toast('檢查項目已對應'); await load();
+        } catch (e) { toast(errText(e), true); trigger.disabled = false; trigger.textContent = '建立對應'; }
+      }));
+    }
+
+    function proposalReview(proposals, activeCycle, labels) {
+      const selected = new Map();
+      const status = select([['compliant', '符合'], ['gap', '缺口'], ['not_applicable', '不適用'], ['unreviewed', '未評估']], 'compliant');
+      const reason = h('textarea', { maxlength: 2000, placeholder: '駁回或覆寫時請填寫理由' });
+      const message = h('p', { class: 'note' }, activeCycle ? '選取相同建議狀態的項目，可批次核定。' : '請先建立目前評估週期。');
+      const review = async (decision, ids, proposedStatus, trigger) => {
+        if (!activeCycle) { message.textContent = '尚無目前評估週期，不能核定建議。'; return; }
+        if (!ids.length) { message.textContent = '請先選取待審建議。'; return; }
+        if ((decision === 'reject' || decision === 'override') && !reason.value.trim()) {
+          message.textContent = '駁回或覆寫時必須填寫理由。'; return;
+        }
+        trigger.disabled = true;
+        trigger.textContent = '處理中…';
+        try {
+          const body = { action: 'automation_review', proposal_ids: ids, decision, reason: reason.value.trim() };
+          if (decision !== 'reject') body.status = decision === 'override' ? status.value : proposedStatus;
+          await request(body);
+          toast('建議已處理'); await load();
+        } catch (e) { message.textContent = '無法處理建議：' + errText(e); trigger.disabled = false; trigger.textContent = decision === 'approve' ? '核定所選' : decision === 'reject' ? '駁回所選' : '覆寫所選'; }
+      };
+      const rows = proposals.map((p) => {
+        const box = h('input', { type: 'checkbox', 'aria-label': '選取建議 #' + p.id, disabled: !activeCycle });
+        box.addEventListener('change', () => { if (box.checked) selected.set(Number(p.id), p.status); else selected.delete(Number(p.id)); });
+        return [box, p.control_code || '#' + p.control_id, labels[p.status] || p.status || '待查', p.reason || '—',
+          p.evidence_id ? '#' + p.evidence_id : '—', p.created_at || '—'];
+      });
+      const chosen = () => [...selected.keys()];
+      const approve = button('核定所選', (event) => {
+        const states = new Set(selected.values());
+        if (states.size !== 1 || !['compliant', 'gap'].includes([...states][0])) {
+          message.textContent = '批次核定僅接受同為「符合」或同為「缺口」的建議；待查須先處理來源問題。'; return;
+        }
+        return review('approve', chosen(), [...states][0], event.currentTarget);
+      }, true);
+      const reject = button('駁回所選', (event) => review('reject', chosen(), '', event.currentTarget));
+      const override = button('覆寫所選', (event) => review('override', chosen(), status.value, event.currentTarget));
+      if (!activeCycle) { approve.disabled = true; reject.disabled = true; override.disabled = true; }
+      return h('div', null,
+        table(['選取', '控制項', '建議', '依據', '證據', '建立時間'], rows),
+        h('div', { class: 'toolbar' }, approve, reject, field('覆寫判定', status), override),
+        field('審查理由', reason), message);
     }
 
     function summaryView(s) {
@@ -148,8 +323,9 @@
         h('h3', { class: 'sec-h' }, c.code + '　' + c.title), info('要求：' + c.requirement), c.description ? info('說明：' + c.description) : null,
         h('h3', { class: 'sec-h' }, '來源證據'),
         evidence.length ? table(['編號', '類型／來源', '取得時間', '範圍', '雜湊', '操作'], evidence.map((e) => [
-          '#' + e.id, evidenceLabel(e), e.captured_at, e.kind === 'case_snapshot' ? '共 ' + e.item_count + ' 筆；最多 ' + 30 + ' 筆' + (Number(e.truncated) ? '（已截取）' : '') : '僅來源參照',
-          e.sha256 || '未保存快照', e.kind === 'case_snapshot' ? button('驗證並下載', () => download(e.id)) : '—'])) : info('尚無證據。'),
+          '#' + e.id, evidenceLabel(e), e.captured_at, e.kind === 'case_snapshot' ? '共 ' + e.item_count + ' 筆；最多 ' + 30 + ' 筆' + (Number(e.truncated) ? '（已截取）' : '') :
+            e.kind === 'auto_snapshot' ? '關聯 ' + e.item_count + ' 筆技術證據' : '僅來源參照',
+          e.sha256 || '未保存快照', ['case_snapshot', 'auto_snapshot'].includes(e.kind) ? button('驗證並下載', () => download(e.id)) : '—'])) : info('尚無證據。'),
         editable ? evidenceForms(c) : null,
         h('h3', { class: 'sec-h' }, '控制項評估'),
         editable ? assessmentForm(c, evidenceChoices) : info('判定：' + (c.status || '未評估') + '；理由：' + (c.reason || '—')),
@@ -162,7 +338,7 @@
     }
 
     function evidenceLabel(e) {
-      return ({ case_snapshot: '事件案快照', backup_ref: '組態備份版本', external_ref: '外部參照（未驗證）' }[e.kind] || e.kind) + '：' + e.source_ref;
+      return ({ case_snapshot: '事件案快照', auto_snapshot: '自動檢查證據清單', backup_ref: '組態備份版本', external_ref: '外部參照（未驗證）' }[e.kind] || e.kind) + '：' + e.source_ref;
     }
 
     function evidenceForms(c) {
