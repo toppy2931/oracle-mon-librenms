@@ -420,3 +420,9 @@ FortiGate CEF 格式的 `key=value` 內容用 **6 個獨立 Grok pattern Extract
 - Oxidized `interval=0`，IOC timer 單一排程。status/save/test/run 不做網路採集，只有背景 tick 執行；queued 不是 success，必須驗新採集時間並取得有效內容才建版本。每設備防重疊、派送原子認領；超過 15 分鐘未完成要 timeout（包含有成功狀態卻取不到內容）。
 - 原始內容先雜湊偵測變更，差異另遮罩；私鑰缺 END 仍遮到 EOF。秘密欄位改動也要有紀錄，不能因遮罩後相同就說沒有變更。
 - install/update 只部署介接檔與 unit，不安裝 Oxidized、不自動啟用；不要為方便測試直接部署或啟動正式服務。uninstall 停服務但保留備份、歷史與帳號。
+
+## IOC 排程服務（systemd）的沙箱
+
+- 會啟動 LibreNMS（`bootstrap/app.php` ＋ `Kernel->bootstrap()`）的排程服務，LibreNMS 啟動時要把設定快取寫進 `/opt/librenms/storage/framework/cache`。單元檔設了 `ProtectSystem=strict` 就必須開放這個目錄：`ReadWritePaths=-/opt/librenms/storage/framework/cache`，否則日誌每 5 分鐘（快取過期時）出現 `file_put_contents(…): Failed to open stream: Read-only file system … ConfigRepository.php:55`（警告，不影響結果，但是雜訊；monitor-vm 實測 2026-10-26）。
+- **只開放這一個目錄**，不要放寬成 `/opt/librenms` 或整個 `storage`；前綴 `-` 不能省：目錄不存在時沒有它，systemd 建不起沙箱（`status=226/NAMESPACE`），整個服務每次啟動都失敗。`tests/test_behavior_unit.py` 會擋。
+- 目前只有 `system/ioc-behavior.service` 補了。`ioc-audit.service`、`ioc-audit-cases.service` 的 tick 也會啟動 LibreNMS，同樣設了 `ProtectSystem=strict` 卻還沒開放這個目錄；它們的 timer 預設不啟用，**啟用稽核排程之前要照樣補上**（連同測試）。

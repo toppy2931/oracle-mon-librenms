@@ -28,6 +28,20 @@ sudo -u librenms php tests/php/run.php
 sudo journalctl -u ioc-behavior.service --since '30 minutes ago' --no-pager
 ```
 
+`ioc-behavior.service` 以 `ProtectSystem=strict` 執行，整個檔案系統唯讀；它啟動 LibreNMS 時需要寫設定快取，所以單元檔只開放一個目錄：`ReadWritePaths=-/opt/librenms/storage/framework/cache`（前綴 `-`：目錄不存在時略過，服務照樣能啟動）。沒有這一行時，日誌每 5 分鐘（快取過期時）會出現 `file_put_contents(…/storage/framework/cache/…): Failed to open stream: Read-only file system … ConfigRepository.php:55`；那只是警告，採集本身仍會成功。更新後確認設定已生效（輸出應包含該路徑）：
+
+```bash
+systemctl show ioc-behavior.service -p ReadWritePaths
+```
+
+再等 10 分鐘以上，確認警告不再出現（預期輸出 `0`；`--since` 只看更新之後，更新前殘留的舊警告不算）：
+
+```bash
+sudo journalctl -u ioc-behavior.service --since '10 minutes ago' --no-pager | grep -c 'Read-only file system'
+```
+
+不要把可寫路徑放寬成 `/opt/librenms` 或整個 `storage`：採集程式一旦出問題，就能改動 LibreNMS 的程式與紀錄。
+
 若要通知管理員，在 VM 以 root 執行 `/opt/oracle-mon/admin/configure-behavior-webhook.sh`，輸入 HTTPS URL，將顯示一次的 HMAC 密鑰安全交給接收端。密鑰儲存在 `/etc/oracle-mon/ioc-behavior-webhook.conf`，權限 `root:librenms 0640`；網頁與資料庫不保存密鑰。接收端驗證 `X-IOC-Timestamp` 與 `X-IOC-Signature`，簽名輸入是 `timestamp + '.' + 原始 JSON body`，演算法 HMAC-SHA256；並依 `X-IOC-Event-ID` 去重。接收端應拒絕過期時間戳。
 
 ## 試行驗收
