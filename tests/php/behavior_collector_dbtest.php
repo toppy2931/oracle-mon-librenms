@@ -180,7 +180,7 @@ dbtest('區間品質：缺欄位是 partial、設備沒日誌是 missing；parti
     (new BehaviorCollector($db, DbtFakeLogs::traffic($partial)))->tick([bcdDevice()], bcdNets(), bcdNow());
     $w = bcdWindows($db, $id);
     assertSame('partial', $w[0]['quality']);
-    assertTrue($w[0]['quality_reason'] !== '');
+    assertSame('1 筆日誌缺 net_bytes', $w[0]['quality_reason'], '要說得出是哪一種缺值、缺幾筆');
     assertSame(['partial', 'partial'], [bcdSourceRow($db)['status'], dbtVal($db, 'SELECT quality_status FROM ioc_behavior_assets WHERE id=?', [$id])]);
 
     // 下一個區間：全域有日誌（別的 IP），但這台設備沒有 → missing，不能補成零流量
@@ -188,9 +188,22 @@ dbtest('區間品質：缺欄位是 partial、設備沒日誌是 missing；parti
     (new BehaviorCollector($db, DbtFakeLogs::traffic($other)))->tick([bcdDevice()], bcdNets(), bcdNow('2026-10-26 12:12:30'));
     $w = bcdWindows($db, $id);
     assertSame(['partial', 'missing', 0], [$w[0]['quality'], $w[1]['quality'], (int) $w[1]['connections']]);
+    assertSame('此裝置沒有觀測到日誌，不能判為零流量', $w[1]['quality_reason']);
     assertSame('missing', dbtVal($db, 'SELECT quality_status FROM ioc_behavior_assets WHERE id=?', [$id]));
     assertSame('ready', bcdSourceRow($db)['status'], '一台設備沒日誌不代表來源有問題');
     assertSame(0, (int) dbtVal($db, 'SELECT COUNT(*) FROM ioc_behavior_alerts'));
+});
+
+dbtest('區間品質的原因：缺目的 IP、缺目的埠各自記缺幾筆（例如 ICMP 沒有目的埠）；complete 沒有說明', static function (PDO $db): void {
+    $id = (new BehaviorService($db))->syncDevice(1, 'fw-a', '172.16.1.10', '台南');
+    $t = bcdNormal();                                                       // 20 筆連線
+    $t['172.16.1.10']['dest'] = ['203.0.113.1' => 10, '203.0.113.2' => 8];  // 只有 18 筆有目的 IP
+    $t['172.16.1.10']['port'] = ['443' => 19];                              // 只有 19 筆有目的埠
+    (new BehaviorCollector($db, DbtFakeLogs::traffic($t)))->tick([bcdDevice()], bcdNets(), bcdNow());
+    (new BehaviorCollector($db, DbtFakeLogs::traffic(bcdNormal())))->tick([bcdDevice()], bcdNets(), bcdNow('2026-10-26 12:12:30'));
+    $w = bcdWindows($db, $id);
+    assertSame(['partial', '2 筆日誌缺目的 IP；1 筆日誌缺目的埠'], [$w[0]['quality'], $w[0]['quality_reason']]);
+    assertSame(['complete', ''], [$w[1]['quality'], $w[1]['quality_reason']]);
 });
 
 dbtest('區間品質：任何一組分組達到 500 列上限，這個區間所有設備都是 partial（資料可能被截斷）', static function (PDO $db): void {
@@ -204,6 +217,7 @@ dbtest('區間品質：任何一組分組達到 500 列上限，這個區間所�
     $qualities = array_unique(array_column(bcdWindows($db), 'quality'));
     assertSame(['partial'], $qualities, '沒有任何一台的區間是 complete');
     assertSame(500, count(bcdWindows($db)));
+    assertSame(['分組達查詢列數上限，這個區間的資料可能被截斷'], array_unique(array_column(bcdWindows($db), 'quality_reason')), '原因是分組被截斷，不是這些設備各自缺欄位');
 });
 
 dbtest('區間品質：兩台 LibreNMS 設備共用同一個 IP → 第一台的區間是 partial；已退役的資產不寫區間', static function (PDO $db): void {
@@ -216,6 +230,7 @@ dbtest('區間品質：兩台 LibreNMS 設備共用同一個 IP → 第一台的
     $first = (int) dbtVal($db, "SELECT id FROM ioc_behavior_assets WHERE identity_key='librenms:1'");
     $second = (int) dbtVal($db, "SELECT id FROM ioc_behavior_assets WHERE identity_key='librenms:2'");
     assertSame('partial', bcdWindows($db, $first)[0]['quality'], '位址衝突：不知道流量是誰的');
+    assertSame('同一個 IP 對到多台設備', bcdWindows($db, $first)[0]['quality_reason']);
     assertSame([], bcdWindows($db, $second), '已知限制：共用 IP 的第二台設備永遠沒有區間（流量只會對到第一台）');
     assertSame([], bcdWindows($db, $retired), '已退役的資產不寫區間');
     assertSame(0, (int) dbtVal($db, "SELECT COUNT(*) FROM ioc_behavior_assets WHERE identity_key LIKE 'observed:%'"), '退役設備的 IP 也不會被當成未知 IP 再建暫時資產');

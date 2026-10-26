@@ -63,7 +63,13 @@ sudo journalctl -u ioc-behavior.service --since '10 minutes ago' --no-pager | gr
 - **人工關聯不會改變流量歸屬**：`linkAsset` 把暫時資產設為 `retired`，並把位址複製到 LibreNMS 裝置；但採集器只依 LibreNMS 當前 IP 對應流量，同一個 IP 的下一輪流量找不到未退役的暫時資產，會另建新的暫時資產。要讓流量算在該裝置上，必須先更新 LibreNMS 的裝置 IP。
 - **暫時資產不會訓練基線**：訓練需要上班時段，時段只能依 LibreNMS 裝置或站點設定，暫時資產兩者皆無；它們只會累積區間。
 - **基線只在學習模式訓練**：`ready`／`monitoring` 的基線不會自動更新，管理員改回學習（重新學習 28 天）才會重訓。
-- **區間品質容易是 `partial`（待 VM 查證）**：任何一筆日誌缺 `net_bytes` 或目的埠（例如 ICMP），該裝置整個五分鐘區間就是 `partial`，不進基線與偵測，「啟用監控」的品質檢查當下也過不了。實際比例請在 VM 查：`SELECT quality, COUNT(*) FROM ioc_behavior_windows GROUP BY quality;`
+- **區間品質（VM 實測，2026-10-26，採集約 3.75 小時、每個資產 45 格）**：complete 2219／missing 559／partial 449（約 69%／17%／14%）。任何一筆日誌缺 `net_bytes`、目的 IP 或目的埠（例如 ICMP），該裝置整個五分鐘區間就是 `partial`，不進基線與偵測，「啟用監控」的品質檢查當下也過不了。分佈很不平均：partial 集中在少數幾台（有的幾乎每格都是 partial），多數主機只偶爾 partial；LibreNMS 已納管的設備則整段都是 `missing`（沒有經過防火牆的對外流量）。
+- **實際影響（依 VM 的資料推得，需觀察滿 28 天確認）**：這個站點有對外流量的主機大多不在 LibreNMS（以「待確認設備」暫時資產出現），已納管的設備又幾乎沒有流量。暫時資產不訓練、不能啟用監控，所以照現行規則與現在的資料，沒有資產會走到 `ready`／`monitoring`。
+- **`partial` 的原因會寫在 `quality_reason`**（2026-10-26 起；更早寫入的格子還是舊的籠統說明）：`N 筆日誌缺 net_bytes`、`N 筆日誌缺目的 IP`、`N 筆日誌缺目的埠`、`同一個 IP 對到多台設備`、`分組達查詢列數上限，這個區間的資料可能被截斷`，同時發生就用「；」串起來。資產詳情的區間表會顯示。要看整體分佈：
+
+```bash
+sudo mysql librenms -e "SELECT SUM(quality_reason LIKE '%缺 net_bytes%') AS no_bytes, SUM(quality_reason LIKE '%缺目的 IP%') AS no_dst, SUM(quality_reason LIKE '%缺目的埠%') AS no_port, SUM(quality_reason LIKE '%同一個 IP%') AS ambiguous, SUM(quality_reason LIKE '%截斷%') AS truncated, COUNT(*) AS partial_total FROM ioc_behavior_windows WHERE quality='partial' AND window_start >= UTC_TIMESTAMP() - INTERVAL 1 DAY;"
+```
 - **一個 tick 只處理最新一個完整區間，不回補**：採集器停擺期間的區間不會補算，基線要求的 6048 格（28 天的 75%）會因此更難達到。
 - **每個區間只檢查與學習前 100 個目的地與目的埠**：超過的部分不會被判為「新」，也不會被學習。
 

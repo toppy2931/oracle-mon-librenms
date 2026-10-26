@@ -90,8 +90,8 @@ final class BehaviorCollector
             $row = $byIp[$ip] ?? [];
             $count = max(0, (int) ($row['count'] ?? 0));
             // 全域日誌有資料，不代表這台設備的日誌沒有中斷；缺席不能補成零流量。
-            $quality = BehaviorAnalyzer::windowQuality($count, $truncated, isset($ambiguous[$ip]),
-                $byteCounts[$ip] ?? 0, $destCounts[$ip] ?? 0, $portCounts[$ip] ?? 0);
+            $facts = [$count, $truncated, isset($ambiguous[$ip]), $byteCounts[$ip] ?? 0, $destCounts[$ip] ?? 0, $portCounts[$ip] ?? 0];
+            $quality = BehaviorAnalyzer::windowQuality(...$facts);
             if ($quality === 'partial') { $partial = true; }
             $record = ['asset_id' => $assetId, 'source_key' => BehaviorService::SOURCE,
                 'window_start' => $window, 'connections' => $count,
@@ -101,8 +101,7 @@ final class BehaviorCollector
                 'destinations_json' => json_encode(array_keys($dest[$ip] ?? []), JSON_THROW_ON_ERROR),
                 'ports_json' => json_encode(array_keys($ports[$ip] ?? []), JSON_THROW_ON_ERROR),
                 'signals_json' => '{"dns":false,"tls":false,"scope":"firewall_only"}',
-                'quality' => $quality, 'quality_reason' => $quality === 'partial' ? '分組上限、位址衝突或必要欄位缺值' :
-                    ($quality === 'missing' ? '此裝置沒有觀測到日誌，不能判為零流量' : '')];
+                'quality' => $quality, 'quality_reason' => BehaviorAnalyzer::windowQualityReason(...$facts)];
             $this->storeWindow($record);
             if ($quality === 'complete') { $this->evaluate($record, array_keys($dest[$ip] ?? []), array_keys($ports[$ip] ?? [])); }
         }

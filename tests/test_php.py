@@ -433,10 +433,10 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
         """區間品質、上班時段分桶、警示去重鍵與基線訓練門檻的規則在 BehaviorAnalyzer（有單元測試）。
         採集器碰資料庫，預設的測試不連資料庫（資料庫層測試要另外跑 tests/run-db-tests.sh），所以用靜態檢查擋住「又把規則內嵌回採集器」。"""
         collector = (ROOT / "librenms" / "ioc" / "BehaviorCollector.php").read_text(encoding="utf-8")
-        for call in ("BehaviorAnalyzer::windowQuality(", "BehaviorAnalyzer::localBucket(",
+        for call in ("BehaviorAnalyzer::windowQuality(", "BehaviorAnalyzer::windowQualityReason(", "BehaviorAnalyzer::localBucket(",
                      "BehaviorAnalyzer::dedupKey(", "BehaviorAnalyzer::trainingGroups("):
             self.assertEqual(collector.count(call), 1, "採集器要呼叫 %s" % call)
-        for inlined in ("6048", "hash('sha256'", "new \\DateTimeZone", "'partial' : 'complete'"):
+        for inlined in ("6048", "hash('sha256'", "new \\DateTimeZone", "'partial' : 'complete'", "分組上限、位址衝突或必要欄位缺值"):
             self.assertNotIn(inlined, collector, "採集器不該自己內嵌規則：%s" % inlined)
 
     def test_db_test_harness_can_only_touch_its_own_throwaway_schema(self):
