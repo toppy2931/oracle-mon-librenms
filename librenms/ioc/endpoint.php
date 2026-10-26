@@ -3,7 +3,8 @@ declare(strict_types=1);
 
 /**
  * 網頁端點的共用前置檢查與工具。只在 LibreNMS 的網頁環境載入（需要 Auth、csrf_token、資料庫），
- * 所以不放進 bootstrap.php，也無法在沒有 LibreNMS 的地方單元測試 → 要到 VM 驗證。
+ * 所以不放進 bootstrap.php，需要它們的函式無法在沒有 LibreNMS 的地方單元測試 → 要到 VM 驗證
+ * （載入這個檔案只定義函式與常數，不碰 LibreNMS；不需要 LibreNMS 的純函式，例如 ioc_log_settings_errors，測試可以直接呼叫）。
  * 規則本身（權限、狀態流程、驗證）都在 CaseService，這裡只管「是誰、有沒有 CSRF、錯誤怎麼回」。
  */
 
@@ -30,7 +31,7 @@ use Ioc\Sites;
 use Ioc\UnavailableLogSource;
 
 const IOC_READER_CONF = '/etc/oracle-mon/graylog-reader.conf';
-const IOC_OVERVIEW_CACHE = 'ioc:overview:v5:';     // 依統計期間與 demo 模式分開快取（20 秒）
+const IOC_OVERVIEW_CACHE = 'ioc:overview:v6:';     // 依統計期間與 demo 模式分開快取（20 秒）
 const IOC_NETWORK_CACHE = 'ioc:network:v2:';       // 依統計期間與 demo 模式分開快取；內部網段一改就要清掉
 
 /** 內部網段的設定有異動就讓內網可視性的快取失效，否則 60 秒內畫面還是用舊網段算的。 */
@@ -405,6 +406,24 @@ function ioc_fleet(?Sites $sites = null): ?Fleet
     return new Fleet($out, date_default_timezone_get(), $sites);
 }
 
+/**
+ * SettingsService::overviewSettings() 的失敗原因記 log。整張表讀不到時三組共用同一個例外，只記一行（列出受影響的組），
+ * 不要一個請求記三條一模一樣的。
+ *
+ * @param array<string,\Throwable> $errors
+ */
+function ioc_log_settings_errors(array $errors): void
+{
+    $groups = [];
+    foreach ($errors as $part => $e) {
+        $id = spl_object_id($e);
+        $groups[$id] = ['error' => $e, 'parts' => array_merge($groups[$id]['parts'] ?? [], [$part])];
+    }
+    foreach ($groups as $g) {
+        error_log('[ioc] settings ' . implode('/', $g['parts']) . ': ' . $g['error']->getMessage());
+    }
+}
+
 /** @return array<string,mixed> */
 function ioc_overview(bool $demo, string $level, int $range = OverviewService::RANGE): array
 {
@@ -413,16 +432,18 @@ function ioc_overview(bool $demo, string $level, int $range = OverviewService::R
     } catch (GraylogUnavailable $e) {
         $logs = new UnavailableLogSource($e->getMessage());   // 例如還沒建立唯讀帳號：日誌區塊標示尚未設定，其他照常
     }
-    $sites        = null;
+    // 站點、風險門檻、內部網段只讀一次設定表（AccessDenied 直接往上丟）；三組各自成敗，讀不到的那組是 null、原因在 errors
+    $settings = ioc_settings()->overviewSettings($level);
+    ioc_log_settings_errors($settings['errors']);
+    $sites        = $settings['sites'];
+    $thresholds   = $settings['thresholds'];      // 資料表還沒建立或值壞了：風險分數只顯示分數、不判定等級
+    $nets         = $settings['nets'];            // 讀不到內部網段：「防火牆阻擋的來源」分不出內外，該區塊標「無法取得」，不套預設網段
     $sitesWarning = null;
-    try {
-        $sites = ioc_settings()->sites($level);
-    } catch (\Ioc\AccessDenied $e) {
-        throw $e;
-    } catch (\Throwable $e) {
-        error_log('[ioc] sites: ' . $e->getMessage());
+    if (isset($settings['errors']['sites'])) {
+        $e = $settings['errors']['sites'];
         // 站點設定讀不到：設備只能依 LibreNMS 位置分站點。畫面一定要寫出來，不能默默換一套結果
-        $sitesWarning = '站點設定讀不到，暫時只依 LibreNMS 的位置分站點：' . ($e instanceof \Ioc\IocError ? $e->getMessage() : '設定資料表還沒建立？');
+        // 不是 IocError 就是整張表讀不到（見 overviewSettings）：訊息可能含連線資訊，只記 log，畫面寫固定的說明
+        $sitesWarning = '站點設定讀不到，暫時只依 LibreNMS 的位置分站點：' . ($e instanceof \Ioc\IocError ? $e->getMessage() : '設定資料表讀不到（還沒建立，或資料庫連不上）');
     }
     $fleet = ioc_fleet($sites);
     try {
@@ -434,18 +455,6 @@ function ioc_overview(bool $demo, string $level, int $range = OverviewService::R
     } catch (\Throwable $e) {
         error_log('[ioc] cases: ' . $e->getMessage());
         $cases = $open = $latest = $trend = null;              // 例如資料表還沒建立：事件案相關的區塊整組標「無法取得」
-    }
-    try {
-        $thresholds = ioc_settings()->riskThresholds($level);
-    } catch (\Throwable $e) {
-        error_log('[ioc] risk thresholds: ' . $e->getMessage());
-        $thresholds = null;                       // 資料表還沒建立或值壞了：風險分數只顯示分數、不判定等級
-    }
-    try {
-        $nets = ioc_settings()->internalNets($level);
-    } catch (\Throwable $e) {
-        error_log('[ioc] internal nets: ' . $e->getMessage());
-        $nets = null;                             // 讀不到內部網段：「防火牆阻擋的來源」分不出內外，該區塊標「無法取得」，不套預設網段
     }
     $now = time();
     $overview = (new OverviewService($logs, $demo, $now, $nets, $range))->build($fleet === null ? null : $fleet->legacy(), $cases);

@@ -55,7 +55,7 @@ test('Fleet：站點異常等級的門檻（<25% 輕微、<50% 中度、≥50% �
 
 test('Fleet：站點只算有指定位置的設備；沒指定的另外計數，不假裝成某個站點', function () {
     $f = new Fleet([dev('a', 'server', 1, '北區所'), dev('b', 'server', 0, '北區所'), dev('c', 'network', 1, '南區所'), dev('d', 'server', 1, null), dev('e', 'server', 0, '  ')]);
-    assertSame(2, $f->unlocated());
+    assertSame(2, $f->unassigned());
     $sites = $f->sites();
     assertSame(['北區所', '南區所'], array_column($sites, 'name'), '站點依名稱排序（位元組順序，結果固定）');
     $by = array_column($sites, null, 'name');
@@ -85,20 +85,20 @@ test('Fleet：monitor-vm 實際的位置資料形狀（14 台：6 台沒位置�
     }
     $f = new Fleet($rows);
     assertSame(14, $f->total());
-    assertSame(13, $f->unlocated());
+    assertSame(13, $f->unassigned());
     assertSame(['機房'], array_column($f->sites(), 'name'));
     $o = (new LandscapeService(LS_NOW))->build($f, ['new' => 0, 'ack' => 0, 'in_progress' => 0, 'closed' => 0, 'open' => 0], ['high' => 0, 'medium' => 0, 'low' => 0], [], [], lsCoverage(), RiskScore::DEFAULT_THRESHOLDS);
     $k = lsKpi($o);
     assertSame(1, $k['sites']['value']);
     assertTrue(mb_strpos($k['sites']['sub'], '另有 13 台設備沒有有效位置') !== false, $k['sites']['sub']);
     assertSame(false, $o['sites']['data']['has_locations'], '這個站點沒有座標，不畫散佈圖');
-    assertSame(13, $o['sites']['data']['unlocated']);
+    assertSame(13, $o['sites']['data']['unassigned']);
 });
 
 test('Fleet：沒有任何設備有位置時，沒有站點（不是一個叫「未指定」的站點）', function () {
     $f = new Fleet([dev('a'), dev('b', 'server', 0)]);
     assertSame([], $f->sites());
-    assertSame(2, $f->unlocated());
+    assertSame(2, $f->unassigned());
     assertSame([], $f->ranking());
 });
 
@@ -319,8 +319,8 @@ test('總覽：監控資產數要帶出離線台數（含沒指定位置的設�
     assertSame('warn', $assets(20, 1)['state'], '5% 離線');
     assertSame('bad', $assets(20, 2)['state'], '10% 離線');
     assertSame('bad', $assets(3, 1)['state'], '至少 1 台離線就算比例夠高的下限');
-    $unlocated = $assets(14, 2, null);      // 沒有指定位置：沒有站點，但離線台數仍然看得到
-    assertTrue(mb_strpos($unlocated['sub'], '離線 2 台') !== false, $unlocated['sub']);
+    $noLocation = $assets(14, 2, null);      // 沒有指定位置：沒有站點，但離線台數仍然看得到
+    assertTrue(mb_strpos($noLocation['sub'], '離線 2 台') !== false, $noLocation['sub']);
     assertSame(0, (new Fleet([dev('x', 'server', 0)]))->up());
     assertSame('warn', $assets(0, 0)['state'], '沒有任何設備不是綠色');
 });
@@ -531,7 +531,7 @@ test('總覽：站點區塊與排行', function () use ($lsSummary, $lsOpen) {
     $s = $o['sites']['data'];
     assertSame(['北區所', '南區所'], array_column($s['items'], 'name'), '站點區塊依名稱排序');
     assertSame(['normal' => 1, 'minor' => 0, 'moderate' => 0, 'severe' => 1], $s['counts']);
-    assertSame(1, $s['unlocated']);
+    assertSame(1, $s['unassigned']);
     assertSame(true, $s['has_locations'], '有站點帶座標才畫散佈圖');
     assertSame(['北區所', '南區所'], array_column($o['ranking']['data'], 'name'), '嚴重的排前面');
     $noCoord = lsBuild(new Fleet([dev('a', 'server', 1, 'X')]), $lsSummary, $lsOpen)['sites']['data'];

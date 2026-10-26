@@ -13,7 +13,7 @@ namespace Ioc;
  * 風險等級門檻：分數（0–100，越高越好）≥ low 是低風險、≥ medium 是中等風險、其餘高風險。
  * 規則：1 ≤ medium < low ≤ 100，都是整數。沒設定過就用 RiskScore::DEFAULT_THRESHOLDS。
  * 兩個值永遠一起寫、一起讀；資料表裡只剩一個、或內容不合法（有人手動改過資料表），
- * 一律視為壞掉：riskThresholds() 丟例外（總覽只顯示分數、不判定等級），riskSettings() 標 invalid，
+ * 一律視為壞掉：overviewSettings() 的 thresholds 是 null 並附原因（總覽只顯示分數、不判定等級），riskSettings() 標 invalid，
  * 讓管理者在設定頁重新儲存就能修復。絕不悄悄套用預設值，否則畫面上的等級會跟管理者設定的不一致。
  */
 final class SettingsService
@@ -50,22 +50,6 @@ final class SettingsService
     {
         $this->repo = $repo;
         $this->now  = $now ?? static fn (): string => gmdate('Y-m-d H:i:s');
-    }
-
-    /**
-     * 目前生效的風險等級門檻（給總覽用）。
-     *
-     * @return array{low:int,medium:int}
-     * @throws IocError 資料表裡的值不合法
-     */
-    public function riskThresholds(?string $level): array
-    {
-        $this->requireView($level);
-        $s = $this->readRisk($this->repo->all());
-        if ($s['invalid']) {
-            throw new IocError('風險等級門檻的設定值不合法（資料表被手動改過？），請管理者到「設定」頁重新儲存');
-        }
-        return ['low' => $s['low'], 'medium' => $s['medium']];
     }
 
     /**
@@ -169,11 +153,7 @@ final class SettingsService
     public function internalNets(?string $level): array
     {
         $this->requireView($level);
-        $s = $this->readNetwork($this->repo->all());
-        if ($s['invalid']) {
-            throw new IocError('內部網段的設定值不合法（資料表被手動改過？），請管理者到「設定」頁重新儲存');
-        }
-        return $s['nets'];
+        return $this->netsFrom($this->repo->all());
     }
 
     /**
@@ -247,11 +227,41 @@ final class SettingsService
     public function sites(?string $level): Sites
     {
         $this->requireView($level);
-        $s = $this->readSites($this->repo->all());
-        if ($s['broken'] !== []) {
-            throw new IocError('站點的設定值不合法（資料表被手動改過？），請管理者到「設定」頁重新儲存');
+        return $this->sitesFrom($this->repo->all());
+    }
+
+    /**
+     * 總覽一次要用的三組設定（站點、風險門檻、內部網段），只讀一次資料表（總覽每個請求都會載入，不要各讀一次整張表）。
+     * 三組各自成敗：壞掉的那組是 null、原因放在 errors，不影響另外兩組，呼叫端要自己把原因帶到畫面，不能套預設值冒充。
+     * errors 只有兩種：IocError（那一組的值不合法，訊息是給人看的）；以及整張表讀不到（資料表還沒建立、資料庫連不上）時
+     * 三組共用的同一個讀取例外，原樣放進來（訊息可能含連線資訊，只能記 log，不能顯示給使用者）。
+     * 讀進來之後的解析只會丟 IocError，其他例外（型別錯誤之類）是程式的 bug，一律往上拋，不歸類成「讀不到」。
+     * 權限不夠是 AccessDenied，直接丟出，不算「讀不到」。
+     *
+     * @return array{sites:?Sites,thresholds:?array{low:int,medium:int},nets:?array<int,string>,errors:array<string,\Throwable>}
+     */
+    public function overviewSettings(?string $level): array
+    {
+        $this->requireView($level);
+        $out = ['sites' => null, 'thresholds' => null, 'nets' => null, 'errors' => []];
+        try {
+            $rows = $this->repo->all();
+        } catch (\Throwable $e) {
+            return ['errors' => ['sites' => $e, 'thresholds' => $e, 'nets' => $e]] + $out;
         }
-        return new Sites($s['list']);
+        $readers = [
+            'sites'      => fn (): Sites => $this->sitesFrom($rows),
+            'thresholds' => fn (): array => $this->thresholdsFrom($rows),
+            'nets'       => fn (): array => $this->netsFrom($rows),
+        ];
+        foreach ($readers as $part => $read) {
+            try {
+                $out[$part] = $read();
+            } catch (IocError $e) {
+                $out['errors'][$part] = $e;
+            }
+        }
+        return $out;
     }
 
     /**
@@ -584,6 +594,53 @@ final class SettingsService
         }
         return ['last_date' => $d['value'], 'owner' => $o['value'], 'period_days' => $period, 'recorded' => true, 'invalid' => false,
                 'updated_by' => $last['updated_by'], 'updated_at' => Time::toTaipei($last['updated_at'])];
+    }
+
+    /**
+     * 資料列 → 生效的風險等級門檻（壞掉就丟例外，不套預設值）。overviewSettings() 用，不檢查權限。
+     *
+     * @param array<string,array{value:string,updated_by:string,updated_at:string}> $rows
+     * @return array{low:int,medium:int}
+     * @throws IocError
+     */
+    private function thresholdsFrom(array $rows): array
+    {
+        $s = $this->readRisk($rows);
+        if ($s['invalid']) {
+            throw new IocError('風險等級門檻的設定值不合法（資料表被手動改過？），請管理者到「設定」頁重新儲存');
+        }
+        return ['low' => $s['low'], 'medium' => $s['medium']];
+    }
+
+    /**
+     * 資料列 → 生效的內部網段（壞掉就丟例外，不套預設網段）。internalNets() 與 overviewSettings() 共用，不檢查權限。
+     *
+     * @param array<string,array{value:string,updated_by:string,updated_at:string}> $rows
+     * @return string[]
+     * @throws IocError
+     */
+    private function netsFrom(array $rows): array
+    {
+        $s = $this->readNetwork($rows);
+        if ($s['invalid']) {
+            throw new IocError('內部網段的設定值不合法（資料表被手動改過？），請管理者到「設定」頁重新儲存');
+        }
+        return $s['nets'];
+    }
+
+    /**
+     * 資料列 → 生效的站點（有壞掉的列就丟例外，不默默少算）。sites() 與 overviewSettings() 共用，不檢查權限。
+     *
+     * @param array<string,array{value:string,updated_by:string,updated_at:string}> $rows
+     * @throws IocError
+     */
+    private function sitesFrom(array $rows): Sites
+    {
+        $s = $this->readSites($rows);
+        if ($s['broken'] !== []) {
+            throw new IocError('站點的設定值不合法（資料表被手動改過？），請管理者到「設定」頁重新儲存');
+        }
+        return new Sites($s['list']);
     }
 
     private function isRealDate(string $s): bool

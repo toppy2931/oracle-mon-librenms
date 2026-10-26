@@ -13,8 +13,16 @@ $db = Illuminate\Support\Facades\DB::connection()->getPdo();
 $settings = new Ioc\SettingsService(new Ioc\PdoSettingsRepo($db));
 $devices = [];
 try {
-    $nets = $settings->internalNets(Ioc\Access::HANDLER);
-    $sites = $settings->sites(Ioc\Access::HANDLER);
+    // 內部網段與站點一次讀完（不各讀一次整張表）；任何一組讀不到都照舊當作採集失敗，由下面的 catch 標示來源錯誤。
+    // 風險門檻壞掉不影響採集，所以不檢查它。
+    $cfg = $settings->overviewSettings(Ioc\Access::HANDLER);
+    foreach (['nets', 'sites'] as $part) {
+        if ($cfg[$part] === null) {
+            throw $cfg['errors'][$part];
+        }
+    }
+    $nets = $cfg['nets'];
+    $sites = $cfg['sites'];
     foreach (Illuminate\Support\Facades\DB::table('devices')->where('disabled', 0)->where('ignore', 0)
         ->get(['device_id', 'hostname', 'sysName', 'display', 'overwrite_ip', 'ip']) as $row) {
         $ip = Ioc\Fleet::deviceIp($row->overwrite_ip ?? null, $row->ip ?? null, $row->hostname ?? null);

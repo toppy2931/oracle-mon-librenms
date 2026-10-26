@@ -36,7 +36,7 @@ final class LandscapeService
      * @param array<int,array<string,mixed>>|null $latestCases 已經過 CaseView::row 的最新事件案；null＝讀取失敗
      * @param array<int,array{created_at:string,severity:string}>|null $trendRows CaseService::createdWithin()；null＝讀取失敗
      * @param array{ok:bool,data?:mixed,error?:string} $coverage OverviewService 算出來的資料涵蓋區塊
-     * @param array{low:int,medium:int}|null $riskThresholds SettingsService::riskThresholds()；null＝讀取失敗（只顯示分數、不判定等級）。
+     * @param array{low:int,medium:int}|null $riskThresholds SettingsService::overviewSettings() 的 thresholds；null＝讀取失敗（只顯示分數、不判定等級）。
      *        刻意沒有預設值：呼叫端漏傳就會是語法錯誤，不會悄悄套用預設門檻
      * @param string|null $sitesWarning 站點設定讀不到時的原因（Fleet 因此只能用 LibreNMS 位置分站點）；畫面要寫出來，不能默默換結果
      * @return array<string,mixed>
@@ -76,7 +76,7 @@ final class LandscapeService
             $sites = ['key' => 'sites', 'label' => '站點數', 'value' => count($empty), 'state' => 'warn',
                 'sub' => self::noSitesReason($fleet) . self::warnSuffix($sitesWarning)];
         } else {
-            $un = $fleet->unlocated();
+            $un = $fleet->unassigned();
             $cfg = $fleet->hasConfiguredSites();
             $note = $empty === [] ? '' : sprintf('其中 %d 個還沒有設備歸進去（%s）；', count($empty), implode('、', $empty));
             $sites = ['key' => 'sites', 'label' => '站點數', 'value' => count($fleet->sites()) + count($empty), 'state' => $sitesWarning === null ? 'good' : 'warn',
@@ -252,7 +252,7 @@ final class LandscapeService
         return ['ok' => true, 'data' => [
             'items'         => $sites,
             'counts'        => $fleet->levelCounts(),
-            'unlocated'     => $fleet->unlocated(),
+            'unassigned'    => $fleet->unassigned(),
             'has_locations' => count(array_filter($sites, static fn ($s) => $s['lat'] !== null && $s['lng'] !== null)) > 0,
             'configured'    => $fleet->hasConfiguredSites(),
             'empty_sites'   => $fleet->emptyConfiguredSites(),
