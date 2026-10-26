@@ -179,7 +179,7 @@ final class Fleet
     }
 
     /** 沒有歸屬站點的設備台數（設定了站點時：IP 不在任何站點的網段內；沒設定時：沒有有效的 LibreNMS 位置）。 */
-    public function unlocated(): int
+    public function unassigned(): int
     {
         return count(array_filter($this->devices, static fn ($d) => $d['site'] === null));
     }

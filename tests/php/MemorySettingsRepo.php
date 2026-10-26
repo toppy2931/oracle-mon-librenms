@@ -13,9 +13,17 @@ class MemorySettingsRepo implements SettingsRepo
     public int $puts = 0;
     /** 設成 true 就讓寫異動紀錄時丟例外，用來驗證交易會整筆復原。 */
     public bool $failOnHistory = false;
+    /** all() 被呼叫幾次：驗證「一次請求只讀一次整張表」。 */
+    public int $reads = 0;
+    /** 設成 true 就讓 all() 丟例外，模擬資料表還沒建立或連不上資料庫。 */
+    public bool $failOnRead = false;
 
     public function all(): array
     {
+        $this->reads++;
+        if ($this->failOnRead) {
+            throw new RuntimeException('讀取設定失敗');
+        }
         return $this->rows;
     }
 

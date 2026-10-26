@@ -142,9 +142,9 @@ try {
             $r = $settings->saveRisk(['risk_low' => '93', 'risk_medium' => '71'], 'selftest', $H);
             $assert($r['low'] === 93 && $r['medium'] === 71 && $r['custom'] === true && $r['invalid'] === false, '儲存後讀回的值不對');
             $assert($r['updated_by'] === 'selftest' && preg_match('/^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d$/', (string) $r['updated_at']) === 1, '最後修改的人或時間不對');
-            $assert($settings->riskThresholds($H) === ['low' => 93, 'medium' => 71], 'riskThresholds 與儲存的不一致');
+            $assert($settings->overviewSettings($H)['thresholds'] === ['low' => 93, 'medium' => 71], 'overviewSettings 的門檻與儲存的不一致');
             $settings->saveRisk(['risk_low' => '94', 'risk_medium' => '71'], 'selftest', $H);   // 已有資料列：走 ON DUPLICATE KEY UPDATE
-            $assert($settings->riskThresholds($H) === ['low' => 94, 'medium' => 71], '覆寫沒有生效');
+            $assert($settings->overviewSettings($H)['thresholds'] === ['low' => 94, 'medium' => 71], '覆寫沒有生效');
             $h = $settings->riskSettings($H)['history'];
             $assert(count($h) >= 1 && $h[0]['actor'] === 'selftest' && $h[0]['from'] === '93' && $h[0]['to'] === '94', '最新一筆異動紀錄不對（由新到舊）');
         });
@@ -157,16 +157,16 @@ try {
                 throw new RuntimeException('應該被拒絕');
             } catch (ValidationError $e) {
             }
-            $assert($settings->riskThresholds($H) === ['low' => 94, 'medium' => 71], '被拒絕的儲存不能改到資料');
+            $assert($settings->overviewSettings($H)['thresholds'] === ['low' => 94, 'medium' => 71], '被拒絕的儲存不能改到資料');
         });
         $check('設定：檢視者只能讀不能改', function () use ($settings, $assert) {
-            $assert($settings->riskThresholds(Access::VIEWER) === ['low' => 94, 'medium' => 71], '檢視者應能讀到目前的門檻');
+            $assert($settings->overviewSettings(Access::VIEWER)['thresholds'] === ['low' => 94, 'medium' => 71], '檢視者應能讀到目前的門檻');
             try {
                 $settings->saveRisk(['risk_low' => '90', 'risk_medium' => '70'], 'viewer', Access::VIEWER);
                 throw new RuntimeException('檢視者不應該能儲存');
             } catch (AccessDenied $e) {
             }
-            $assert($settings->riskThresholds(Access::VIEWER) === ['low' => 94, 'medium' => 71], '被拒絕的儲存不能改到資料');
+            $assert($settings->overviewSettings(Access::VIEWER)['thresholds'] === ['low' => 94, 'medium' => 71], '被拒絕的儲存不能改到資料');
         });
         $check('帳號盤點紀錄：儲存、讀回、改一個值只多一筆異動紀錄（三個設定值一起寫）', function () use ($settings, $settingsRepo, $H, $assert) {
             $r = $settings->saveAccountReview(['last_date' => gmdate('Y-m-d', time() - 86400), 'owner' => '自我測試 😀', 'period_days' => '60'], 'selftest', $H);

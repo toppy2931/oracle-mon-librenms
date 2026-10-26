@@ -37,7 +37,8 @@ if (!$sid) exit(json_encode(['error' => 'SID 不可為空']));
 // Check alias uniqueness
 $conf_dir = '/opt/oracle-mon/dbs';
 if (file_exists("$conf_dir/$alias.conf")) {
-    exit(json_encode(['error' => "別名「$alias」已存在，請使用不同的別名"]));
+    // {$alias}：變數後面緊接全形字元時，字元的位元組會被當成變數名稱的一部分，整句訊息變成未定義的變數
+    exit(json_encode(['error' => "別名「{$alias}」已存在，請使用不同的別名"]));
 }
 
 // Step 1: Save conf

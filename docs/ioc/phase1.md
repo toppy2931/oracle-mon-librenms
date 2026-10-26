@@ -206,4 +206,4 @@ Phase 0 的 pipeline 規則是另一套回滾：`python3 system/graylog-pipeline
 - 防火牆阻擋每小時可達數萬到十萬筆，且有突發；入口一律彙總，不逐筆列出。KPI 不直接用 `fw_deny` 筆數
 - `ioc_case_history`、`ioc_settings_history` 沒有資料庫層的防竄改（沒有觸發器）：只是程式裡沒有更新或刪除的路徑。要更強的保證需要另外限制資料庫帳號權限
 - 兩位管理者同一秒儲存設定時是後者覆蓋前者；異動紀錄的「原值」是各自儲存當下讀到的值，這種極端情況下兩筆的原值可能對不起來（沒有樂觀鎖，單一站點的管理者人數不值得）
-- 既有的 `oracle-db-add.php:40` 有同樣的 PHP 陷阱（`"別名「$alias」…"`，全形括號被當成變數名的一部分，訊息裡的別名會是空的），本批沒有動它
+- 既有的 `oracle-db-add.php:40` 有同樣的 PHP 陷阱（`"別名「$alias」…"`，全形括號被當成變數名的一部分，訊息裡的別名會是空的），本批沒有動它（後來已修，並由 `tests/php/source_test.php` 掃 `librenms/`、`system/`、`docs/`、`tests/php/` 的 PHP 防止再犯）

@@ -301,8 +301,8 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
         self.assertIn("IpNets::contains($this->nets", overview)
         self.assertNotIn("FILTER_FLAG_NO_PRIV_RANGE", overview, "不要再用 PHP 內建的私有位址判斷")
         endpoint = (ROOT / "librenms" / "ioc" / "endpoint.php").read_text(encoding="utf-8")
-        self.assertRegex(endpoint, r"(?s)internalNets\(\$level\);\s*\} catch \(\\Throwable \$e\) \{.*?\$nets = null;.*?new OverviewService\(\$logs, \$demo, \$now, \$nets, \$range\)",
-                         "內部網段讀不到要傳 null，由總覽標「無法取得」，不能套預設網段")
+        self.assertRegex(endpoint, r"(?s)\$nets\s+= \$settings\['nets'\];.*?new OverviewService\(\$logs, \$demo, \$now, \$nets, \$range\)",
+                         "內部網段讀不到是 null（overviewSettings 不套預設），原樣傳給總覽標「無法取得」，不能套預設網段")
 
     def test_network_service_never_reads_raw_messages_or_uses_relative_ranges(self):
         """內網可視性只做彙整查詢（不撈原始訊息，免得把日誌內容帶進畫面），且一律用絕對時間範圍（前期比較要用）。"""
@@ -394,7 +394,7 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
         """站點設定讀不到時設備只能依 LibreNMS 位置分站點：一定要把原因帶到畫面，不能默默換一套結果；
         設備 IP 要經 Fleet::deviceIp 轉換（devices.ip 是二進位）。"""
         endpoint = (ROOT / "librenms" / "ioc" / "endpoint.php").read_text(encoding="utf-8")
-        self.assertRegex(endpoint, r"(?s)->sites\(\$level\);\s*\} catch \(\\Ioc\\AccessDenied \$e\) \{\s*throw \$e;\s*\} catch \(\\Throwable \$e\) \{.*?\$sitesWarning = ",
+        self.assertRegex(endpoint, r"(?s)isset\(\$settings\['errors'\]\['sites'\]\)\) \{.*?\$sitesWarning = ",
                          "站點設定讀不到要帶原因（警告），不能只丟掉")
         self.assertIn("$thresholds, $sitesWarning)", endpoint)
         self.assertIn("Fleet::deviceIp(", endpoint)
@@ -403,8 +403,31 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
     def test_overview_does_not_fall_back_to_default_thresholds_when_settings_are_unreadable(self):
         """門檻讀不到時套預設值，畫面上的等級就可能跟管理者設定的不一致（例如設了 95 卻顯示低風險）。"""
         src = (ROOT / "librenms" / "ioc" / "endpoint.php").read_text(encoding="utf-8")
-        self.assertRegex(src, r"(?s)riskThresholds\(\$level\);\s*\} catch \(\\Throwable \$e\) \{.*?\$thresholds = null;", "讀不到要傳 null，由 RiskScore 只給分數不判等級")
+        self.assertRegex(src, r"\$thresholds\s*=\s*\$settings\['thresholds'\];", "讀不到是 null（overviewSettings 不套預設），由 RiskScore 只給分數不判等級")
         self.assertNotRegex(src, r"DEFAULT_THRESHOLDS", "endpoint 不能自己套預設門檻；預設值只在 SettingsService／RiskScore")
+
+    def test_overview_and_behavior_tick_read_the_settings_table_once(self):
+        """總覽每個請求、行為採集每分鐘都要站點／門檻／內部網段：走 overviewSettings() 一次讀完，不能各自呼叫、各讀一次整張表。
+        行為（各自成敗、整張表讀不到）由 tests/php/settings_test.php 的單元測試涵蓋。"""
+        src = (ROOT / "librenms" / "ioc" / "endpoint.php").read_text(encoding="utf-8")
+        body = re.search(r"(?s)function ioc_overview\(.*?\n\}\n", src).group(0)
+        self.assertEqual(body.count("ioc_settings()"), 1)
+        self.assertEqual(body.count("->overviewSettings($level)"), 1)
+        tick = (ROOT / "system" / "ioc-behavior-tick.php").read_text(encoding="utf-8")
+        self.assertEqual(tick.count("->overviewSettings("), 1)
+        for name, code in (("ioc_overview", body), ("ioc-behavior-tick", tick)):
+            for single in ("->sites(", "->internalNets("):
+                self.assertNotIn(single, code, "%s 不要各自讀設定：%s" % (name, single))
+
+    def test_unassigned_device_count_has_one_name_in_service_and_page(self):
+        """沒有歸屬站點的設備台數：服務回傳的欄位與畫面讀的欄位要同名。改名漏了畫面不會報錯，
+        只是 undefined > 0 為 false，那行提示悄悄消失（服務端的欄位由 tests/php 的單元測試涵蓋）；
+        API 形狀變了也要升 IOC_OVERVIEW_CACHE 版號（見 CLAUDE.md）。"""
+        page = (ROOT / "librenms" / "html" / "ioc-portal.php").read_text(encoding="utf-8")
+        self.assertIn("d.unassigned > 0", page)
+        for rel in ("librenms/ioc/LandscapeService.php", "librenms/ioc/Fleet.php", "librenms/html/ioc-portal.php"):
+            src = (ROOT / rel).read_text(encoding="utf-8")
+            self.assertNotIn("unlocated", src, "%s 還有舊名稱 unlocated" % rel)
 
     def test_every_table_in_the_schema_is_created_by_the_setup_script(self):
         """Schema 新增資料表卻忘了加進 ioc-db-setup.php 的清單：安裝時不會驗證它有沒有建立成功。"""

@@ -616,9 +616,9 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
       d.has_locations ? siteMap(d.items) : h('p', { class: 'note warn' }, '這些站點沒有座標，無法畫散佈圖（座標來自設備在 LibreNMS 的位置設定 → 座標；只用網段定義的站點沒有座標）。'),
       // 沒座標的站點不在圖上；不說的話會被誤認為那些站點不存在或沒問題（上面的計數與排行都有算進去）
       d.has_locations && noCoord > 0 ? h('p', { class: 'note warn' }, '另有 ' + noCoord + ' 個站點沒有座標，沒有畫在圖上；上面的計數與下方的排行有算進去。') : null,
-      d.unlocated > 0 ? h('p', { class: 'note warn' }, d.configured
-        ? '另有 ' + d.unlocated + ' 台設備沒有歸屬站點（IP 不在任何站點的網段內），不屬於任何站點。'
-        : '另有 ' + d.unlocated + ' 台設備沒有有效的位置（未指定，或是 Unknown 這類 SNMP 預設值），不屬於任何站點。') : null,
+      d.unassigned > 0 ? h('p', { class: 'note warn' }, d.configured
+        ? '另有 ' + d.unassigned + ' 台設備沒有歸屬站點（IP 不在任何站點的網段內），不屬於任何站點。'
+        : '另有 ' + d.unassigned + ' 台設備沒有有效的位置（未指定，或是 Unknown 這類 SNMP 預設值），不屬於任何站點。') : null,
       // 設定了站點後，LibreNMS 的位置不再當站點：沒歸進任何站點的設備身上的位置要列出來，不然那些設備像是憑空消失
       d.unassigned_locations && d.unassigned_locations.length ? h('p', { class: 'note warn' }, '這些 LibreNMS 位置的設備，IP 不在任何站點的網段內，所以沒有歸屬站點（站點以設定頁為準；要納入請到「設定」頁新增站點與網段）：' + d.unassigned_locations.join('、')) : null,
       // 設定了卻沒有設備歸進去的站點不會出現在上面，要說明（多半是網段填錯）
