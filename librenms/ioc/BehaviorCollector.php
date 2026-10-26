@@ -12,6 +12,8 @@ final class BehaviorCollector
     private PDO $db;
     private WindowedLogSource $logs;
     private BehaviorService $assets;
+    /** 取不到「採集器與關聯互斥鎖」時最多等幾秒（關聯合併正在進行）；等不到就略過這一輪，下一輪補上同一個區間。 */
+    public int $lockWait = 5;
 
     public function __construct(PDO $db, WindowedLogSource $logs)
     {
@@ -23,8 +25,10 @@ final class BehaviorCollector
      * @param string[] $nets
      * @param (callable(string):?string)|null $siteOf 依 IP 找站點（設定頁的「站點與網段」）：觀測主機沒有 LibreNMS 設備，站點只能靠這個；
      *        不傳就不動它們的站點
+     * @param int[]|null $knownDeviceIds LibreNMS 裡所有還在的設備（含停用 disabled、忽略 ignore 的）：管理員確認過的位址只算給這些設備的資產，
+     *        維修時把設備停用不會讓它的位址的流量變成新的待確認資產；只有從 LibreNMS 刪掉的才放掉。不傳就用 $devices 的設備
      */
-    public function tick(array $devices, array $nets, ?int $now = null, ?callable $siteOf = null): void
+    public function tick(array $devices, array $nets, ?int $now = null, ?callable $siteOf = null, ?array $knownDeviceIds = null): void
     {
         $now ??= time();
         $ids = []; $ambiguous = [];
@@ -79,38 +83,72 @@ final class BehaviorCollector
                 $portCounts[$ip] = ($portCounts[$ip] ?? 0) + max(0, (int) ($row['count'] ?? 0));
             }
         }
-        $byIp = [];
-        foreach ($summary as $row) {
-            $ip = (string) ($row['src_ip'] ?? '');
-            if (IpNets::contains($nets, $ip)) { $byIp[$ip] = $row; }
+        // 流量對到資產、寫區間這一段與「關聯」互斥：關聯合併中就略過這一輪（區間沒處理完，last_window_at 不前進，下一輪補上）
+        if (!$this->assets->acquireTickLock($this->lockWait)) {
+            // 讓工作台看得到（不是安靜地什麼都沒發生）；checked_at 也一併更新，不會因為沒更新而被誤報成「採集器超過 10 分鐘未更新」
+            $this->source('waiting', '資產關聯合併進行中，這一輪略過，下一輪補上同一個區間', null);
+            error_log('IOC behavior tick skipped: asset link in progress');
+            return;
         }
-        foreach (array_keys($byIp) as $ip) {
-            if (!isset($ids[$ip])) { $ids[$ip] = $this->assets->observeUnknown($ip, $siteOf); }
+        try {
+            $byIp = [];
+            foreach ($summary as $row) {
+                $ip = (string) ($row['src_ip'] ?? '');
+                if (IpNets::contains($nets, $ip)) { $byIp[$ip] = $row; }
+            }
+            // 流量對到資產的順序：LibreNMS 的當前 IP（上面已對好）→ 管理員確認過的位址 → 觀測主機（未知 IP）。
+            // 管理員確認過的位址只算給 LibreNMS 目前還有的設備；兩台設備都宣告同一個位址時，兩台都拿到 partial 的區間，衝突兩邊都看得到
+            $linked = $this->assets->linkedAddresses($knownDeviceIds ?? array_column($devices, 'id'));
+            $others = [];
+            foreach (array_keys($byIp) as $ip) {
+                if (isset($ids[$ip])) { continue; }
+                if (isset($linked[$ip])) {
+                    foreach ($linked[$ip] as $claimant) { $this->assets->observeLinked($claimant, $ip); }
+                    $ids[$ip] = $linked[$ip][0];
+                    if (count($linked[$ip]) > 1) { $ambiguous[$ip] = true; $others[$ip] = array_slice($linked[$ip], 1); }
+                } else {
+                    $ids[$ip] = $this->assets->observeUnknown($ip, $siteOf);
+                }
+            }
+            $partial = $truncated;
+            $modeQuery = $this->db->prepare('SELECT mode FROM ioc_behavior_assets WHERE id=?');
+            // 一個資產可能有好幾個位址：先依資產分組、併成一筆再寫，否則同一個區間的唯一鍵會讓後寫的蓋掉先寫的
+            $byAsset = [];
+            foreach ($ids as $ip => $assetId) { $byAsset[$assetId][] = (string) $ip; }
+            foreach ($others as $ip => $assetIds) {
+                foreach ($assetIds as $assetId) { $byAsset[$assetId][] = (string) $ip; }
+            }
+            foreach ($byAsset as $assetId => $ips) {
+                $modeQuery->execute([$assetId]);
+                if ($modeQuery->fetchColumn() === 'retired') { continue; }
+                $parts = [];
+                foreach ($ips as $ip) {
+                    $row = $byIp[$ip] ?? [];
+                    $parts[] = ['ip' => $ip, 'count' => max(0, (int) ($row['count'] ?? 0)), 'bytes' => max(0, (int) ($row['sum_net_bytes'] ?? 0)),
+                        'with_bytes' => $byteCounts[$ip] ?? 0, 'dest_count' => $destCounts[$ip] ?? 0, 'port_count' => $portCounts[$ip] ?? 0,
+                        'card_dst' => max(0, (int) ($row['card_dst_ip'] ?? 0)), 'card_port' => max(0, (int) ($row['card_dstport'] ?? 0)),
+                        'dest_list' => array_keys($dest[$ip] ?? []), 'port_list' => array_keys($ports[$ip] ?? []), 'ambiguous' => isset($ambiguous[$ip])];
+                }
+                $t = BehaviorAnalyzer::combineTraffic($parts);
+                // 全域日誌有資料，不代表這台設備的日誌沒有中斷；缺席不能補成零流量。
+                $facts = [$t['connections'], $truncated, $t['ambiguous'], $t['with_bytes'], $t['dest_count'], $t['port_count']];
+                $quality = BehaviorAnalyzer::windowQuality(...$facts);
+                if ($quality === 'partial') { $partial = true; }
+                $record = ['asset_id' => $assetId, 'source_key' => BehaviorService::SOURCE,
+                    'window_start' => $window, 'connections' => $t['connections'], 'bytes_total' => $t['bytes'],
+                    'destinations' => $t['destinations'], 'ports' => $t['ports'],
+                    'destinations_json' => json_encode($t['dest_list'], JSON_THROW_ON_ERROR),
+                    'ports_json' => json_encode($t['port_list'], JSON_THROW_ON_ERROR),
+                    'signals_json' => '{"dns":false,"tls":false,"scope":"firewall_only"}',
+                    'quality' => $quality, 'quality_reason' => BehaviorAnalyzer::windowQualityReason(...$facts),
+                    'source_ip' => $t['top_ip']];      // 流量最多的位址：警示指標與事件案用它說明流量從哪來（不寫進區間表）
+                $this->storeWindow($record);
+                if ($quality === 'complete') { $this->evaluate($record, $t['dest_list'], $t['port_list']); }
+            }
+            $this->source($partial ? 'partial' : 'ready', $partial ? '分組達上限、位址衝突或必要欄位缺值；受影響區間不會用於判斷' : '', $window);
+        } finally {
+            $this->assets->releaseTickLock();
         }
-        $partial = $truncated;
-        $modeQuery = $this->db->prepare('SELECT mode FROM ioc_behavior_assets WHERE id=?');
-        foreach ($ids as $ip => $assetId) {
-            $modeQuery->execute([$assetId]);
-            if ($modeQuery->fetchColumn() === 'retired') { continue; }
-            $row = $byIp[$ip] ?? [];
-            $count = max(0, (int) ($row['count'] ?? 0));
-            // 全域日誌有資料，不代表這台設備的日誌沒有中斷；缺席不能補成零流量。
-            $facts = [$count, $truncated, isset($ambiguous[$ip]), $byteCounts[$ip] ?? 0, $destCounts[$ip] ?? 0, $portCounts[$ip] ?? 0];
-            $quality = BehaviorAnalyzer::windowQuality(...$facts);
-            if ($quality === 'partial') { $partial = true; }
-            $record = ['asset_id' => $assetId, 'source_key' => BehaviorService::SOURCE,
-                'window_start' => $window, 'connections' => $count,
-                'bytes_total' => max(0, (int) ($row['sum_net_bytes'] ?? 0)),
-                'destinations' => max(0, (int) ($row['card_dst_ip'] ?? 0)),
-                'ports' => max(0, (int) ($row['card_dstport'] ?? 0)),
-                'destinations_json' => json_encode(array_keys($dest[$ip] ?? []), JSON_THROW_ON_ERROR),
-                'ports_json' => json_encode(array_keys($ports[$ip] ?? []), JSON_THROW_ON_ERROR),
-                'signals_json' => '{"dns":false,"tls":false,"scope":"firewall_only"}',
-                'quality' => $quality, 'quality_reason' => BehaviorAnalyzer::windowQualityReason(...$facts)];
-            $this->storeWindow($record);
-            if ($quality === 'complete') { $this->evaluate($record, array_keys($dest[$ip] ?? []), array_keys($ports[$ip] ?? [])); }
-        }
-        $this->source($partial ? 'partial' : 'ready', $partial ? '分組達上限、位址衝突或必要欄位缺值；受影響區間不會用於判斷' : '', $window);
         $this->trainPending();
     }
 
@@ -200,7 +238,7 @@ final class BehaviorCollector
             window_start=GREATEST(window_start,VALUES(window_start)),metrics_json=VALUES(metrics_json)');
         $q->execute([$dedup, $asset['id'], $finding['detector'], $r['window_start'], $asset['baseline_version'],
             $finding['severity'], $preview ? 'preview' : 'open', $finding['score'], $finding['summary'],
-            json_encode($finding['metrics'], JSON_THROW_ON_ERROR)]);
+            json_encode($finding['metrics'] + (($r['source_ip'] ?? null) !== null ? ['source_ip' => $r['source_ip']] : []), JSON_THROW_ON_ERROR)]);
         if ($preview) { return; }
         $q = $this->db->prepare('SELECT id FROM ioc_behavior_alerts WHERE dedup_key=?'); $q->execute([$dedup]);
         $alert = $q->fetch(PDO::FETCH_ASSOC);
@@ -220,15 +258,19 @@ final class BehaviorCollector
 
     private function ensureCase(int $alertId): void
     {
-        $q = $this->db->prepare('SELECT a.id,a.asset_id,a.dedup_key,a.summary,a.severity,a.case_id,x.name,
-            (SELECT address FROM ioc_behavior_addresses WHERE asset_id=a.asset_id ORDER BY id DESC LIMIT 1) address
+        $q = $this->db->prepare('SELECT a.id,a.asset_id,a.dedup_key,a.summary,a.severity,a.case_id,a.metrics_json,x.name,
+            (SELECT address FROM ioc_behavior_addresses WHERE asset_id=a.asset_id ORDER BY last_seen_at DESC,id DESC LIMIT 1) address
             FROM ioc_behavior_alerts a JOIN ioc_behavior_assets x ON x.id=a.asset_id WHERE a.id=?');
         $q->execute([$alertId]); $alert = $q->fetch(PDO::FETCH_ASSOC);
         if (!$alert || $alert['case_id'] !== null) { return; }
+        // 異常流量從哪個位址來：警示指標有記就用它（多個位址的資產，LibreNMS 的位址每輪都會刷新，「最近看到」不等於「有流量」）；
+        // 舊警示沒有，才退回最近看到的位址
+        $source = ((array) json_decode((string) $alert['metrics_json'], true))['source_ip'] ?? null;
+        $address = is_string($source) && filter_var($source, FILTER_VALIDATE_IP) ? $source : $alert['address'];
         try {
             $cases = new CaseService(new PdoCaseRepo($this->db));
             $result = $cases->create(['title' => '裝置行為異常：' . $alert['summary'], 'severity' => $alert['severity'],
-                'category' => 'other', 'subject_ip' => $alert['address'], 'subject_host' => mb_substr($alert['name'], 0, 128),
+                'category' => 'other', 'subject_ip' => $address, 'subject_host' => mb_substr($alert['name'], 0, 128),
                 'summary' => $alert['summary'] . '；來源：FortiGate 防火牆日誌，僅涵蓋經過防火牆的流量。',
                 'dedup_key' => 'behavior:' . $alert['dedup_key']], 'automation', Access::HANDLER, 'automation');
             $this->db->prepare('UPDATE ioc_behavior_alerts SET case_id=? WHERE id=? AND case_id IS NULL')
