@@ -429,6 +429,35 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
             src = (ROOT / rel).read_text(encoding="utf-8")
             self.assertNotIn("unlocated", src, "%s 還有舊名稱 unlocated" % rel)
 
+    def test_behavior_collector_uses_the_tested_rules_instead_of_inlining_its_own(self):
+        """區間品質、上班時段分桶、警示去重鍵與基線訓練門檻的規則在 BehaviorAnalyzer（有單元測試）。
+        採集器碰資料庫，預設的測試不連資料庫（資料庫層測試要另外跑 tests/run-db-tests.sh），所以用靜態檢查擋住「又把規則內嵌回採集器」。"""
+        collector = (ROOT / "librenms" / "ioc" / "BehaviorCollector.php").read_text(encoding="utf-8")
+        for call in ("BehaviorAnalyzer::windowQuality(", "BehaviorAnalyzer::localBucket(",
+                     "BehaviorAnalyzer::dedupKey(", "BehaviorAnalyzer::trainingGroups("):
+            self.assertEqual(collector.count(call), 1, "採集器要呼叫 %s" % call)
+        for inlined in ("6048", "hash('sha256'", "new \\DateTimeZone", "'partial' : 'complete'"):
+            self.assertNotIn(inlined, collector, "採集器不該自己內嵌規則：%s" % inlined)
+
+    def test_db_test_harness_can_only_touch_its_own_throwaway_schema(self):
+        """資料庫層測試會連真的 MariaDB（開發機上跟 LibreNMS 同一台）：腳本只建／刪 ioc_test_* 的 schema 與使用者，
+        PHP 端再檢查一次，預設的測試完全不連資料庫。這些是安全閥，不能被改掉。"""
+        script = (ROOT / "tests" / "run-db-tests.sh").read_text(encoding="utf-8")
+        self.assertIn('DB="ioc_test_${SUFFIX}"', script)
+        self.assertIn('DBUSER="ioc_test_${SUFFIX}"', script)
+        self.assertIn("trap cleanup EXIT", script, "成功、失敗、被中斷都要刪")
+        self.assertIn("case \"$DB\" in ioc_test_*)", script, "刪除前再檢查一次前綴")
+        self.assertIn("GRANT ALL PRIVILEGES ON \\`${DB}\\`.*", script, "使用者只能碰測試 schema")
+        self.assertNotRegex(script, r"(?i)(drop|grant|truncate|delete)[^\n]*\blibrenms\b", "不能對 librenms 資料庫動手")
+        self.assertNotIn("GRANT ALL PRIVILEGES ON *.*", script)
+        support = (ROOT / "tests" / "php" / "db_support.php").read_text(encoding="utf-8")
+        self.assertIn("dbname=(ioc_test_[a-z0-9]+)", support)
+        self.assertIn("拒絕執行", support)
+        runner = (ROOT / "tests" / "php" / "run.php").read_text(encoding="utf-8")
+        self.assertIn("getenv('IOC_TEST_DSN')", runner, "沒有 IOC_TEST_DSN 就不載入 *_dbtest.php")
+        for f in sorted((ROOT / "tests" / "php").glob("*_dbtest.php")):
+            self.assertNotIn("new PDO(", f.read_text(encoding="utf-8"), "%s 不能自己開資料庫連線，一律用 dbtPdo()" % f.name)
+
     def test_every_table_in_the_schema_is_created_by_the_setup_script(self):
         """Schema 新增資料表卻忘了加進 ioc-db-setup.php 的清單：安裝時不會驗證它有沒有建立成功。"""
         schema = (ROOT / "librenms" / "ioc" / "Schema.php").read_text(encoding="utf-8")

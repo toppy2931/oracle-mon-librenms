@@ -13,7 +13,7 @@
 - IOC 會對同一時段重跑與同類警示去重，但 Graylog 若把同一筆設備日誌重複匯入，彙整數值仍可能放大。試行驗收須檢查日誌來源的重複率及延遲，確認可辨識的事件 ID 後才可設計來源層去重。
 - 學習至少 28 天、28 天內至少 6048 個完整五分鐘區間、20 個不同日期，且至少 7 天／100 格實際有連線，才產生版本化基線。沒有觀測到該裝置的流量會標示為缺資料，不能只靠全域來源心跳判為零流量或就緒。這個保守門檻可能使低活動設備無法建立基線；須先確認該設備的日誌涵蓋，再評估專用心跳。管理員檢查資料品質與來源後，明確切到監控模式。基線就緒但尚未啟用監控時，只產生模擬警示；重新學習期間不使用舊基線判斷。
 - 正式警示依裝置、偵測類型與小時去重，建立 IOC 事件案。管理員可填理由確認或結案。事件案及警示是不同紀錄，處置時應分別檢查。
-- Webhook 投遞最多自動重試五次；若仍失敗，管理員排除原因後可在警示詳情手動重試。
+- Webhook 投遞失敗會自動退避重試（間隔 1、2、4、8 分鐘），**共 5 次嘗試**（首次加 4 次重試），第 5 次失敗就標 `failed`；管理員排除原因後可在警示詳情手動重試（次數歸零）。
 - 模式、警示處置、時段、來源盤點與人工身分關聯寫入操作稽核；不記錄密鑰及原始日誌。
 - AI 擴充契約為 `BehaviorAnalyzer::aiFeatures()` 與 `BehaviorAiProvider`，只含統計特徵、品質與基線差異，不含 IP、網域、帳號、原始日誌或組態；目前沒有接入 AI 模型。AI 的建議不能改寫正式警示、事件案或設備設定。
 
@@ -27,6 +27,20 @@ systemctl list-timers ioc-behavior.timer --no-pager
 sudo -u librenms php tests/php/run.php
 sudo journalctl -u ioc-behavior.service --since '30 minutes ago' --no-pager
 ```
+
+`ioc-behavior.service` 以 `ProtectSystem=strict` 執行，整個檔案系統唯讀；它啟動 LibreNMS 時需要寫設定快取，所以單元檔只開放一個目錄：`ReadWritePaths=-/opt/librenms/storage/framework/cache`（前綴 `-`：目錄不存在時略過，服務照樣能啟動）。沒有這一行時，日誌每 5 分鐘（快取過期時）會出現 `file_put_contents(…/storage/framework/cache/…): Failed to open stream: Read-only file system … ConfigRepository.php:55`；那只是警告，採集本身仍會成功。更新後確認設定已生效（輸出應包含該路徑）：
+
+```bash
+systemctl show ioc-behavior.service -p ReadWritePaths
+```
+
+再等 10 分鐘以上，確認警告不再出現（預期輸出 `0`；`--since` 只看更新之後，更新前殘留的舊警告不算）：
+
+```bash
+sudo journalctl -u ioc-behavior.service --since '10 minutes ago' --no-pager | grep -c 'Read-only file system'
+```
+
+不要把可寫路徑放寬成 `/opt/librenms` 或整個 `storage`：採集程式一旦出問題，就能改動 LibreNMS 的程式與紀錄。
 
 若要通知管理員，在 VM 以 root 執行 `/opt/oracle-mon/admin/configure-behavior-webhook.sh`，輸入 HTTPS URL，將顯示一次的 HMAC 密鑰安全交給接收端。密鑰儲存在 `/etc/oracle-mon/ioc-behavior-webhook.conf`，權限 `root:librenms 0640`；網頁與資料庫不保存密鑰。接收端驗證 `X-IOC-Timestamp` 與 `X-IOC-Signature`，簽名輸入是 `timestamp + '.' + 原始 JSON body`，演算法 HMAC-SHA256；並依 `X-IOC-Event-ID` 去重。接收端應拒絕過期時間戳。
 
@@ -43,3 +57,14 @@ sudo journalctl -u ioc-behavior.service --since '30 minutes ago' --no-pager
 在工作台盤點 SPAN、TAP、Flow、DNS 的交換器／網段與可用性，盤點狀態不代表已接入。接入 Zeek 或 Flow 前，須先以實機驗證鏡像方向、封包遺失、時間同步、DNS／TLS 欄位、同網段流量涵蓋與和防火牆日誌的重疊去重。新來源要有獨立適配器與資料品質測試，再啟用為正式採集來源；不可只把盤點狀態改成「就緒」。
 
 目前不自動刪除五分鐘彙整與歷史基線；維運時需監看資料庫容量與備份。原始 Graylog 日誌不複製到 IOC 資料庫；目的地 IP 只保存在受限的來源特徵表，不回傳檢視者摘要，也不送 Webhook。
+
+## 已知限制（2026-10-26 讀程式碼確認；標「待 VM 查證」的尚未實測）
+
+- **人工關聯不會改變流量歸屬**：`linkAsset` 把暫時資產設為 `retired`，並把位址複製到 LibreNMS 裝置；但採集器只依 LibreNMS 當前 IP 對應流量，同一個 IP 的下一輪流量找不到未退役的暫時資產，會另建新的暫時資產。要讓流量算在該裝置上，必須先更新 LibreNMS 的裝置 IP。
+- **暫時資產不會訓練基線**：訓練需要上班時段，時段只能依 LibreNMS 裝置或站點設定，暫時資產兩者皆無；它們只會累積區間。
+- **基線只在學習模式訓練**：`ready`／`monitoring` 的基線不會自動更新，管理員改回學習（重新學習 28 天）才會重訓。
+- **區間品質容易是 `partial`（待 VM 查證）**：任何一筆日誌缺 `net_bytes` 或目的埠（例如 ICMP），該裝置整個五分鐘區間就是 `partial`，不進基線與偵測，「啟用監控」的品質檢查當下也過不了。實際比例請在 VM 查：`SELECT quality, COUNT(*) FROM ioc_behavior_windows GROUP BY quality;`
+- **一個 tick 只處理最新一個完整區間，不回補**：採集器停擺期間的區間不會補算，基線要求的 6048 格（28 天的 75%）會因此更難達到。
+- **每個區間只檢查與學習前 100 個目的地與目的埠**：超過的部分不會被判為「新」，也不會被學習。
+
+判斷規則（區間品質、上班時段與小時分桶、警示去重鍵、基線訓練門檻）在 `BehaviorAnalyzer`，有單元測試（`tests/php/behavior_test.php`）；修改這些規則要同步改測試。

@@ -90,9 +90,8 @@ final class BehaviorCollector
             $row = $byIp[$ip] ?? [];
             $count = max(0, (int) ($row['count'] ?? 0));
             // 全域日誌有資料，不代表這台設備的日誌沒有中斷；缺席不能補成零流量。
-            $quality = $count === 0 ? 'missing' :
-                ($truncated || isset($ambiguous[$ip]) || ($byteCounts[$ip] ?? 0) < $count
-                    || ($destCounts[$ip] ?? 0) < $count || ($portCounts[$ip] ?? 0) < $count ? 'partial' : 'complete');
+            $quality = BehaviorAnalyzer::windowQuality($count, $truncated, isset($ambiguous[$ip]),
+                $byteCounts[$ip] ?? 0, $destCounts[$ip] ?? 0, $portCounts[$ip] ?? 0);
             if ($quality === 'partial') { $partial = true; }
             $record = ['asset_id' => $assetId, 'source_key' => BehaviorService::SOURCE,
                 'window_start' => $window, 'connections' => $count,
@@ -152,15 +151,10 @@ final class BehaviorCollector
         }
         $schedule = $this->schedule($asset);
         if (!$schedule) { return; }
-        $local = new \DateTimeImmutable($r['window_start'] . ' UTC');
-        $local = $local->setTimezone(new \DateTimeZone($schedule['timezone']));
-        $weekday = (int) $local->format('N');
-        $onDuty = in_array((string) $weekday, explode(',', $schedule['workdays']), true)
-            && $local->format('H:i') >= substr($schedule['start_time'], 0, 5)
-            && $local->format('H:i') < substr($schedule['end_time'], 0, 5);
-        $dayKind = $weekday <= 5 ? 'weekday' : 'weekend';
+        $bucket = BehaviorAnalyzer::localBucket($r['window_start'], $schedule);
+        $onDuty = $bucket['on_duty'];
         $q = $this->db->prepare('SELECT * FROM ioc_behavior_baselines WHERE asset_id=? AND version=? AND source_key=? AND day_kind=? AND hour_of_day=?');
-        $q->execute([$r['asset_id'], $asset['baseline_version'], $r['source_key'], $dayKind, (int) $local->format('G')]);
+        $q->execute([$r['asset_id'], $asset['baseline_version'], $r['source_key'], $bucket['day_kind'], $bucket['hour']]);
         $baseline = $q->fetch(PDO::FETCH_ASSOC);
         if (!$baseline) { $this->learnKnown((int) $r['asset_id'], $dest, $ports); return; }
         $newDest = $this->novel((int) $r['asset_id'], 'destination', $dest);
@@ -201,10 +195,8 @@ final class BehaviorCollector
 
     private function recordAlert(array $asset, array $r, array $finding): void
     {
-        $hour = substr($r['window_start'], 0, 13);
         $preview = $asset['mode'] !== 'monitoring';
-        $dedup = hash('sha256', $asset['id'] . '|' . $finding['detector'] . '|' . $asset['baseline_version']
-            . '|' . ($preview ? 'preview' : 'monitoring') . '|' . $hour);
+        $dedup = BehaviorAnalyzer::dedupKey((int) $asset['id'], $finding['detector'], (int) $asset['baseline_version'], $preview, $r['window_start']);
         $q = $this->db->prepare('INSERT INTO ioc_behavior_alerts (dedup_key,asset_id,detector,window_start,baseline_version,
             severity,status,score,summary,metrics_json,first_seen_at,last_seen_at)
             VALUES (?,?,?,?,?,?,?,?,?,?,UTC_TIMESTAMP(),UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE
@@ -265,23 +257,11 @@ final class BehaviorCollector
             WHERE asset_id=? AND source_key=? AND quality='complete' AND window_start>=DATE_SUB(UTC_TIMESTAMP(),INTERVAL 28 DAY)
             ORDER BY window_start");
         $q->execute([$id, BehaviorService::SOURCE]); $rows = $q->fetchAll(PDO::FETCH_ASSOC);
-        if (count($rows) < 6048) { return; } // 28 天 × 288 格 × 75%；缺資料不得視為正常
-        $days = []; $activeDays = []; $activeWindows = 0; $groups = [];
+        if (count($rows) < BehaviorAnalyzer::TRAIN_MIN_WINDOWS) { return; }     // 先擋掉，省下查排程的兩次查詢
         $schedule = $this->schedule(['device_id' => $this->deviceId($id), 'site_name' => $this->siteName($id)]);
         if (!$schedule) { return; }
-        $zone = new \DateTimeZone($schedule['timezone']);
-        foreach ($rows as $row) {
-            $local = (new \DateTimeImmutable($row['window_start'] . ' UTC'))->setTimezone($zone);
-            $days[$local->format('Y-m-d')] = true;
-            if ((int) $row['connections'] > 0) {
-                $activeDays[$local->format('Y-m-d')] = true;
-                $activeWindows++;
-            }
-            $kind = (int) $local->format('N') <= 5 ? 'weekday' : 'weekend';
-            $key = $kind . ':' . $local->format('G');
-            $groups[$key][] = $row;
-        }
-        if (count($days) < 20 || count($activeDays) < 7 || $activeWindows < 100) { return; }
+        $groups = BehaviorAnalyzer::trainingGroups($rows, $schedule['timezone']);
+        if ($groups === null) { return; }
         $q = $this->db->prepare('SELECT baseline_version FROM ioc_behavior_assets WHERE id=?'); $q->execute([$id]);
         $version = (int) $q->fetchColumn() + 1;
         $this->db->beginTransaction();

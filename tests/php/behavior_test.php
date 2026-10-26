@@ -50,6 +50,123 @@ test('AI 契約只含統計特徵，不含裝置與目的地識別', static func
     assertTrue(!isset($features['src_ip']) && !isset($features['dst_ip']) && !isset($features['user']));
 });
 
+// ---- 採集器的純邏輯（不碰資料庫）：區間品質、上班時段與小時分桶、警示去重鍵、基線訓練門檻 ----
+// 這些規則原本藏在 BehaviorCollector 的私有方法裡，沒有任何測試；抽成 BehaviorAnalyzer 的靜態函式後，
+// 之後改規則（警示合併、門檻可調、基線更新）才有東西釘住現行行為。
+
+test('區間品質：沒有該裝置的日誌是 missing（不能補成零流量）；任何必要欄位缺值或分組被截斷都是 partial', static function (): void {
+    assertSame('missing', BehaviorAnalyzer::windowQuality(0, false, false, 0, 0, 0));
+    assertSame('missing', BehaviorAnalyzer::windowQuality(0, true, true, 0, 0, 0), '沒有日誌就是 missing，不論分組有沒有被截斷');
+    assertSame('complete', BehaviorAnalyzer::windowQuality(10, false, false, 10, 10, 10));
+    assertSame('complete', BehaviorAnalyzer::windowQuality(10, false, false, 12, 11, 10), '只有「少於」才算缺值');
+    assertSame('partial', BehaviorAnalyzer::windowQuality(10, true, false, 10, 10, 10), '任一組分組達上限，所有裝置的這個區間都不可信');
+    assertSame('partial', BehaviorAnalyzer::windowQuality(10, false, true, 10, 10, 10), '同一個 IP 對到兩台設備');
+    assertSame('partial', BehaviorAnalyzer::windowQuality(10, false, false, 9, 10, 10), '有日誌沒有 net_bytes');
+    assertSame('partial', BehaviorAnalyzer::windowQuality(10, false, false, 10, 9, 10), '有日誌沒有目的 IP');
+    assertSame('partial', BehaviorAnalyzer::windowQuality(10, false, false, 10, 10, 9), '有日誌沒有目的埠（例如 ICMP）');
+});
+
+function bhSchedule(string $tz = 'Asia/Taipei', string $workdays = '1,2,3,4,5'): array
+{
+    return ['timezone' => $tz, 'workdays' => $workdays, 'start_time' => '09:00:00', 'end_time' => '18:00:00'];
+}
+
+test('上班時段與分桶：以排程時區換算；結束時間不含；平日／週末分桶固定是週一到五／週六日', static function (): void {
+    $cases = [
+        // [UTC 區間起點, 預期 day_kind, 預期小時, 預期是否上班]
+        ['2026-10-26 01:00:00', 'weekday', 9, true],      // 週一 09:00 台北：上班開始（含）
+        ['2026-10-26 00:55:00', 'weekday', 8, false],     // 週一 08:55
+        ['2026-10-26 09:55:00', 'weekday', 17, true],     // 週一 17:55
+        ['2026-10-26 10:00:00', 'weekday', 18, false],    // 週一 18:00：結束（不含）
+        ['2026-10-25 17:00:00', 'weekday', 1, false],     // UTC 週日 17:00 ＝ 台北週一 01:00：日期要換成本地的
+        ['2026-10-30 16:00:00', 'weekend', 0, false],     // UTC 週五 16:00 ＝ 台北週六 00:00
+    ];
+    foreach ($cases as [$start, $kind, $hour, $duty]) {
+        $b = BehaviorAnalyzer::localBucket($start, bhSchedule());
+        assertSame([$kind, $hour, $duty], [$b['day_kind'], $b['hour'], $b['on_duty']], $start);
+    }
+    $sat = BehaviorAnalyzer::localBucket('2026-10-31 02:00:00', bhSchedule('Asia/Taipei', '1,2,3,4,5,6'));   // 台北週六 10:00
+    assertSame(['weekend', 10, true], [$sat['day_kind'], $sat['hour'], $sat['on_duty']], '週六設為工作日只影響是否上班；基線分桶仍固定把週六算週末');
+    // 夏令時間：同一個 UTC 時刻，紐約的本地時間會差一小時
+    $edt = BehaviorAnalyzer::localBucket('2026-10-26 13:00:00', bhSchedule('America/New_York'));   // EDT（UTC-4）09:00
+    $est = BehaviorAnalyzer::localBucket('2026-11-02 13:00:00', bhSchedule('America/New_York'));   // EST（UTC-5）08:00
+    assertSame([9, true, 8, false], [$edt['hour'], $edt['on_duty'], $est['hour'], $est['on_duty']]);
+});
+
+test('警示去重鍵：同一資產、偵測器、基線版本、模式在同一個 UTC 小時只有一個；任一項不同就是另一個', static function (): void {
+    $base = BehaviorAnalyzer::dedupKey(5, 'after_hours_surge', 2, false, '2026-10-26 10:35:00');
+    assertSame($base, BehaviorAnalyzer::dedupKey(5, 'after_hours_surge', 2, false, '2026-10-26 10:00:00'), '同一小時');
+    assertSame($base, BehaviorAnalyzer::dedupKey(5, 'after_hours_surge', 2, false, '2026-10-26 10:55:00'), '同一小時');
+    assertTrue($base !== BehaviorAnalyzer::dedupKey(5, 'after_hours_surge', 2, false, '2026-10-26 11:00:00'), '下一小時是新的警示');
+    assertTrue($base !== BehaviorAnalyzer::dedupKey(5, 'after_hours_surge', 2, true, '2026-10-26 10:35:00'), '模擬與正式不共用');
+    assertTrue($base !== BehaviorAnalyzer::dedupKey(5, 'after_hours_surge', 3, false, '2026-10-26 10:35:00'), '基線版本不同');
+    assertTrue($base !== BehaviorAnalyzer::dedupKey(6, 'after_hours_surge', 2, false, '2026-10-26 10:35:00'), '資產不同');
+    assertTrue($base !== BehaviorAnalyzer::dedupKey(5, 'new_external_pattern', 2, false, '2026-10-26 10:35:00'), '偵測器不同');
+    assertSame(64, strlen($base));
+});
+
+/**
+ * 從 2026-09-01 00:00 UTC（週二）起連續 $days 天、每 5 分鐘一格的完整區間。
+ *
+ * @param array<string,array<string,int>> $override 以區間起點覆寫欄位
+ * @return array<int,array{window_start:string,bytes_total:int,connections:int,destinations:int}>
+ */
+function bhWindows(int $days, array $override = [], int $connections = 10): array
+{
+    $rows = [];
+    $t = strtotime('2026-09-01 00:00:00 UTC');
+    for ($i = 0; $i < $days * 288; $i++) {
+        $start = gmdate('Y-m-d H:i:s', $t + $i * 300);
+        $rows[] = ['window_start' => $start, 'bytes_total' => 1000, 'connections' => $connections, 'destinations' => 3];
+        if (isset($override[$start])) {
+            $rows[$i] = $override[$start] + $rows[$i];
+        }
+    }
+    return $rows;
+}
+
+test('基線訓練門檻：少於 6048 個完整區間不訓練；達標後依本地「平日／週末 × 小時」分桶', static function (): void {
+    assertSame(6048, BehaviorAnalyzer::TRAIN_MIN_WINDOWS);
+    assertSame(null, BehaviorAnalyzer::trainingGroups(array_slice(bhWindows(21), 0, 6047), 'Asia/Taipei'), '差一格');
+    $rows = bhWindows(21, [
+        '2026-09-01 01:00:00' => ['bytes_total' => 777],     // 台北週二 09:00
+        '2026-09-05 17:00:00' => ['bytes_total' => 888],     // UTC 週六 17:00 ＝ 台北週日 01:00
+        '2026-09-04 16:00:00' => ['bytes_total' => 999],     // UTC 週五 16:00 ＝ 台北週六 00:00
+    ]);
+    assertSame(6048, count($rows));
+    $g = BehaviorAnalyzer::trainingGroups($rows, 'Asia/Taipei');
+    assertTrue($g !== null, '剛好 6048 格、橫跨 22 個本地日期、全部有連線：達標');
+    assertSame(6048, array_sum(array_map('count', $g)), '每一格都要分到某個桶');
+    assertSame(48, count($g), '平日／週末 × 24 小時');
+    assertTrue(in_array(777, array_column($g['weekday:9'], 'bytes_total'), true), '週二 09:00（台北）進 weekday:9');
+    assertTrue(in_array(888, array_column($g['weekend:1'], 'bytes_total'), true), '日期要換成本地的：UTC 週六 17:00 是台北週日 01:00');
+    assertTrue(in_array(999, array_column($g['weekend:0'], 'bytes_total'), true), 'UTC 週五 16:00 是台北週六 00:00');
+    $utc = BehaviorAnalyzer::trainingGroups($rows, 'UTC');
+    assertTrue(in_array(777, array_column($utc['weekday:1'], 'bytes_total'), true), '同一格換成 UTC 排程就落在別的桶');
+});
+
+test('基線訓練門檻：有效天數、有連線的天數與區間數不足也不訓練', static function (): void {
+    // 全部沒有連線：沒有任何「有連線的區間」
+    assertSame(null, BehaviorAnalyzer::trainingGroups(bhWindows(21, [], 0), 'Asia/Taipei'));
+    // 有連線的日期夠（7 天，每天 1 個區間），但有連線的區間只有 7 個，少於 100
+    $few = bhWindows(21, [], 0);
+    for ($day = 0; $day < 7; $day++) { $few[$day * 288 + 100]['connections'] = 5; }
+    assertSame(null, BehaviorAnalyzer::trainingGroups($few, 'Asia/Taipei'), '有連線的區間少於 100');
+    // 100 個區間有連線，但只集中在 2 個本地日期
+    $two = bhWindows(21, [], 0);
+    for ($i = 0; $i < 100; $i++) { $two[$i * 2]['connections'] = 5; }            // 前 200 格 ≈ 16 小時，跨兩個台北日期
+    assertSame(null, BehaviorAnalyzer::trainingGroups($two, 'Asia/Taipei'), '有連線的日期少於 7 天');
+    // 100 個區間有連線、分散在 7 個本地日期：達標
+    $seven = bhWindows(21, [], 0);
+    for ($i = 0; $i < 100; $i++) { $seven[($i % 7) * 288 + intdiv($i, 7)]['connections'] = 5; }
+    assertTrue(BehaviorAnalyzer::trainingGroups($seven, 'Asia/Taipei') !== null, '7 個日期、100 個有連線的區間');
+    // 區間數夠、有連線的日期也夠（11 天），但涵蓋的日期不到 20 天（10 天的資料重複 3 次；真實資料有唯一鍵，不會發生，門檻仍要成立）
+    $short = [];
+    foreach (range(1, 3) as $_) { $short = array_merge($short, bhWindows(10)); }
+    assertTrue(count($short) >= BehaviorAnalyzer::TRAIN_MIN_WINDOWS);
+    assertSame(null, BehaviorAnalyzer::trainingGroups($short, 'Asia/Taipei'), '涵蓋的日期少於 20');
+});
+
 test('Webhook 設定只接受不含帳密或片段的 HTTPS 與 32 位元組密鑰', static function (): void {
     $secret = str_repeat('ab', 32);
     $valid = BehaviorWebhook::parseConfig("WEBHOOK_URL=https://notify.example.test/ioc\nWEBHOOK_SECRET_HEX=$secret\n");

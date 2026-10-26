@@ -14,6 +14,9 @@ CapabilityBoundingSet=
 ProtectSystem=strict
 ProtectHome=yes
 PrivateTmp=yes
+# LibreNMS 啟動時會把設定快取寫進這個目錄；ProtectSystem=strict 讓它唯讀，不開放就是每 5 分鐘一次 EROFS 警告。
+# 只開放這一個目錄：不要放寬成 /opt/librenms 或整個 storage。前綴 - 表示目錄不存在時略過，不會讓服務起不來。
+ReadWritePaths=-/opt/librenms/storage/framework/cache
 PrivateDevices=yes
 RestrictSUIDSGID=yes
 LockPersonality=yes
