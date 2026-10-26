@@ -143,8 +143,7 @@ dbtest('setMode：模式與權限檢查；啟用監控的每一個前置條件�
     $set("UPDATE ioc_behavior_assets SET baseline_version=1, quality_status='partial' WHERE id=?");
     assertThrows(ValidationError::class, fn () => $svc->setMode($id, 'monitoring', 'a', BSD_H), '基線', '最近一個區間是 partial：資料品質不過');
     $set("UPDATE ioc_behavior_assets SET quality_status='ready' WHERE id=?");
-    assertThrows(ValidationError::class, fn () => $svc->setMode($id, 'monitoring', 'a', BSD_H), '上班時段');
-    dbtSchedule($db, 'device', '1');
+    // 沒有任何時段設定也不會被擋：沒有設備與站點層級的時段就用預設（見 behavior_hosts_dbtest.php）
     assertThrows(ValidationError::class, fn () => $svc->setMode($id, 'monitoring', 'a', BSD_H), '防火牆日誌來源', '沒有來源狀態');
     dbtSource($db, 'partial');
     assertThrows(ValidationError::class, fn () => $svc->setMode($id, 'monitoring', 'a', BSD_H), '防火牆日誌來源', '來源不是 ready');

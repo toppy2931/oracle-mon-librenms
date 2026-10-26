@@ -178,10 +178,28 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
 
     def test_portal_never_puts_data_into_innerhtml(self):
         """日誌內容都來自外部，用 innerHTML 放進畫面就是 XSS。畫面只能用 DOM 與 textContent。"""
-        src = (ROOT / "librenms" / "html" / "ioc-portal.php").read_text(encoding="utf-8")
-        # 只抓「真的在用」的寫法（賦值、呼叫）；註解裡提到這些詞不算
-        dangerous = re.search(r"\.(inner|outer)HTML\s*=|insertAdjacentHTML\s*\(|document\.write(ln)?\s*\(|\beval\s*\(|new\s+Function\s*\(", src)
-        self.assertIsNone(dangerous, "ioc-portal.php 不能使用：%s" % (dangerous.group(0) if dangerous else ""))
+        files = [ROOT / "librenms" / "html" / "ioc-portal.php"] + sorted((ROOT / "librenms" / "html" / "js").glob("ioc-*.js"))
+        self.assertGreater(len(files), 2)
+        for f in files:
+            src = f.read_text(encoding="utf-8")
+            # 只抓「真的在用」的寫法（賦值、呼叫）；註解裡提到這些詞不算
+            dangerous = re.search(r"\.(inner|outer)HTML\s*=|insertAdjacentHTML\s*\(|document\.write(ln)?\s*\(|\beval\s*\(|new\s+Function\s*\(", src)
+            self.assertIsNone(dangerous, "%s 不能使用：%s" % (f.name, dangerous.group(0) if dangerous else ""))
+
+    def test_confirmed_hosts_are_wired_from_the_ui_to_the_service(self):
+        """已確認主機：畫面 → 端點 → 服務 → 採集器要接得起來；漏接任何一段，按鈕就會變成沒有作用的假功能。"""
+        endpoint = (ROOT / "librenms" / "html" / "ioc-behavior.php").read_text(encoding="utf-8")
+        self.assertIn("case 'confirm_hosts':", endpoint)
+        self.assertIn("->confirmHosts(", endpoint)
+        ui = (ROOT / "librenms" / "html" / "js" / "ioc-behavior.js").read_text(encoding="utf-8")
+        self.assertIn("action: 'confirm_hosts'", ui)
+        self.assertIn("confirmable(a)", ui)
+        tick = (ROOT / "system" / "ioc-behavior-tick.php").read_text(encoding="utf-8")
+        self.assertRegex(tick, r"->tick\(\$devices, \$nets, null, static fn \(string \$ip\): \?string => \$sites->siteOf\(\$ip\)\)",
+                         "觀測主機的站點要依 IP 在「站點與網段」的歸屬填，採集器才找得到對應的上班時段")
+        collector = (ROOT / "librenms" / "ioc" / "BehaviorCollector.php").read_text(encoding="utf-8")
+        self.assertEqual(collector.count("->scheduleFor("), 2, "偵測與訓練要走同一個排程解析（BehaviorService::scheduleFor）")
+        self.assertIn("(device_id IS NOT NULL OR confirmed_at IS NOT NULL)", collector, "只訓練身分確認過的資產")
 
     def test_portal_embeds_config_safely(self):
         src = (ROOT / "librenms" / "html" / "ioc-portal.php").read_text(encoding="utf-8")

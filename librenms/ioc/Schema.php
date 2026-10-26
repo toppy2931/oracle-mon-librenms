@@ -416,6 +416,10 @@ CREATE TABLE IF NOT EXISTS ioc_behavior_assets (
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 SQL,
             'ALTER TABLE ioc_behavior_assets ADD COLUMN IF NOT EXISTS training_checked_at DATETIME NULL',
+            // 已確認主機（管理員確認過身分的觀測主機）：有 confirmed_at 就能訓練基線與啟用監控，不必綁定 LibreNMS 設備
+            'ALTER TABLE ioc_behavior_assets ADD COLUMN IF NOT EXISTS confirmed_at DATETIME NULL',
+            'ALTER TABLE ioc_behavior_assets ADD COLUMN IF NOT EXISTS confirmed_by VARCHAR(255) NULL',
+            'ALTER TABLE ioc_behavior_assets ADD COLUMN IF NOT EXISTS confirm_note VARCHAR(200) NULL',
             <<<'SQL'
 CREATE TABLE IF NOT EXISTS ioc_behavior_addresses (
   id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
