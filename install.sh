@@ -124,6 +124,8 @@ fi
 # 組態備份模組只安裝介接檔，預設不啟用、不安裝第三方工具。
 env ORACLE_MON_DIR="$ORACLE_MON_DIR" LIBRENMS_DIR="$LIBRENMS_DIR" LIBRENMS_USER="$LIBRENMS_USER" \
     bash "$HERE/system/install-config-backup.sh"
+env ORACLE_MON_DIR="$ORACLE_MON_DIR" LIBRENMS_DIR="$LIBRENMS_DIR" LIBRENMS_USER="$LIBRENMS_USER" \
+    bash "$HERE/system/install-behavior.sh"
 
 say "安裝 sudoers"
 install -m 440 -o root -g root "$HERE/system/sudoers.oracle-admin" /etc/sudoers.d/oracle-admin

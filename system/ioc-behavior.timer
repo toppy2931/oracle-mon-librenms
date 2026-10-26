@@ -1,0 +1,10 @@
+[Unit]
+Description=Collect IOC behavior every minute
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+Persistent=true
+AccuracySec=5s
+
+[Install]
+WantedBy=timers.target

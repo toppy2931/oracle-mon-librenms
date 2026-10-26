@@ -38,6 +38,8 @@ $config_backup_js_version = is_readable($config_backup_js)
     : 'missing';
 $audit_js = __DIR__ . '/js/ioc-audit.js';
 $audit_js_version = is_readable($audit_js) ? substr(hash_file('sha256', $audit_js), 0, 16) : 'missing';
+$behavior_js = __DIR__ . '/js/ioc-behavior.js';
+$behavior_js_version = is_readable($behavior_js) ? substr(hash_file('sha256', $behavior_js), 0, 16) : 'missing';
 
 $config = json_encode([
     'level'  => $level,
@@ -219,6 +221,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     <main id="view-cases" hidden></main>
     <main id="view-security" hidden></main>
     <main id="view-network" hidden></main>
+    <main id="view-behavior" hidden></main>
     <main id="view-settings" hidden></main>
     <main id="view-config" hidden></main>
     <main id="view-identity" hidden></main>
@@ -231,6 +234,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
 <script type="application/json" id="ioc-config"><?= $config ?></script>
 <script src="/js/ioc-config-backup.js?v=<?= htmlspecialchars($config_backup_js_version, ENT_QUOTES, 'UTF-8') ?>"></script>
 <script src="/js/ioc-audit.js?v=<?= htmlspecialchars($audit_js_version, ENT_QUOTES, 'UTF-8') ?>"></script>
+<script src="/js/ioc-behavior.js?v=<?= htmlspecialchars($behavior_js_version, ENT_QUOTES, 'UTF-8') ?>"></script>
 <script>
 (() => {
   'use strict';
@@ -247,6 +251,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     { key: 'cases', label: '事件案', title: '事件案管理', sub: '建立、確認、處理與結案，每一步都有紀錄', badge: true },
     { key: 'security', label: '資安', title: '資安事件', sub: '登入、帳號與防火牆阻擋' },
     { key: 'network', label: '內網可視性', title: '內網可視性', sub: '東西向流量、Top Talkers 與異常連線（防火牆日誌）' },
+    { key: 'behavior', label: '裝置行為分析', title: '裝置行為分析', sub: '生命週期追蹤、學習基線與異常警示' },
     { key: 'settings', label: '設定', title: '系統設定', sub: '風險等級門檻、內部網段與設備組態備份' },
     // 身分與稽核只有 admin 看得到（稽核軌跡會列出所有人的登入位址與失敗嘗試）；後端也會擋，這裡只是不顯示入口
     ...(CAN_HANDLE ? [{ key: 'identity', label: '身分與稽核', title: '身分與稽核', sub: '帳號與角色、稽核軌跡、主機的遠端登入' }] : []),
@@ -414,6 +419,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     if (tab === 'settings' && changed) { loadSettings(); }
     if (tab === 'config' && !$('#view-config').firstChild) { backupUi.governance($('#view-config')); }
     if (tab === 'audit' && changed) { auditUi.load(); }
+    if (tab === 'behavior' && changed) { behaviorUi.load(); }
     if (tab === 'identity' && (changed || !$('#view-identity').firstChild)) { loadIdentity(); }
     // 內網可視性每次切進來都重新讀（伺服器端有 60 秒快取，不會每次都打 Graylog）；已經在這一頁時再按導覽不重載
     if (tab === 'network' && (changed || !$('#view-network').firstChild)) { loadNetwork(); }
@@ -944,6 +950,10 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
   const auditUi = typeof window.IocAudit === 'function'
     ? window.IocAudit({ h, api, root: $('#view-audit'), toast, canHandle: CAN_HANDLE, csrf: CFG.csrf })
     : { load: () => $('#view-audit').replaceChildren(unavailable('稽核與證據介面尚未載入，請重新整理')) };
+  const behaviorUi = typeof window.IocBehavior === 'function'
+    ? window.IocBehavior({ h, section, table, api, root: $('#view-behavior'), toast, canHandle: CAN_HANDLE, unavailable,
+      openCases: (id) => { state.filter = ''; state.selected = Number(id); state.form = null; setTab('cases', true); } })
+    : { load: () => $('#view-behavior').replaceChildren(unavailable('裝置行為分析介面尚未載入，請重新整理')) };
   let backupBox = null;
   let settingsSeq = 0;   // 連續觸發載入時，只採用最後一次的回應
   let netSettings = null; // 內部網段的設定（伺服器回的 network）

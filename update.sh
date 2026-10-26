@@ -91,6 +91,8 @@ say "更新 sudoers（新增指令需重新套用）"
 # 組態備份模組只安裝介接檔，預設不啟用、不安裝第三方工具。
 env ORACLE_MON_DIR="$ORACLE_MON_DIR" LIBRENMS_DIR="$LIBRENMS_DIR" LIBRENMS_USER="$LIBRENMS_USER" \
     bash "$HERE/system/install-config-backup.sh"
+env ORACLE_MON_DIR="$ORACLE_MON_DIR" LIBRENMS_DIR="$LIBRENMS_DIR" LIBRENMS_USER="$LIBRENMS_USER" \
+    bash "$HERE/system/install-behavior.sh"
 
 # Oxidized 只在啟動時讀取 config；先以受限入口重建 IOC 管理的設定，
 # 再僅重啟原本已在運行的專用服務，避免更新後仍沿用舊輸入模式。

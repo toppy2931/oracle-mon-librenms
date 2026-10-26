@@ -32,9 +32,11 @@ rm -f "$LIBRENMS_DIR"/html/ioc-portal.php \
       "$LIBRENMS_DIR"/html/ioc-backup.php \
       "$LIBRENMS_DIR"/html/ioc-backup-download.php \
       "$LIBRENMS_DIR"/html/ioc-audit.php \
+      "$LIBRENMS_DIR"/html/ioc-behavior.php \
       "$LIBRENMS_DIR"/html/ioc-audit-download.php \
       "$LIBRENMS_DIR"/html/js/ioc-config-backup.js \
-      "$LIBRENMS_DIR"/html/js/ioc-audit.js
+      "$LIBRENMS_DIR"/html/js/ioc-audit.js \
+      "$LIBRENMS_DIR"/html/js/ioc-behavior.js
 rm -rf "$LIBRENMS_DIR"/includes/ioc      # IOC 入口函式庫（事件案與設定的資料表 ioc_* 與讀取用的 Graylog 帳號會保留，見文末）
 rm -f "$LIBRENMS_DIR"/includes/html/graphs/application/oracle-l1hweb_*.inc.php
 rm -f "$LIBRENMS_DIR"/includes/polling/applications/oracle-l1hweb.inc.php
@@ -45,6 +47,10 @@ say "移除 sudoers"
 # 只停止本模組的背景服務，備份資料與專用帳號保留。
 for unit in ioc-config-backup.timer ioc-config-backup.service ioc-config-backup-oxidized.service; do
     systemctl disable --now "$unit" >/dev/null 2>&1 || true
+done
+for unit in ioc-behavior.timer ioc-behavior.service; do
+    systemctl disable --now "$unit" >/dev/null 2>&1 || true
+    rm -f "/etc/systemd/system/$unit"
 done
 for unit in ioc-audit.timer ioc-audit-network.timer ioc-audit-linux.timer ioc-audit-cases.timer \
     ioc-audit.service ioc-audit-network.service ioc-audit-linux.service ioc-audit-cases.service; do

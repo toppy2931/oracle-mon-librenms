@@ -396,6 +396,204 @@ CREATE TABLE IF NOT EXISTS ioc_audit_proposals (
   KEY idx_ioc_audit_proposal_pending (cycle_id, review_state, id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 SQL,
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_behavior_assets (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  identity_key VARCHAR(100) NOT NULL,
+  device_id INT UNSIGNED NULL,
+  name VARCHAR(200) NOT NULL,
+  site_name VARCHAR(100) NULL,
+  mode VARCHAR(16) NOT NULL DEFAULT 'learning',
+  learning_started_at DATETIME NOT NULL,
+  baseline_version INT UNSIGNED NOT NULL DEFAULT 0,
+  training_checked_at DATETIME NULL,
+  last_seen_at DATETIME NULL,
+  quality_status VARCHAR(24) NOT NULL DEFAULT 'no_data',
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_ioc_behavior_identity (identity_key),
+  UNIQUE KEY uq_ioc_behavior_device (device_id),
+  KEY idx_ioc_behavior_mode (mode, last_seen_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            'ALTER TABLE ioc_behavior_assets ADD COLUMN IF NOT EXISTS training_checked_at DATETIME NULL',
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_behavior_addresses (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  asset_id BIGINT UNSIGNED NOT NULL,
+  address VARCHAR(45) NOT NULL,
+  first_seen_at DATETIME NOT NULL,
+  last_seen_at DATETIME NOT NULL,
+  evidence_kind VARCHAR(24) NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_ioc_behavior_address (address, last_seen_at),
+  KEY idx_ioc_behavior_asset_address (asset_id, address),
+  CONSTRAINT fk_ioc_behavior_address_asset FOREIGN KEY (asset_id) REFERENCES ioc_behavior_assets (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_behavior_links (
+  observed_asset_id BIGINT UNSIGNED NOT NULL,
+  target_asset_id BIGINT UNSIGNED NOT NULL,
+  confirmed_by VARCHAR(255) NOT NULL,
+  confirmed_at DATETIME NOT NULL,
+  evidence_note VARCHAR(200) NOT NULL,
+  PRIMARY KEY (observed_asset_id),
+  KEY idx_ioc_behavior_link_target (target_asset_id),
+  CONSTRAINT fk_ioc_behavior_link_observed FOREIGN KEY (observed_asset_id) REFERENCES ioc_behavior_assets (id),
+  CONSTRAINT fk_ioc_behavior_link_target FOREIGN KEY (target_asset_id) REFERENCES ioc_behavior_assets (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_behavior_windows (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  asset_id BIGINT UNSIGNED NOT NULL,
+  source_key VARCHAR(40) NOT NULL,
+  window_start DATETIME NOT NULL,
+  connections INT UNSIGNED NOT NULL DEFAULT 0,
+  bytes_total BIGINT UNSIGNED NOT NULL DEFAULT 0,
+  destinations INT UNSIGNED NOT NULL DEFAULT 0,
+  ports INT UNSIGNED NOT NULL DEFAULT 0,
+  destinations_json TEXT NOT NULL,
+  ports_json TEXT NOT NULL,
+  signals_json TEXT NOT NULL,
+  quality VARCHAR(16) NOT NULL,
+  quality_reason VARCHAR(120) NOT NULL DEFAULT '',
+  observed_at DATETIME NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_ioc_behavior_window (asset_id, source_key, window_start),
+  KEY idx_ioc_behavior_window_time (window_start),
+  CONSTRAINT fk_ioc_behavior_window_asset FOREIGN KEY (asset_id) REFERENCES ioc_behavior_assets (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_behavior_baselines (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  asset_id BIGINT UNSIGNED NOT NULL,
+  version INT UNSIGNED NOT NULL,
+  source_key VARCHAR(40) NOT NULL,
+  day_kind VARCHAR(12) NOT NULL,
+  hour_of_day TINYINT UNSIGNED NOT NULL,
+  median_bytes DOUBLE NOT NULL,
+  p95_bytes DOUBLE NOT NULL,
+  mad_bytes DOUBLE NOT NULL,
+  median_connections DOUBLE NOT NULL,
+  p95_connections DOUBLE NOT NULL,
+  mad_connections DOUBLE NOT NULL,
+  median_destinations DOUBLE NOT NULL,
+  p95_destinations DOUBLE NOT NULL,
+  mad_destinations DOUBLE NOT NULL,
+  sample_count INT UNSIGNED NOT NULL,
+  created_at DATETIME NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_ioc_behavior_baseline (asset_id, version, source_key, day_kind, hour_of_day),
+  CONSTRAINT fk_ioc_behavior_baseline_asset FOREIGN KEY (asset_id) REFERENCES ioc_behavior_assets (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_behavior_known (
+  asset_id BIGINT UNSIGNED NOT NULL,
+  source_key VARCHAR(40) NOT NULL,
+  kind VARCHAR(16) NOT NULL,
+  value_key VARCHAR(100) NOT NULL,
+  first_seen_at DATETIME NOT NULL,
+  last_seen_at DATETIME NOT NULL,
+  seen_count INT UNSIGNED NOT NULL DEFAULT 1,
+  PRIMARY KEY (asset_id,source_key,kind,value_key),
+  CONSTRAINT fk_ioc_behavior_known_asset FOREIGN KEY (asset_id) REFERENCES ioc_behavior_assets (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_behavior_alerts (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  dedup_key CHAR(64) NOT NULL,
+  asset_id BIGINT UNSIGNED NOT NULL,
+  detector VARCHAR(40) NOT NULL,
+  window_start DATETIME NOT NULL,
+  baseline_version INT UNSIGNED NOT NULL,
+  severity VARCHAR(8) NOT NULL,
+  status VARCHAR(16) NOT NULL,
+  score INT UNSIGNED NOT NULL,
+  summary VARCHAR(240) NOT NULL,
+  metrics_json TEXT NOT NULL,
+  case_id INT UNSIGNED NULL,
+  first_seen_at DATETIME NOT NULL,
+  last_seen_at DATETIME NOT NULL,
+  occurrences INT UNSIGNED NOT NULL DEFAULT 1,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_ioc_behavior_alert_dedup (dedup_key),
+  KEY idx_ioc_behavior_alert_asset (asset_id, last_seen_at),
+  KEY idx_ioc_behavior_alert_status (status, last_seen_at),
+  CONSTRAINT fk_ioc_behavior_alert_asset FOREIGN KEY (asset_id) REFERENCES ioc_behavior_assets (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_behavior_deliveries (
+  alert_id BIGINT UNSIGNED NOT NULL,
+  status VARCHAR(16) NOT NULL,
+  attempts INT UNSIGNED NOT NULL DEFAULT 0,
+  next_attempt_at DATETIME NOT NULL,
+  last_http_status SMALLINT UNSIGNED NULL,
+  error_code VARCHAR(40) NOT NULL DEFAULT '',
+  delivered_at DATETIME NULL,
+  PRIMARY KEY (alert_id),
+  KEY idx_ioc_behavior_delivery_due (status, next_attempt_at),
+  CONSTRAINT fk_ioc_behavior_delivery_alert FOREIGN KEY (alert_id) REFERENCES ioc_behavior_alerts (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_behavior_history (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  asset_id BIGINT UNSIGNED NOT NULL,
+  action VARCHAR(32) NOT NULL,
+  actor VARCHAR(255) NOT NULL,
+  occurred_at DATETIME NOT NULL,
+  detail VARCHAR(240) NOT NULL DEFAULT '',
+  PRIMARY KEY (id),
+  KEY idx_ioc_behavior_history_asset (asset_id, id),
+  CONSTRAINT fk_ioc_behavior_history_asset FOREIGN KEY (asset_id) REFERENCES ioc_behavior_assets (id)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_behavior_audit (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  actor VARCHAR(255) NOT NULL,
+  action VARCHAR(40) NOT NULL,
+  subject VARCHAR(100) NOT NULL,
+  occurred_at DATETIME NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_ioc_behavior_audit_time (occurred_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_behavior_sources (
+  source_key VARCHAR(40) NOT NULL,
+  kind VARCHAR(24) NOT NULL,
+  scope_label VARCHAR(120) NOT NULL,
+  status VARCHAR(20) NOT NULL,
+  coverage VARCHAR(120) NOT NULL,
+  last_seen_at DATETIME NULL,
+  last_window_at DATETIME NULL,
+  checked_at DATETIME NOT NULL,
+  reason VARCHAR(240) NOT NULL DEFAULT '',
+  PRIMARY KEY (source_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
+            'ALTER TABLE ioc_behavior_sources ADD COLUMN IF NOT EXISTS last_window_at DATETIME NULL',
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_behavior_schedules (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  scope VARCHAR(12) NOT NULL,
+  scope_key VARCHAR(100) NOT NULL,
+  timezone VARCHAR(64) NOT NULL,
+  workdays VARCHAR(20) NOT NULL,
+  start_time TIME NOT NULL,
+  end_time TIME NOT NULL,
+  updated_by VARCHAR(255) NOT NULL,
+  updated_at DATETIME NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uq_ioc_behavior_schedule (scope, scope_key)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
         ];
     }
 }
