@@ -70,6 +70,16 @@ foreach (glob(__DIR__ . '/*_test.php') as $file) {
     require $file;
 }
 
+// 資料庫層測試（*_dbtest.php）要連真的 MariaDB，預設不跑：只有 tests/run-db-tests.sh 建好一次性的 ioc_test_* schema
+// 並設定 IOC_TEST_DSN 時才載入。沒載入就明講，免得「全部通過」被誤會成連資料庫那層也測過了。
+$GLOBALS['__dbtests'] = getenv('IOC_TEST_DSN') !== false && getenv('IOC_TEST_DSN') !== '';
+if ($GLOBALS['__dbtests']) {
+    require_once __DIR__ . '/db_support.php';
+    foreach (glob(__DIR__ . '/*_dbtest.php') as $file) {
+        require $file;
+    }
+}
+
 $passed = 0;
 foreach ($GLOBALS['__tests'] as [$name, $fn]) {
     try {
@@ -83,4 +93,7 @@ foreach ($GLOBALS['__tests'] as [$name, $fn]) {
 
 $total = count($GLOBALS['__tests']);
 echo "\nPHP tests: $passed/$total passed" . ($GLOBALS['__failed'] ? ", {$GLOBALS['__failed']} FAILED" : '') . "\n";
+if (!$GLOBALS['__dbtests']) {
+    echo "（資料庫層測試沒有執行：需要本機 MariaDB，見 tests/run-db-tests.sh）\n";
+}
 exit($GLOBALS['__failed'] > 0 ? 1 : 0);

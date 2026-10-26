@@ -15,14 +15,18 @@ function fakeGraylog(): array
     $port  = (int) explode(':', stream_socket_get_name($probe, false))[1];
     fclose($probe);
 
+    // 輸出檔每次執行各一個（不能共用固定檔名：不同使用者先後跑時，/tmp 的 sticky 目錄會讓另一個人開不了那個檔案，
+    // 例如 tests/run-db-tests.sh 以 root 跑、平常用一般使用者跑）
+    $out  = sys_get_temp_dir() . '/ioc_fake_graylog_' . getmypid() . '.out';
     $proc = proc_open(
         [PHP_BINARY, '-S', "127.0.0.1:$port", __DIR__ . '/fake_graylog_router.php'],
-        [0 => ['pipe', 'r'], 1 => ['file', sys_get_temp_dir() . '/ioc_fake_graylog.out', 'w'], 2 => ['file', sys_get_temp_dir() . '/ioc_fake_graylog.out', 'w']],
+        [0 => ['pipe', 'r'], 1 => ['file', $out, 'w'], 2 => ['file', $out, 'w']],
         $pipes
     );
-    register_shutdown_function(static function () use ($proc, $port): void {
+    register_shutdown_function(static function () use ($proc, $port, $out): void {
         proc_terminate($proc);
         @unlink(sys_get_temp_dir() . '/ioc_fake_last_' . $port . '.json');
+        @unlink($out);
     });
     for ($i = 0; $i < 100; $i++) {          // 最多等 5 秒
         $s = @fsockopen('127.0.0.1', $port, $errno, $errstr, 0.2);
