@@ -18,8 +18,13 @@ final class BehaviorCollector
         $this->db = $db; $this->logs = $logs; $this->assets = new BehaviorService($db);
     }
 
-    /** @param array<int,array{id:int,name:string,ip:?string,site:?string}> $devices @param string[] $nets */
-    public function tick(array $devices, array $nets, ?int $now = null): void
+    /**
+     * @param array<int,array{id:int,name:string,ip:?string,site:?string}> $devices
+     * @param string[] $nets
+     * @param (callable(string):?string)|null $siteOf 依 IP 找站點（設定頁的「站點與網段」）：觀測主機沒有 LibreNMS 設備，站點只能靠這個；
+     *        不傳就不動它們的站點
+     */
+    public function tick(array $devices, array $nets, ?int $now = null, ?callable $siteOf = null): void
     {
         $now ??= time();
         $ids = []; $ambiguous = [];
@@ -80,7 +85,7 @@ final class BehaviorCollector
             if (IpNets::contains($nets, $ip)) { $byIp[$ip] = $row; }
         }
         foreach (array_keys($byIp) as $ip) {
-            if (!isset($ids[$ip])) { $ids[$ip] = $this->assets->observeUnknown($ip); }
+            if (!isset($ids[$ip])) { $ids[$ip] = $this->assets->observeUnknown($ip, $siteOf); }
         }
         $partial = $truncated;
         $modeQuery = $this->db->prepare('SELECT mode FROM ioc_behavior_assets WHERE id=?');
@@ -90,8 +95,8 @@ final class BehaviorCollector
             $row = $byIp[$ip] ?? [];
             $count = max(0, (int) ($row['count'] ?? 0));
             // 全域日誌有資料，不代表這台設備的日誌沒有中斷；缺席不能補成零流量。
-            $quality = BehaviorAnalyzer::windowQuality($count, $truncated, isset($ambiguous[$ip]),
-                $byteCounts[$ip] ?? 0, $destCounts[$ip] ?? 0, $portCounts[$ip] ?? 0);
+            $facts = [$count, $truncated, isset($ambiguous[$ip]), $byteCounts[$ip] ?? 0, $destCounts[$ip] ?? 0, $portCounts[$ip] ?? 0];
+            $quality = BehaviorAnalyzer::windowQuality(...$facts);
             if ($quality === 'partial') { $partial = true; }
             $record = ['asset_id' => $assetId, 'source_key' => BehaviorService::SOURCE,
                 'window_start' => $window, 'connections' => $count,
@@ -101,8 +106,7 @@ final class BehaviorCollector
                 'destinations_json' => json_encode(array_keys($dest[$ip] ?? []), JSON_THROW_ON_ERROR),
                 'ports_json' => json_encode(array_keys($ports[$ip] ?? []), JSON_THROW_ON_ERROR),
                 'signals_json' => '{"dns":false,"tls":false,"scope":"firewall_only"}',
-                'quality' => $quality, 'quality_reason' => $quality === 'partial' ? '分組上限、位址衝突或必要欄位缺值' :
-                    ($quality === 'missing' ? '此裝置沒有觀測到日誌，不能判為零流量' : '')];
+                'quality' => $quality, 'quality_reason' => BehaviorAnalyzer::windowQualityReason(...$facts)];
             $this->storeWindow($record);
             if ($quality === 'complete') { $this->evaluate($record, array_keys($dest[$ip] ?? []), array_keys($ports[$ip] ?? [])); }
         }
@@ -149,8 +153,7 @@ final class BehaviorCollector
         if ($asset['mode'] === 'learning') {
             $this->learnKnown((int) $r['asset_id'], $dest, $ports); return;
         }
-        $schedule = $this->schedule($asset);
-        if (!$schedule) { return; }
+        $schedule = $this->assets->scheduleFor($asset);
         $bucket = BehaviorAnalyzer::localBucket($r['window_start'], $schedule);
         $onDuty = $bucket['on_duty'];
         $q = $this->db->prepare('SELECT * FROM ioc_behavior_baselines WHERE asset_id=? AND version=? AND source_key=? AND day_kind=? AND hour_of_day=?');
@@ -163,13 +166,6 @@ final class BehaviorCollector
         foreach ($findings as $finding) { $this->recordAlert($asset, $r, $finding); }
         // 首次出現的目的地只算一次；不在後續時段重複宣稱「新出現」。
         $this->learnKnown((int) $r['asset_id'], $dest, $ports);
-    }
-
-    private function schedule(array $asset): ?array
-    {
-        $q = $this->db->prepare("SELECT * FROM ioc_behavior_schedules WHERE (scope='device' AND scope_key=?) OR (scope='site' AND scope_key=?) ORDER BY CASE scope WHEN 'device' THEN 0 ELSE 1 END LIMIT 1");
-        $q->execute([(string) ($asset['device_id'] ?? ''), (string) ($asset['site_name'] ?? '')]);
-        return $q->fetch(PDO::FETCH_ASSOC) ?: null;
     }
 
     private function learnKnown(int $id, array $dest, array $ports): void
@@ -242,7 +238,9 @@ final class BehaviorCollector
 
     private function trainPending(): void
     {
+        // 只訓練身分確認過的：LibreNMS 設備與已確認主機。未確認的暫時資產只累積區間（確認之後有歷史可用）
         $row = $this->db->query("SELECT id FROM ioc_behavior_assets WHERE mode='learning'
+            AND (device_id IS NOT NULL OR confirmed_at IS NOT NULL)
             AND learning_started_at<=DATE_SUB(UTC_TIMESTAMP(),INTERVAL 28 DAY)
             ORDER BY training_checked_at IS NOT NULL,training_checked_at,id LIMIT 1")->fetch(PDO::FETCH_ASSOC);
         if (!$row) { return; }
@@ -258,8 +256,7 @@ final class BehaviorCollector
             ORDER BY window_start");
         $q->execute([$id, BehaviorService::SOURCE]); $rows = $q->fetchAll(PDO::FETCH_ASSOC);
         if (count($rows) < BehaviorAnalyzer::TRAIN_MIN_WINDOWS) { return; }     // 先擋掉，省下查排程的兩次查詢
-        $schedule = $this->schedule(['device_id' => $this->deviceId($id), 'site_name' => $this->siteName($id)]);
-        if (!$schedule) { return; }
+        $schedule = $this->assets->scheduleFor(['device_id' => $this->deviceId($id), 'site_name' => $this->siteName($id)]);
         $groups = BehaviorAnalyzer::trainingGroups($rows, $schedule['timezone']);
         if ($groups === null) { return; }
         $q = $this->db->prepare('SELECT baseline_version FROM ioc_behavior_assets WHERE id=?'); $q->execute([$id]);

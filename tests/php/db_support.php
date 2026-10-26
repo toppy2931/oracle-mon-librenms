@@ -7,9 +7,13 @@ declare(strict_types=1);
  * 這裡再檢查一次：資料庫名稱不是 ioc_test_* 就直接拒絕，絕不會連到 LibreNMS 的資料庫。
  */
 
+use Ioc\Access;
 use Ioc\GraylogUnavailable;
 use Ioc\Schema;
 use Ioc\WindowedLogSource;
+
+const DBT_H = Access::HANDLER;
+const DBT_V = Access::VIEWER;
 
 function dbtPdo(): PDO
 {
@@ -92,19 +96,28 @@ function dbtAsset(PDO $db, array $o = []): int
 {
     $o += ['identity_key' => 'test:' . bin2hex(random_bytes(4)), 'device_id' => null, 'name' => 'asset', 'site_name' => null,
         'mode' => 'learning', 'learning_started_at' => gmdate('Y-m-d H:i:s'), 'baseline_version' => 0,
-        'quality_status' => 'learning', 'last_seen_at' => null, 'training_checked_at' => null];
-    $q = $db->prepare('INSERT INTO ioc_behavior_assets (identity_key,device_id,name,site_name,mode,learning_started_at,baseline_version,quality_status,last_seen_at,training_checked_at)
-        VALUES (?,?,?,?,?,?,?,?,?,?)');
+        'quality_status' => 'learning', 'last_seen_at' => null, 'training_checked_at' => null,
+        'confirmed_at' => null, 'confirmed_by' => null, 'confirm_note' => null];
+    $q = $db->prepare('INSERT INTO ioc_behavior_assets (identity_key,device_id,name,site_name,mode,learning_started_at,baseline_version,quality_status,last_seen_at,training_checked_at,confirmed_at,confirmed_by,confirm_note)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)');
     $q->execute([$o['identity_key'], $o['device_id'], $o['name'], $o['site_name'], $o['mode'], $o['learning_started_at'],
-        $o['baseline_version'], $o['quality_status'], $o['last_seen_at'], $o['training_checked_at']]);
+        $o['baseline_version'], $o['quality_status'], $o['last_seen_at'], $o['training_checked_at'],
+        $o['confirmed_at'], $o['confirmed_by'], $o['confirm_note']]);
     return (int) $db->lastInsertId();
 }
 
+/** 一個「基線已就緒、學習滿 30 天」的資產（LibreNMS 設備 1），欄位可覆寫。 */
+function dbtReadyAsset(PDO $db, array $o = []): int
+{
+    return dbtAsset($db, $o + ['device_id' => 1, 'name' => 'fw', 'mode' => 'ready', 'baseline_version' => 1, 'quality_status' => 'ready',
+        'learning_started_at' => gmdate('Y-m-d H:i:s', time() - 30 * 86400)]);
+}
+
 /** 擺一筆排程（預設：台北、週一到五、09:00–18:00）。 */
-function dbtSchedule(PDO $db, string $scope, string $key, string $tz = 'Asia/Taipei', string $workdays = '1,2,3,4,5'): void
+function dbtSchedule(PDO $db, string $scope, string $key, string $tz = 'Asia/Taipei', string $workdays = '1,2,3,4,5', string $start = '09:00:00', string $end = '18:00:00'): void
 {
     $db->prepare('INSERT INTO ioc_behavior_schedules (scope,scope_key,timezone,workdays,start_time,end_time,updated_by,updated_at)
-        VALUES (?,?,?,?,\'09:00:00\',\'18:00:00\',\'test\',UTC_TIMESTAMP())')->execute([$scope, $key, $tz, $workdays]);
+        VALUES (?,?,?,?,?,?,\'test\',UTC_TIMESTAMP())')->execute([$scope, $key, $tz, $workdays, $start, $end]);
 }
 
 /** 某個資產的歷史動作（舊到新）。 */

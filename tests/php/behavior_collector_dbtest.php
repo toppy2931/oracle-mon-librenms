@@ -180,7 +180,7 @@ dbtest('區間品質：缺欄位是 partial、設備沒日誌是 missing；parti
     (new BehaviorCollector($db, DbtFakeLogs::traffic($partial)))->tick([bcdDevice()], bcdNets(), bcdNow());
     $w = bcdWindows($db, $id);
     assertSame('partial', $w[0]['quality']);
-    assertTrue($w[0]['quality_reason'] !== '');
+    assertSame('1 筆日誌缺 net_bytes', $w[0]['quality_reason'], '要說得出是哪一種缺值、缺幾筆');
     assertSame(['partial', 'partial'], [bcdSourceRow($db)['status'], dbtVal($db, 'SELECT quality_status FROM ioc_behavior_assets WHERE id=?', [$id])]);
 
     // 下一個區間：全域有日誌（別的 IP），但這台設備沒有 → missing，不能補成零流量
@@ -188,9 +188,22 @@ dbtest('區間品質：缺欄位是 partial、設備沒日誌是 missing；parti
     (new BehaviorCollector($db, DbtFakeLogs::traffic($other)))->tick([bcdDevice()], bcdNets(), bcdNow('2026-10-26 12:12:30'));
     $w = bcdWindows($db, $id);
     assertSame(['partial', 'missing', 0], [$w[0]['quality'], $w[1]['quality'], (int) $w[1]['connections']]);
+    assertSame('此裝置沒有觀測到日誌，不能判為零流量', $w[1]['quality_reason']);
     assertSame('missing', dbtVal($db, 'SELECT quality_status FROM ioc_behavior_assets WHERE id=?', [$id]));
     assertSame('ready', bcdSourceRow($db)['status'], '一台設備沒日誌不代表來源有問題');
     assertSame(0, (int) dbtVal($db, 'SELECT COUNT(*) FROM ioc_behavior_alerts'));
+});
+
+dbtest('區間品質的原因：缺目的 IP、缺目的埠各自記缺幾筆（例如 ICMP 沒有目的埠）；complete 沒有說明', static function (PDO $db): void {
+    $id = (new BehaviorService($db))->syncDevice(1, 'fw-a', '172.16.1.10', '台南');
+    $t = bcdNormal();                                                       // 20 筆連線
+    $t['172.16.1.10']['dest'] = ['203.0.113.1' => 10, '203.0.113.2' => 8];  // 只有 18 筆有目的 IP
+    $t['172.16.1.10']['port'] = ['443' => 19];                              // 只有 19 筆有目的埠
+    (new BehaviorCollector($db, DbtFakeLogs::traffic($t)))->tick([bcdDevice()], bcdNets(), bcdNow());
+    (new BehaviorCollector($db, DbtFakeLogs::traffic(bcdNormal())))->tick([bcdDevice()], bcdNets(), bcdNow('2026-10-26 12:12:30'));
+    $w = bcdWindows($db, $id);
+    assertSame(['partial', '2 筆日誌缺目的 IP；1 筆日誌缺目的埠'], [$w[0]['quality'], $w[0]['quality_reason']]);
+    assertSame(['complete', ''], [$w[1]['quality'], $w[1]['quality_reason']]);
 });
 
 dbtest('區間品質：任何一組分組達到 500 列上限，這個區間所有設備都是 partial（資料可能被截斷）', static function (PDO $db): void {
@@ -204,6 +217,7 @@ dbtest('區間品質：任何一組分組達到 500 列上限，這個區間所�
     $qualities = array_unique(array_column(bcdWindows($db), 'quality'));
     assertSame(['partial'], $qualities, '沒有任何一台的區間是 complete');
     assertSame(500, count(bcdWindows($db)));
+    assertSame(['分組達查詢列數上限，這個區間的資料可能被截斷'], array_unique(array_column(bcdWindows($db), 'quality_reason')), '原因是分組被截斷，不是這些設備各自缺欄位');
 });
 
 dbtest('區間品質：兩台 LibreNMS 設備共用同一個 IP → 第一台的區間是 partial；已退役的資產不寫區間', static function (PDO $db): void {
@@ -216,6 +230,7 @@ dbtest('區間品質：兩台 LibreNMS 設備共用同一個 IP → 第一台的
     $first = (int) dbtVal($db, "SELECT id FROM ioc_behavior_assets WHERE identity_key='librenms:1'");
     $second = (int) dbtVal($db, "SELECT id FROM ioc_behavior_assets WHERE identity_key='librenms:2'");
     assertSame('partial', bcdWindows($db, $first)[0]['quality'], '位址衝突：不知道流量是誰的');
+    assertSame('同一個 IP 對到多台設備', bcdWindows($db, $first)[0]['quality_reason']);
     assertSame([], bcdWindows($db, $second), '已知限制：共用 IP 的第二台設備永遠沒有區間（流量只會對到第一台）');
     assertSame([], bcdWindows($db, $retired), '已退役的資產不寫區間');
     assertSame(0, (int) dbtVal($db, "SELECT COUNT(*) FROM ioc_behavior_assets WHERE identity_key LIKE 'observed:%'"), '退役設備的 IP 也不會被當成未知 IP 再建暫時資產');
@@ -287,7 +302,7 @@ dbtest('監控中：警示（open）自動建事件案並排入通知；同一�
     unset($id);
 });
 
-dbtest('不該有警示的情況：上班時段、基線樣本不足、沒有對應的基線時段、沒有排程；但有基線時仍會學習已知目的地（沒排程除外）', static function (PDO $db): void {
+dbtest('不該有警示的情況：上班時段、基線樣本不足、沒有對應的基線時段；有基線時仍會學習已知目的地', static function (PDO $db): void {
     $id = bcdMonitored($db, 'monitoring');
     $at = static fn (string $now) => (new BehaviorCollector($db, DbtFakeLogs::traffic(bcdSurge())))->tick([bcdDevice()], bcdNets(), bcdNow($now));
 
@@ -302,12 +317,6 @@ dbtest('不該有警示的情況：上班時段、基線樣本不足、沒有對
     $db->exec('UPDATE ioc_behavior_baselines SET sample_count=10');
     $at('2026-10-31 12:07:30');                                                   // 台北週六 20:00：只有週間的基線
     assertSame(0, (int) dbtVal($db, 'SELECT COUNT(*) FROM ioc_behavior_alerts'), '沒有對應的基線時段（週末）不判斷');
-
-    $db->exec('DELETE FROM ioc_behavior_known');
-    $db->exec('DELETE FROM ioc_behavior_schedules');
-    $at('2026-11-02 12:07:30');                                                   // 週一 20:00，但沒有排程
-    assertSame(0, (int) dbtVal($db, 'SELECT COUNT(*) FROM ioc_behavior_alerts'), '沒有排程就沒辦法判斷上班與否');
-    assertSame(0, (int) dbtVal($db, 'SELECT COUNT(*) FROM ioc_behavior_known'), '沒有排程時連已知目的地也不學（直接略過）');
 });
 
 dbtest('repairOpenCases：補建沒有事件案的未處置警示（一次最多 5 個，不重複建立；模擬與已處置的不補）', static function (PDO $db): void {
@@ -372,32 +381,19 @@ dbtest('訓練：學習滿 28 天、區間夠多、有排程 → 建第 1 版基
     assertSame(48, (int) dbtVal($db, 'SELECT COUNT(*) FROM ioc_behavior_baselines WHERE asset_id=?', [$a]), '第一台不會被重複訓練');
 });
 
-dbtest('訓練：不夠格就不訓練（區間差一格、沒有排程、學習未滿 28 天）；被挑中檢查過的會記下檢查時間', static function (PDO $db): void {
+dbtest('訓練：不夠格就不訓練（區間差一格、學習未滿 28 天）；被挑中檢查過的會記下檢查時間；沒有任何時段設定時用預設時段照樣訓練', static function (PDO $db): void {
     $young = bcdTrainable($db, 1, 6048, true, 10);      // id 最小：若學習天數的條件失效，第一個 tick 就會挑中它
     $few = bcdTrainable($db, 2, 6047);                  // 差一格（這台沒有流量，tick 不會替它多寫完整區間）
-    $noSchedule = bcdTrainable($db, 3, 6048, false);
+    $noSchedule = bcdTrainable($db, 3, 6048, false);    // 沒有任何時段設定：用內建預設
     $state = static fn (int $id) => dbtRow($db, 'SELECT mode,baseline_version,training_checked_at FROM ioc_behavior_assets WHERE id=?', [$id]);
     for ($i = 0; $i < 2; $i++) {                        // 兩個 tick：各檢查一台
         bcdTickOnce($db, $i * 300);
     }
-    foreach ([$few, $noSchedule] as $id) {
-        assertSame(['learning', 0], [$state($id)['mode'], (int) $state($id)['baseline_version']]);
-        assertTrue($state($id)['training_checked_at'] !== null, '被檢查過、沒通過');
-    }
+    assertSame(['learning', 0], [$state($few)['mode'], (int) $state($few)['baseline_version']]);
+    assertTrue($state($few)['training_checked_at'] !== null, '被檢查過、沒通過');
     assertSame(['learning', 0, null], [$state($young)['mode'], (int) $state($young)['baseline_version'], $state($young)['training_checked_at']], '學習未滿 28 天：根本不會被挑來檢查');
-    assertSame(0, (int) dbtVal($db, 'SELECT COUNT(*) FROM ioc_behavior_baselines'));
-});
-
-dbtest('已知限制：暫時資產（沒有 LibreNMS 裝置、沒有站點）即使有 28 天完整資料也不會訓練基線', static function (PDO $db): void {
-    $temp = (new BehaviorService($db))->observeUnknown('172.16.9.9');
-    $db->prepare('UPDATE ioc_behavior_assets SET learning_started_at=? WHERE id=?')->execute([gmdate('Y-m-d H:i:s', time() - 29 * 86400), $temp]);
-    bcdBulkWindows($db, $temp, 6048, intdiv(time() - 27 * 86400, 300) * 300);
-    dbtSchedule($db, 'device', '1');
-    dbtSchedule($db, 'site', '台南');
-    bcdTickOnce($db);
-    $row = dbtRow($db, 'SELECT mode,baseline_version,training_checked_at FROM ioc_behavior_assets WHERE id=?', [$temp]);
-    assertSame(['learning', 0], [$row['mode'], (int) $row['baseline_version']], '訓練要排程，而排程只能依裝置或站點設定，暫時資產兩者都沒有');
-    assertTrue($row['training_checked_at'] !== null);
+    assertSame(['ready', 1], [$state($noSchedule)['mode'], (int) $state($noSchedule)['baseline_version']], '沒有排程也能訓練：用預設時段（台北、週一到五 09:00–18:00）');
+    assertSame(48, (int) dbtVal($db, 'SELECT COUNT(*) FROM ioc_behavior_baselines'), '只有那一台有基線');
 });
 
 dbtest('已知限制：ready／monitoring 的資產不會重新訓練（基線只在學習模式建一次）', static function (PDO $db): void {

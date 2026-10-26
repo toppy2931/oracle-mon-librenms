@@ -178,10 +178,32 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
 
     def test_portal_never_puts_data_into_innerhtml(self):
         """日誌內容都來自外部，用 innerHTML 放進畫面就是 XSS。畫面只能用 DOM 與 textContent。"""
-        src = (ROOT / "librenms" / "html" / "ioc-portal.php").read_text(encoding="utf-8")
-        # 只抓「真的在用」的寫法（賦值、呼叫）；註解裡提到這些詞不算
-        dangerous = re.search(r"\.(inner|outer)HTML\s*=|insertAdjacentHTML\s*\(|document\.write(ln)?\s*\(|\beval\s*\(|new\s+Function\s*\(", src)
-        self.assertIsNone(dangerous, "ioc-portal.php 不能使用：%s" % (dangerous.group(0) if dangerous else ""))
+        files = [ROOT / "librenms" / "html" / "ioc-portal.php"] + sorted((ROOT / "librenms" / "html" / "js").glob("ioc-*.js"))
+        self.assertGreater(len(files), 2)
+        for f in files:
+            src = f.read_text(encoding="utf-8")
+            # 只抓「真的在用」的寫法（賦值、呼叫）；註解裡提到這些詞不算
+            dangerous = re.search(r"\.(inner|outer)HTML\s*=|insertAdjacentHTML\s*\(|document\.write(ln)?\s*\(|\beval\s*\(|new\s+Function\s*\(", src)
+            self.assertIsNone(dangerous, "%s 不能使用：%s" % (f.name, dangerous.group(0) if dangerous else ""))
+
+    def test_confirmed_hosts_are_wired_from_the_ui_to_the_service(self):
+        """已確認主機：畫面 → 端點 → 服務 → 採集器要接得起來；漏接任何一段，按鈕就會變成沒有作用的假功能。"""
+        endpoint = (ROOT / "librenms" / "html" / "ioc-behavior.php").read_text(encoding="utf-8")
+        for action in ("confirm_hosts", "preview_schedule"):
+            self.assertIn("case '%s':" % action, endpoint)
+        self.assertIn("->confirmHosts(", endpoint)
+        self.assertIn("->previewScheduleImpact(", endpoint)
+        ui = (ROOT / "librenms" / "html" / "js" / "ioc-behavior.js").read_text(encoding="utf-8")
+        self.assertIn("confirm_hosts", ui)
+        self.assertIn("preview_schedule", ui, "儲存時段前要先預覽影響台數，請管理員確認")
+        self.assertIn("confirmable(a)", ui)
+        tick = (ROOT / "system" / "ioc-behavior-tick.php").read_text(encoding="utf-8")
+        self.assertRegex(tick, r"->tick\(\$devices,\s*\$nets,[^;]*->siteOf\(",
+                         "觀測主機的站點要依 IP 在「站點與網段」的歸屬填，採集器才找得到對應的上班時段")
+        collector = (ROOT / "librenms" / "ioc" / "BehaviorCollector.php").read_text(encoding="utf-8")
+        self.assertIn("->scheduleFor(", collector)
+        self.assertNotIn("FROM ioc_behavior_schedules", collector, "採集器不能自己查時段，偵測與訓練都要走 BehaviorService::scheduleFor")
+        self.assertRegex(collector, r"device_id IS NOT NULL OR confirmed_at IS NOT NULL", "只訓練身分確認過的資產")
 
     def test_portal_embeds_config_safely(self):
         src = (ROOT / "librenms" / "html" / "ioc-portal.php").read_text(encoding="utf-8")
@@ -433,10 +455,10 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
         """區間品質、上班時段分桶、警示去重鍵與基線訓練門檻的規則在 BehaviorAnalyzer（有單元測試）。
         採集器碰資料庫，預設的測試不連資料庫（資料庫層測試要另外跑 tests/run-db-tests.sh），所以用靜態檢查擋住「又把規則內嵌回採集器」。"""
         collector = (ROOT / "librenms" / "ioc" / "BehaviorCollector.php").read_text(encoding="utf-8")
-        for call in ("BehaviorAnalyzer::windowQuality(", "BehaviorAnalyzer::localBucket(",
+        for call in ("BehaviorAnalyzer::windowQuality(", "BehaviorAnalyzer::windowQualityReason(", "BehaviorAnalyzer::localBucket(",
                      "BehaviorAnalyzer::dedupKey(", "BehaviorAnalyzer::trainingGroups("):
             self.assertEqual(collector.count(call), 1, "採集器要呼叫 %s" % call)
-        for inlined in ("6048", "hash('sha256'", "new \\DateTimeZone", "'partial' : 'complete'"):
+        for inlined in ("6048", "hash('sha256'", "new \\DateTimeZone", "'partial' : 'complete'", "分組上限、位址衝突或必要欄位缺值"):
             self.assertNotIn(inlined, collector, "採集器不該自己內嵌規則：%s" % inlined)
 
     def test_db_test_harness_can_only_touch_its_own_throwaway_schema(self):

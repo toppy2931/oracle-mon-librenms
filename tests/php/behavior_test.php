@@ -66,6 +66,44 @@ test('區間品質：沒有該裝置的日誌是 missing（不能補成零流量
     assertSame('partial', BehaviorAnalyzer::windowQuality(10, false, false, 10, 10, 9), '有日誌沒有目的埠（例如 ICMP）');
 });
 
+test('區間品質的原因：partial 說得出具體原因與缺幾筆；missing 與 complete 的說明固定；與品質判斷一致、不超過欄位長度', static function (): void {
+    assertSame([], BehaviorAnalyzer::partialReasons(10, false, false, 10, 10, 10));
+    assertSame(['3 筆日誌缺 net_bytes'], BehaviorAnalyzer::partialReasons(10, false, false, 7, 10, 10));
+    assertSame(['2 筆日誌缺目的 IP'], BehaviorAnalyzer::partialReasons(10, false, false, 10, 8, 10));
+    assertSame(['1 筆日誌缺目的埠'], BehaviorAnalyzer::partialReasons(10, false, false, 10, 10, 9));
+    assertSame(['同一個 IP 對到多台設備'], BehaviorAnalyzer::partialReasons(10, false, true, 10, 10, 10));
+    assertSame(['分組達查詢列數上限，這個區間的資料可能被截斷'], BehaviorAnalyzer::partialReasons(10, true, false, 10, 10, 10));
+    assertSame(['分組達查詢列數上限，這個區間的資料可能被截斷', '同一個 IP 對到多台設備', '3 筆日誌缺 net_bytes', '2 筆日誌缺目的 IP', '1 筆日誌缺目的埠'],
+        BehaviorAnalyzer::partialReasons(10, true, true, 7, 8, 9), '全部同時發生：照這個順序一一列出');
+
+    assertSame('', BehaviorAnalyzer::windowQualityReason(10, false, false, 10, 10, 10), 'complete 不需要說明');
+    assertSame('此裝置沒有觀測到日誌，不能判為零流量', BehaviorAnalyzer::windowQualityReason(0, false, false, 0, 0, 0));
+    assertSame('此裝置沒有觀測到日誌，不能判為零流量', BehaviorAnalyzer::windowQualityReason(0, true, true, 0, 0, 0), '沒有日誌就是 missing，不論分組有沒有被截斷');
+    assertSame('3 筆日誌缺 net_bytes；1 筆日誌缺目的埠', BehaviorAnalyzer::windowQualityReason(10, false, false, 7, 10, 9));
+    $longest = BehaviorAnalyzer::windowQualityReason(PHP_INT_MAX, true, true, 0, 0, 0);       // 五種原因同時發生、筆數是最大的整數
+    assertSame(120, mb_strlen($longest), 'ioc_behavior_windows.quality_reason 是 VARCHAR(120)，超過會讓嚴格模式的寫入失敗，所以要截到 120 字');
+    assertTrue(strpos($longest, '分組達查詢列數上限') === 0, '截的是尾巴，最前面的原因保留');
+
+    // 不改判斷：品質與原因永遠一致（partial ⇔ 有原因；complete ⇔ 沒有說明）
+    foreach ([0, 1, 10] as $count) {
+        foreach ([false, true] as $truncated) {
+            foreach ([false, true] as $ambiguous) {
+                foreach ([-1, 0, 1] as $a) {
+                    foreach ([-1, 0, 1] as $b) {
+                        foreach ([-1, 0, 1] as $c) {
+                            $args = [$count, $truncated, $ambiguous, max(0, $count + $a), max(0, $count + $b), max(0, $count + $c)];
+                            $q = BehaviorAnalyzer::windowQuality(...$args);
+                            $reasons = BehaviorAnalyzer::partialReasons(...$args);
+                            assertSame($q === 'partial', $count > 0 && $reasons !== [], json_encode($args));
+                            assertSame($q !== 'complete', BehaviorAnalyzer::windowQualityReason(...$args) !== '', json_encode($args));
+                        }
+                    }
+                }
+            }
+        }
+    }
+});
+
 function bhSchedule(string $tz = 'Asia/Taipei', string $workdays = '1,2,3,4,5'): array
 {
     return ['timezone' => $tz, 'workdays' => $workdays, 'start_time' => '09:00:00', 'end_time' => '18:00:00'];

@@ -29,33 +29,65 @@
           s.status + ' · ' + s.coverage + (s.checked_at ? ' · 檢查 ' + s.checked_at + ' UTC' : '')
             + (s.reason ? ' · ' + s.reason : ''))) : note('尚未收到資料來源狀態。'));
     }
+    const kindName = (a) => (a.device_id ? 'LibreNMS 設備' : (a.confirmed_at ? '已確認主機' : '待確認'));
+    const confirmable = (a) => !a.device_id && !a.confirmed_at && a.mode !== 'retired' && String(a.identity_key || '').startsWith('observed:');
     function assetPanel(data) {
       const assets = data.assets || [];
       const sourceReady = (data.sources || []).some((s) => s.source_key === 'fortigate_graylog' && s.status === 'ready');
-      const rows = assets.map((a) => [
-        h('button', { class: 'btn', type: 'button', onclick: () => detail(a.id) }, a.name),
-        a.address || '未確認', a.site_name || '未歸屬', modeName[a.mode] || a.mode,
-        sourceReady ? (qualityName[a.quality_status] || a.quality_status) : '來源異常／未驗證', a.last_seen_at || '尚無資料']);
-      return section('裝置生命週期', '未知 IP 保留獨立暫時身分；不會僅依 IP 自動合併裝置',
-        assets.length ? table(['裝置', '目前位址', '站點', '模式', '資料品質', '最近觀測'], rows)
+      const boxes = new Map();
+      const rows = assets.map((a) => {
+        let box = '';
+        if (canHandle && confirmable(a)) {
+          box = h('input', { type: 'checkbox', 'aria-label': '選取 ' + a.name });
+          boxes.set(a.id, box);
+        }
+        return [...(canHandle ? [box] : []),
+          h('button', { class: 'btn', type: 'button', onclick: () => detail(a.id) }, a.name), kindName(a),
+          a.address || '未確認', a.site_name || '未歸屬', modeName[a.mode] || a.mode,
+          sourceReady ? (qualityName[a.quality_status] || a.quality_status) : '來源異常／未驗證', a.last_seen_at || '尚無資料'];
+      });
+      const confirmBar = canHandle && boxes.size ? h('div', { class: 'toolbar' },
+        h('button', { class: 'btn', type: 'button', onclick: () => { for (const b of boxes.values()) b.checked = true; } }, '全選待確認'),
+        h('button', { class: 'btn primary', type: 'button', onclick: () => {
+          const ids = [...boxes].filter(([, b]) => b.checked).map(([id]) => Number(id));
+          if (!ids.length) { toast('請先勾選要確認的主機', true); return; }
+          const reason = window.prompt('請填寫確認依據：DHCP 租約、資產清冊或人工核對結果（勿填機密）');
+          if (reason && reason.trim() && window.confirm('確認這 ' + ids.length + ' 台是受管主機？確認後可訓練基線並啟用監控，既有的觀測紀錄會保留。位址會出現在事件案，檢視者也看得到。'))
+            change({ action: 'confirm_hosts', items: ids.map((id) => ({ id })), note: reason.trim() }, '已確認 ' + ids.length + ' 台主機');
+        } }, '確認勾選的主機為受管主機')) : null;
+      return section('裝置生命週期', '未知 IP 先是「待確認」的暫時身分；管理員確認身分（關聯 LibreNMS 設備，或確認為受管主機）後才能訓練基線與啟用監控',
+        assets.length ? [confirmBar, table((canHandle ? ['選取'] : []).concat(['裝置', '身分', '目前位址', '站點', '模式', '資料品質', '最近觀測']), rows)]
           : note('尚未同步裝置。工作器啟用後會從 LibreNMS 載入設備。'));
     }
     function schedulePanel(data) {
       const schedules = data.schedules || [];
-      const scope = h('select', { 'aria-label': '時段範圍' }, h('option', { value: 'device' }, '設備'), h('option', { value: 'site' }, '站點'));
-      const key = h('input', { 'aria-label': '設備 ID 或站點名稱', placeholder: 'LibreNMS 設備 ID 或站點名稱' });
+      const scopeName = { device: '設備', site: '站點', default: '預設' };
+      const scope = h('select', { 'aria-label': '時段範圍' }, h('option', { value: 'device' }, '設備'), h('option', { value: 'site' }, '站點'),
+        h('option', { value: 'default' }, '預設（其餘全部）'));
+      const key = h('input', { 'aria-label': '設備 ID 或站點名稱', placeholder: 'LibreNMS 設備 ID 或站點名稱；選「預設」不用填' });
+      const d = data.default_schedule || null;
       const zone = h('input', { 'aria-label': '時區', value: 'Asia/Taipei' });
       const days = h('input', { 'aria-label': '工作日', value: '1,2,3,4,5' });
       const start = h('input', { 'aria-label': '上班開始', type: 'time', value: '09:00' });
       const end = h('input', { 'aria-label': '上班結束', type: 'time', value: '18:00' });
-      return section('上班時段', '星期一＝1、星期日＝7；未設定時不啟用離峰異常判斷',
-        [schedules.length ? table(['範圍', '識別', '時區', '工作日', '時間'], schedules.map((x) =>
-          [x.scope === 'device' ? '設備' : '站點', x.scope_key, x.timezone, x.workdays,
-            String(x.start_time).slice(0, 5) + '–' + String(x.end_time).slice(0, 5)])) : note('尚未設定。'),
+      return section('上班時段', '星期一＝1、星期日＝7；套用順序：設備 → 站點 → 預設。沒有自訂預設時，用內建的台北、週一到五 09:00–18:00',
+        [d ? note('目前的預設時段（沒有設備或站點時段的資產套用）：' + d.timezone + '，工作日 ' + d.workdays + '，'
+          + String(d.start_time).slice(0, 5) + '–' + String(d.end_time).slice(0, 5) + (d.custom ? '（自訂）' : '（內建）')) : null,
+        schedules.length ? table(['範圍', '識別', '時區', '工作日', '時間'], schedules.map((x) =>
+          [scopeName[x.scope] || x.scope, x.scope_key, x.timezone, x.workdays,
+            String(x.start_time).slice(0, 5) + '–' + String(x.end_time).slice(0, 5)])) : note('尚未自訂任何時段。'),
         canHandle ? h('div', { class: 'toolbar' }, scope, key, zone, days, start, end,
-          h('button', { class: 'btn primary', type: 'button', onclick: () => change({ action: 'save_schedule', scope: scope.value,
-            scope_key: key.value.trim(), timezone: zone.value.trim(), workdays: days.value.trim(),
-            start_time: start.value, end_time: end.value }, '已儲存上班時段') }, '儲存時段')) : null]);
+          h('button', { class: 'btn primary', type: 'button', onclick: async () => {
+            const body = { scope: scope.value, scope_key: scope.value === 'default' ? 'default' : key.value.trim(), timezone: zone.value.trim(),
+              workdays: days.value.trim(), start_time: start.value, end_time: end.value };
+            try {
+              // 先問伺服器這份時段會讓幾台資產重新學習，有影響才請管理員確認（變動會暫停監控 28 天）
+              const impact = (await call({ ...body, action: 'preview_schedule' })).impact;
+              if (impact.changed && impact.ready + impact.monitoring > 0 && !window.confirm('儲存後，已有基線而且套用這個時段的資產會重新學習 28 天：就緒 '
+                + impact.ready + ' 台、監控中 ' + impact.monitoring + ' 台（監控會暫停，期間不判斷離峰異常）。確定儲存？')) return;
+            } catch (e) { toast(e.message, true); return; }
+            await change({ ...body, action: 'save_schedule' }, '已儲存上班時段');
+          } }, '儲存時段')) : null]);
     }
     function inventoryPanel() {
       if (!canHandle) return null;
@@ -93,18 +125,35 @@
         const result = (await call({ action: 'detail', asset_id: Number(id) })).detail;
         if (seq !== requestSeq || selected !== id) return;
         const a = result.asset;
+        const sched = result.schedule || {};
+        const hhmm = (t) => String(t || '').slice(0, 5);
+        const schedSource = { device: '設備', site: '站點', default: '自訂的預設', builtin: '內建預設（尚未自訂）' };
+        const schedText = sched.timezone ? sched.timezone + '，工作日 ' + sched.workdays + '，' + hhmm(sched.start_time) + '–' + hhmm(sched.end_time)
+          + '（來源：' + (schedSource[sched.source] || sched.source) + '）' : '—';
         const modeBar = canHandle ? h('div', { class: 'toolbar' },
           ...[['learning', '重新學習 28 天'], ['monitoring', '啟用監控'], ['retired', '停用追蹤']].map(([mode, label]) =>
             h('button', { class: 'btn', type: 'button', disabled: a.mode === mode,
-              onclick: () => { if (window.confirm('確定將此裝置切換為「' + label + '」？'))
-                change({ action: 'set_mode', asset_id: Number(id), mode }, '模式已更新'); } }, label))) : null;
+              onclick: () => {
+                // 啟用監控前要看到離峰判斷依哪個上班時段；還在用內建預設就特別提醒，免得夜班或週末作業被當成異常
+                const warn = mode === 'monitoring' ? '\n上班時段：' + schedText + (sched.source === 'builtin' ? '\n注意：這個資產還沒有自訂時段，離峰判斷依內建預設；夜班或週末作業請先到「上班時段」設定。' : '') : '';
+                if (window.confirm('確定將此裝置切換為「' + label + '」？' + warn)) change({ action: 'set_mode', asset_id: Number(id), mode }, '模式已更新');
+              } }, label))) : null;
         const linkId = h('input', { 'aria-label': '要關聯的 LibreNMS 設備 ID', type: 'number', min: '1', placeholder: 'LibreNMS 設備 ID' });
+        const confirmName = h('input', { 'aria-label': '主機名稱（選填）', placeholder: '主機名稱（選填）：填用途或編號，勿填人名' });
         root.replaceChildren(h('div', { class: 'toolbar' }, h('button', { class: 'btn', type: 'button', onclick: load }, '返回清單'),
           h('strong', null, a.name + ' · ' + (modeName[a.mode] || a.mode))),
         section('裝置身分與模式', '身分來源：' + a.identity_key,
-          [line('資料品質', qualityName[a.quality_status] || a.quality_status), line('學習起點（UTC）', a.learning_started_at),
-            line('基線版本', a.baseline_version), modeBar,
-            !a.device_id && canHandle ? h('div', { class: 'toolbar' }, linkId,
+          [line('身分', kindName(a) + (a.confirmed_at ? '（' + a.confirmed_at + ' UTC 由 ' + a.confirmed_by + ' 確認：' + a.confirm_note + '）' : '')),
+            line('資料品質', qualityName[a.quality_status] || a.quality_status), line('學習起點（UTC）', a.learning_started_at),
+            line('基線版本', a.baseline_version), line('上班時段', schedText), modeBar,
+            canHandle && confirmable(a) ? h('div', { class: 'toolbar' }, confirmName,
+              h('button', { class: 'btn', type: 'button', onclick: () => {
+                const reason = window.prompt('請填寫確認依據：DHCP 租約、資產清冊或人工核對結果（勿填機密）');
+                if (reason && reason.trim() && window.confirm('確認這是受管主機？確認後可訓練基線並啟用監控，既有的觀測紀錄會保留。名稱與位址會出現在事件案，檢視者也看得到。'))
+                  change({ action: 'confirm_hosts', items: [{ id: Number(id), name: confirmName.value.trim() }], note: reason.trim() }, '已確認為受管主機');
+              } }, '確認為受管主機')) : null,
+            // 已確認的主機不能直接關聯（不會合併歷史，會丟掉已訓練的基線）；LibreNMS 設備本來就不必關聯
+            canHandle && confirmable(a) ? h('div', { class: 'toolbar' }, linkId,
               h('button', { class: 'btn', type: 'button', onclick: () => {
                 const reason = window.prompt('請填寫 DHCP 租約、MAC／VLAN 或人工核對依據（勿填機密）');
                 if (reason && reason.trim() && window.confirm('確認此 IP 確實屬於指定裝置？關聯會保留原追蹤歷程。'))

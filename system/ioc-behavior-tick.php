@@ -33,7 +33,8 @@ try {
     try { $logs = Ioc\GraylogClient::fromConf('/etc/oracle-mon/graylog-reader.conf'); }
     catch (Ioc\GraylogUnavailable $e) { $logs = new Ioc\UnavailableLogSource('Graylog 來源尚未就緒'); }
     $collector = new Ioc\BehaviorCollector($db, $logs);
-    $collector->tick($devices, $nets);
+    // 觀測主機沒有 LibreNMS 設備，站點只能依 IP 落在哪個「站點與網段」判斷
+    $collector->tick($devices, $nets, null, static fn (string $ip): ?string => $sites->siteOf($ip));
     $collector->repairOpenCases();
 } catch (Throwable $e) {
     error_log('IOC behavior collection failed: ' . get_class($e));

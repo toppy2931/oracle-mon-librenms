@@ -13,15 +13,42 @@ final class BehaviorAnalyzer
     public const TRAIN_MIN_ACTIVE_DAYS = 7;
     public const TRAIN_MIN_ACTIVE_WINDOWS = 100;
 
+    /** 沒有該裝置的日誌時，區間的說明（全域有日誌不代表這台沒中斷，不能補成零流量）。 */
+    public const MISSING_REASON = '此裝置沒有觀測到日誌，不能判為零流量';
+
     /**
-     * 一個五分鐘區間裡，某個來源 IP 的資料品質。沒有日誌是 missing（全域有日誌不代表這台沒中斷，不能補成零流量）；
+     * 一個五分鐘區間裡，某個來源 IP 的資料品質。沒有日誌是 missing；
      * 分組被截斷、IP 對到兩台設備、或有日誌缺 net_bytes／目的 IP／目的埠（筆數比總連線數少）是 partial；其餘 complete。
-     * 只有 complete 的區間會進基線與偵測。
+     * 只有 complete 的區間會進基線與偵測。partial 的具體原因看 partialReasons()。
      */
     public static function windowQuality(int $count, bool $truncated, bool $ambiguous, int $withBytes, int $destCount, int $portCount): string
     {
         if ($count === 0) { return 'missing'; }
-        return $truncated || $ambiguous || $withBytes < $count || $destCount < $count || $portCount < $count ? 'partial' : 'complete';
+        return self::partialReasons($count, $truncated, $ambiguous, $withBytes, $destCount, $portCount) === [] ? 'complete' : 'partial';
+    }
+
+    /**
+     * 區間不完整的具體原因（品質判斷的唯一來源：沒有原因才是 complete）。缺欄位的原因會寫出缺幾筆，
+     * 維運才分得出是常態（例如 ICMP 沒有目的埠）還是日誌來源出了問題。
+     *
+     * @return string[] 沒有問題回傳 []；$count 是 0（missing）時沒有意義，呼叫端不要用
+     */
+    public static function partialReasons(int $count, bool $truncated, bool $ambiguous, int $withBytes, int $destCount, int $portCount): array
+    {
+        $reasons = [];
+        if ($truncated) { $reasons[] = '分組達查詢列數上限，這個區間的資料可能被截斷'; }
+        if ($ambiguous) { $reasons[] = '同一個 IP 對到多台設備'; }
+        if ($withBytes < $count) { $reasons[] = ($count - $withBytes) . ' 筆日誌缺 net_bytes'; }
+        if ($destCount < $count) { $reasons[] = ($count - $destCount) . ' 筆日誌缺目的 IP'; }
+        if ($portCount < $count) { $reasons[] = ($count - $portCount) . ' 筆日誌缺目的埠'; }
+        return $reasons;
+    }
+
+    /** 區間品質的說明，存進 ioc_behavior_windows.quality_reason（VARCHAR(120)）：complete 是空字串。 */
+    public static function windowQualityReason(int $count, bool $truncated, bool $ambiguous, int $withBytes, int $destCount, int $portCount): string
+    {
+        if ($count === 0) { return self::MISSING_REASON; }
+        return mb_substr(implode('；', self::partialReasons($count, $truncated, $ambiguous, $withBytes, $destCount, $portCount)), 0, 120);
     }
 
     /**

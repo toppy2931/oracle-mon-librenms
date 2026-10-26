@@ -40,6 +40,13 @@ try {
             $svc->saveSchedule($str('scope'), $str('scope_key'), $str('timezone'), $str('workdays'),
                 $str('start_time'), $str('end_time'), $actor, $level);
             ioc_json(['ok' => true]);
+        case 'preview_schedule':
+            ioc_json(['impact' => $svc->previewScheduleImpact($str('scope'), $str('scope_key'), $str('timezone'), $str('workdays'),
+                $str('start_time'), $str('end_time'), $level)]);
+        case 'confirm_hosts':
+            // items：[{id, name?}]；形狀與長度由服務檢查（整批在同一個交易裡，任何一台不合格就全部不動）
+            $confirmed = $svc->confirmHosts(is_array($in['items'] ?? null) ? $in['items'] : [], $str('note'), $actor, $level);
+            ioc_json(['ok' => true, 'confirmed' => $confirmed]);
         case 'link_asset':
             $svc->linkAsset($id('asset_id'), $id('device_id'), $str('reason'), $actor, $level);
             ioc_json(['ok' => true]);
