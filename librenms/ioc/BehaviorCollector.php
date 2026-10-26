@@ -85,10 +85,7 @@ final class BehaviorCollector
             if (IpNets::contains($nets, $ip)) { $byIp[$ip] = $row; }
         }
         foreach (array_keys($byIp) as $ip) {
-            if (!isset($ids[$ip])) {
-                $ids[$ip] = $this->assets->observeUnknown($ip);
-                if ($siteOf !== null) { $this->assets->observeSite($ids[$ip], $siteOf($ip)); }
-            }
+            if (!isset($ids[$ip])) { $ids[$ip] = $this->assets->observeUnknown($ip, $siteOf); }
         }
         $partial = $truncated;
         $modeQuery = $this->db->prepare('SELECT mode FROM ioc_behavior_assets WHERE id=?');

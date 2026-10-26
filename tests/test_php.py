@@ -189,17 +189,21 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
     def test_confirmed_hosts_are_wired_from_the_ui_to_the_service(self):
         """已確認主機：畫面 → 端點 → 服務 → 採集器要接得起來；漏接任何一段，按鈕就會變成沒有作用的假功能。"""
         endpoint = (ROOT / "librenms" / "html" / "ioc-behavior.php").read_text(encoding="utf-8")
-        self.assertIn("case 'confirm_hosts':", endpoint)
+        for action in ("confirm_hosts", "preview_schedule"):
+            self.assertIn("case '%s':" % action, endpoint)
         self.assertIn("->confirmHosts(", endpoint)
+        self.assertIn("->previewScheduleImpact(", endpoint)
         ui = (ROOT / "librenms" / "html" / "js" / "ioc-behavior.js").read_text(encoding="utf-8")
-        self.assertIn("action: 'confirm_hosts'", ui)
+        self.assertIn("confirm_hosts", ui)
+        self.assertIn("preview_schedule", ui, "儲存時段前要先預覽影響台數，請管理員確認")
         self.assertIn("confirmable(a)", ui)
         tick = (ROOT / "system" / "ioc-behavior-tick.php").read_text(encoding="utf-8")
-        self.assertRegex(tick, r"->tick\(\$devices, \$nets, null, static fn \(string \$ip\): \?string => \$sites->siteOf\(\$ip\)\)",
+        self.assertRegex(tick, r"->tick\(\$devices,\s*\$nets,[^;]*->siteOf\(",
                          "觀測主機的站點要依 IP 在「站點與網段」的歸屬填，採集器才找得到對應的上班時段")
         collector = (ROOT / "librenms" / "ioc" / "BehaviorCollector.php").read_text(encoding="utf-8")
-        self.assertEqual(collector.count("->scheduleFor("), 2, "偵測與訓練要走同一個排程解析（BehaviorService::scheduleFor）")
-        self.assertIn("(device_id IS NOT NULL OR confirmed_at IS NOT NULL)", collector, "只訓練身分確認過的資產")
+        self.assertIn("->scheduleFor(", collector)
+        self.assertNotIn("FROM ioc_behavior_schedules", collector, "採集器不能自己查時段，偵測與訓練都要走 BehaviorService::scheduleFor")
+        self.assertRegex(collector, r"device_id IS NOT NULL OR confirmed_at IS NOT NULL", "只訓練身分確認過的資產")
 
     def test_portal_embeds_config_safely(self):
         src = (ROOT / "librenms" / "html" / "ioc-portal.php").read_text(encoding="utf-8")

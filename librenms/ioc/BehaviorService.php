@@ -13,6 +13,8 @@ final class BehaviorService
     /** 沒有設備、站點層級的上班時段，也沒有存過「預設」時，用這個（台北、週一到五 09:00–18:00）。 */
     public const DEFAULT_SCHEDULE = ['timezone' => 'Asia/Taipei', 'workdays' => '1,2,3,4,5', 'start_time' => '09:00:00', 'end_time' => '18:00:00'];
     public const MAX_CONFIRM_BATCH = 100;
+    /** 已確認主機隔這麼久才又出現，就留一筆歷史請管理員確認（身分只靠 IP 維繫，位址可能已被別台取得）。 */
+    public const REAPPEAR_GAP_HOURS = 24;
     private PDO $db;
 
     public function __construct(PDO $db) { $this->db = $db; }
@@ -55,16 +57,24 @@ final class BehaviorService
      * 資產實際套用的上班時段，由具體到籠統：設備 → 站點 → 預設（資料表）→ 內建預設。永遠有結果。
      * 啟用監控、基線訓練與偵測都走這一個函式，不會各自找不一樣的時段。
      *
+     * source 說明時段從哪來（device／site／default／builtin）：工作台據此提醒「正在用內建預設」。
+     *
      * @param array{device_id?:mixed,site_name?:mixed} $asset
-     * @return array{timezone:string,workdays:string,start_time:string,end_time:string}
+     * @return array{timezone:string,workdays:string,start_time:string,end_time:string,source:string}
      */
     public function scheduleFor(array $asset): array
     {
-        $q = $this->db->prepare("SELECT timezone,workdays,start_time,end_time FROM ioc_behavior_schedules
+        $q = $this->db->prepare("SELECT scope,timezone,workdays,start_time,end_time FROM ioc_behavior_schedules
             WHERE (scope='device' AND scope_key=?) OR (scope='site' AND scope_key=?) OR (scope='default' AND scope_key='default')
             ORDER BY CASE scope WHEN 'device' THEN 0 WHEN 'site' THEN 1 ELSE 2 END LIMIT 1");
         $q->execute([(string) ($asset['device_id'] ?? ''), (string) ($asset['site_name'] ?? '')]);
-        return $q->fetch(PDO::FETCH_ASSOC) ?: self::DEFAULT_SCHEDULE;
+        $row = $q->fetch(PDO::FETCH_ASSOC);
+        if ($row) {
+            $row['source'] = $row['scope'];
+            unset($row['scope']);
+            return $row;
+        }
+        return self::DEFAULT_SCHEDULE + ['source' => 'builtin'];
     }
 
     public function detail(int $id, ?string $level): array
@@ -88,7 +98,8 @@ final class BehaviorService
             a.name observed_name FROM ioc_behavior_links l JOIN ioc_behavior_assets a ON a.id=l.observed_asset_id
             WHERE l.target_asset_id=? OR l.observed_asset_id=? ORDER BY l.confirmed_at DESC LIMIT 30');
         $q->execute([$id, $id]); $links = $q->fetchAll(PDO::FETCH_ASSOC);
-        return compact('asset', 'addresses', 'windows', 'alerts', 'history', 'baseline', 'links');
+        $schedule = $this->scheduleFor($asset);     // 實際套用的上班時段與來源：啟用監控前要看得到是不是內建預設
+        return compact('asset', 'addresses', 'windows', 'alerts', 'history', 'baseline', 'links', 'schedule');
     }
 
     public function setMode(int $id, string $mode, string $actor, ?string $level): void
@@ -169,50 +180,98 @@ final class BehaviorService
         } catch (\Throwable $e) { $this->db->rollBack(); throw $e; }
     }
 
-    public function saveSchedule(string $scope, string $key, string $timezone, string $workdays, string $start, string $end, string $actor, ?string $level): void
+    /** 時段輸入的檢查（存檔與預覽共用）。 */
+    private function validateSchedule(string $scope, string $key, string $timezone, string $workdays, string $start, string $end): void
     {
-        Access::requireHandler($level, '只有管理者可以設定上班時段');
         if (!in_array($scope, ['site', 'device', 'default'], true) || $key === '' || mb_strlen($key) > 100
             || preg_match('/[\x00-\x1f\x7f]/', $key) || ($scope === 'device' && !ctype_digit($key))
             || ($scope === 'default' && $key !== 'default')) { throw new ValidationError(['範圍不正確']); }
         if (!in_array($timezone, \DateTimeZone::listIdentifiers(), true)) { throw new ValidationError(['時區不正確']); }
         if (!preg_match('/\A[1-7](?:,[1-7]){0,6}\z/D', $workdays) || count(array_unique(explode(',', $workdays))) !== count(explode(',', $workdays))) { throw new ValidationError(['工作日格式不正確']); }
         if (!preg_match('/\A(?:[01]\d|2[0-3]):[0-5]\d\z/D', $start) || !preg_match('/\A(?:[01]\d|2[0-3]):[0-5]\d\z/D', $end) || $start >= $end) { throw new ValidationError(['上班時間不正確']); }
+    }
+
+    /** 這份時段和目前這個範圍已存的（沒存過預設時是內建預設）不一樣嗎。 */
+    private function scheduleDiffers(string $scope, string $key, string $timezone, string $workdays, string $start, string $end): bool
+    {
         $q = $this->db->prepare('SELECT timezone,workdays,start_time,end_time FROM ioc_behavior_schedules WHERE scope=? AND scope_key=?');
         $q->execute([$scope, $key]); $before = $q->fetch(PDO::FETCH_ASSOC);
         if (!$before && $scope === 'default') { $before = self::DEFAULT_SCHEDULE; }     // 沒存過預設：與內建預設相同就不算變動
-        $changed = !$before || $before['timezone'] !== $timezone || $before['workdays'] !== $workdays
+        return !$before || $before['timezone'] !== $timezone || $before['workdays'] !== $workdays
             || substr($before['start_time'], 0, 5) !== $start || substr($before['end_time'], 0, 5) !== $end;
+    }
+
+    /**
+     * 時段變動會讓哪些資產重新學習：「實際套用這個時段」而且已有基線的（就緒或監控中）。
+     * 設備層級只動該設備；站點層級不動已有設備層級時段的；預設層級只動沒有設備也沒有站點層級時段的（含沒有 LibreNMS 設備的主機）。
+     * 學習中的不算：訓練時才讀時段，它們沒有任何依賴舊時段的東西，重設起算時間只會白白損失已累積的天數。
+     *
+     * @return array<int,array{id:int|string,mode:string}>
+     */
+    private function assetsAffectedBySchedule(string $scope, string $key): array
+    {
+        if ($scope === 'device') {
+            $sql = "SELECT id,mode FROM ioc_behavior_assets WHERE device_id=? AND mode IN ('ready','monitoring')";
+        } elseif ($scope === 'site') {
+            $sql = "SELECT a.id,a.mode FROM ioc_behavior_assets a WHERE a.site_name=? AND a.mode IN ('ready','monitoring')
+                AND NOT EXISTS (SELECT 1 FROM ioc_behavior_schedules d WHERE d.scope='device'
+                    AND d.scope_key=CAST(a.device_id AS CHAR))";
+        } else {
+            $sql = "SELECT a.id,a.mode FROM ioc_behavior_assets a WHERE a.mode IN ('ready','monitoring')
+                AND NOT EXISTS (SELECT 1 FROM ioc_behavior_schedules d WHERE d.scope='device' AND d.scope_key=CAST(a.device_id AS CHAR))
+                AND NOT EXISTS (SELECT 1 FROM ioc_behavior_schedules s WHERE s.scope='site' AND s.scope_key=a.site_name)";
+        }
+        $q = $this->db->prepare($sql);
+        $q->execute($scope === 'default' ? [] : [$key]);
+        return $q->fetchAll(PDO::FETCH_ASSOC);
+    }
+
+    /**
+     * 儲存前的影響預覽（唯讀）：這份時段會讓幾台資產重新學習 28 天（監控中的會暫停）。畫面據此在儲存前請管理員確認。
+     *
+     * @return array{changed:bool,ready:int,monitoring:int}
+     */
+    public function previewScheduleImpact(string $scope, string $key, string $timezone, string $workdays, string $start, string $end, ?string $level): array
+    {
+        Access::requireHandler($level, '只有管理者可以設定上班時段');
+        $this->validateSchedule($scope, $key, $timezone, $workdays, $start, $end);
+        $out = ['changed' => $this->scheduleDiffers($scope, $key, $timezone, $workdays, $start, $end), 'ready' => 0, 'monitoring' => 0];
+        if ($out['changed']) {
+            foreach ($this->assetsAffectedBySchedule($scope, $key) as $row) { $out[$row['mode']]++; }
+        }
+        return $out;
+    }
+
+    public function saveSchedule(string $scope, string $key, string $timezone, string $workdays, string $start, string $end, string $actor, ?string $level): void
+    {
+        Access::requireHandler($level, '只有管理者可以設定上班時段');
+        $this->validateSchedule($scope, $key, $timezone, $workdays, $start, $end);
+        $changed = $this->scheduleDiffers($scope, $key, $timezone, $workdays, $start, $end);
         $this->db->beginTransaction();
         try {
         $q = $this->db->prepare('INSERT INTO ioc_behavior_schedules (scope,scope_key,timezone,workdays,start_time,end_time,updated_by,updated_at)
             VALUES (?,?,?,?,?,?,?,UTC_TIMESTAMP()) ON DUPLICATE KEY UPDATE timezone=VALUES(timezone),workdays=VALUES(workdays),start_time=VALUES(start_time),end_time=VALUES(end_time),updated_by=VALUES(updated_by),updated_at=VALUES(updated_at)');
         $q->execute([$scope, $key, $timezone, $workdays, $start . ':00', $end . ':00', $actor]);
         if ($changed) {
-            // 受影響的是「實際套用這個時段」的資產：設備層級只動該設備；站點層級不動已有設備層級時段的；
-            // 預設層級只動沒有設備也沒有站點層級時段的（含沒有 LibreNMS 設備的主機）
-            if ($scope === 'device') {
-                $sql = "SELECT id FROM ioc_behavior_assets WHERE device_id=? AND mode IN ('learning','ready','monitoring')";
-            } elseif ($scope === 'site') {
-                $sql = "SELECT a.id FROM ioc_behavior_assets a WHERE a.site_name=? AND a.mode IN ('learning','ready','monitoring')
-                    AND NOT EXISTS (SELECT 1 FROM ioc_behavior_schedules d WHERE d.scope='device'
-                        AND d.scope_key=CAST(a.device_id AS CHAR))";
-            } else {
-                $sql = "SELECT a.id FROM ioc_behavior_assets a WHERE a.mode IN ('learning','ready','monitoring')
-                    AND NOT EXISTS (SELECT 1 FROM ioc_behavior_schedules d WHERE d.scope='device' AND d.scope_key=CAST(a.device_id AS CHAR))
-                    AND NOT EXISTS (SELECT 1 FROM ioc_behavior_schedules s WHERE s.scope='site' AND s.scope_key=a.site_name)";
+            foreach ($this->assetsAffectedBySchedule($scope, $key) as $row) {
+                $this->restartLearning((int) $row['id'], 'schedule_changed', $actor, '上班時段變更，重新學習 28 天');
             }
-            $q = $this->db->prepare($sql);
-            $q->execute($scope === 'default' ? [] : [$key]);
-            foreach ($q->fetchAll(PDO::FETCH_COLUMN) as $id) {
-                $this->db->prepare("UPDATE ioc_behavior_assets SET mode='learning',quality_status='learning',learning_started_at=UTC_TIMESTAMP(),training_checked_at=NULL WHERE id=?")->execute([$id]);
-                $this->db->prepare('DELETE FROM ioc_behavior_known WHERE asset_id=?')->execute([$id]);
-                $this->history((int) $id, 'schedule_changed', $actor, '上班時段變更，重新學習 28 天');
-            }
+            $this->audit('schedule_saved', $scope . ':' . $key, $actor);
         }
-        if ($changed) { $this->audit('schedule_saved', $scope . ':' . $key, $actor); }
         $this->db->commit();
         } catch (\Throwable $e) { $this->db->rollBack(); throw $e; }
+    }
+
+    /**
+     * 讓資產重新學習 28 天：學習起點與訓練檢查重設、已知目的地清掉，舊基線與區間保留（重新學習期間不用舊基線判斷）。
+     * 呼叫端負責交易；已退役的不動。
+     */
+    private function restartLearning(int $id, string $action, string $actor, string $detail): void
+    {
+        $this->db->prepare("UPDATE ioc_behavior_assets SET mode='learning',quality_status='learning',
+            learning_started_at=UTC_TIMESTAMP(),training_checked_at=NULL WHERE id=? AND mode<>'retired'")->execute([$id]);
+        $this->db->prepare('DELETE FROM ioc_behavior_known WHERE asset_id=?')->execute([$id]);
+        $this->history($id, $action, $actor, $detail);
     }
 
     public function saveSourceInventory(string $key, string $kind, string $scope, string $status, string $coverage, string $actor, ?string $level): void
@@ -245,10 +304,7 @@ final class BehaviorService
         if ($before && $before['mode'] !== 'retired' && $before['site_name'] !== $site) {
             $this->db->beginTransaction();
             try {
-                $this->db->prepare("UPDATE ioc_behavior_assets SET mode='learning',quality_status='learning',
-                    learning_started_at=UTC_TIMESTAMP(),training_checked_at=NULL WHERE id=? AND mode<>'retired'")->execute([$id]);
-                $this->db->prepare('DELETE FROM ioc_behavior_known WHERE asset_id=?')->execute([$id]);
-                $this->history($id, 'site_changed', 'system', '站點歸屬變更，重新學習 28 天');
+                $this->restartLearning($id, 'site_changed', 'system', '站點歸屬變更，重新學習 28 天');
                 $this->db->commit();
             } catch (\Throwable $e) { $this->db->rollBack(); throw $e; }
         }
@@ -259,16 +315,30 @@ final class BehaviorService
     /**
      * 未知來源 IP 對到的資產。未確認的暫時資產：24 小時內看過同一個 IP 才沿用，隔太久另建新的暫時身分；
      * 已確認主機：不受 24 小時限制（管理員已確認過身分，缺席再久回來都還是同一台），且與未確認的並存時優先它。
+     * 已確認主機隔 24 小時以上才又出現時留一筆「reappeared」歷史：身分只靠 IP 維繫，DHCP 可能已把位址租給別台機器，
+     * 要讓管理員看得到、確認仍是同一台。
+     *
+     * @param (callable(string):?string)|null $siteOf 依 IP 找站點；有傳就順便維護站點歸屬（沿用查詢已讀到的站點，沒變就不多查）
      */
-    public function observeUnknown(string $ip): int
+    public function observeUnknown(string $ip, ?callable $siteOf = null): int
     {
         if (!filter_var($ip, FILTER_VALIDATE_IP)) { throw new ValidationError(['IP 格式不正確']); }
-        $q = $this->db->prepare("SELECT a.id FROM ioc_behavior_assets a JOIN ioc_behavior_addresses x ON x.asset_id=a.id
+        $q = $this->db->prepare("SELECT a.id,a.site_name,a.confirmed_at,x.last_seen_at FROM ioc_behavior_assets a JOIN ioc_behavior_addresses x ON x.asset_id=a.id
             WHERE x.address=? AND a.device_id IS NULL AND a.mode<>'retired'
               AND (a.confirmed_at IS NOT NULL OR x.last_seen_at>=DATE_SUB(UTC_TIMESTAMP(),INTERVAL 24 HOUR))
             ORDER BY (a.confirmed_at IS NULL),x.last_seen_at DESC,x.id DESC LIMIT 1");
-        $q->execute([$ip]); $id = (int) $q->fetchColumn();
-        if (!$id) {
+        $q->execute([$ip]); $row = $q->fetch(PDO::FETCH_ASSOC);
+        $site = null;
+        if ($row) {
+            $id = (int) $row['id'];
+            $site = $row['site_name'];
+            if ($row['confirmed_at'] !== null) {
+                $gap = time() - (int) strtotime($row['last_seen_at'] . ' UTC');
+                if ($gap >= self::REAPPEAR_GAP_HOURS * 3600) {
+                    $this->history($id, 'reappeared', 'system', sprintf('位址 %s 隔 %d 天後重新出現；請確認仍是同一台主機（DHCP 可能已把位址租給別台）', $ip, intdiv($gap, 86400)));
+                }
+            }
+        } else {
             $key = 'observed:' . $ip . ':' . gmdate('YmdHis') . ':' . bin2hex(random_bytes(3));
             $q = $this->db->prepare('INSERT INTO ioc_behavior_assets (identity_key,name,learning_started_at)
                 VALUES (?,?,UTC_TIMESTAMP())');
@@ -276,6 +346,7 @@ final class BehaviorService
             $id = (int) $this->db->lastInsertId();
         }
         $this->observeAddress($id, $ip, 'observed');
+        if ($siteOf !== null) { $this->applyObservedSite($id, $site, $siteOf($ip)); }
         return $id;
     }
 
@@ -288,17 +359,17 @@ final class BehaviorService
         $q = $this->db->prepare('SELECT site_name,mode,device_id FROM ioc_behavior_assets WHERE id=?');
         $q->execute([$assetId]); $a = $q->fetch(PDO::FETCH_ASSOC);
         if (!$a || $a['device_id'] !== null || $a['mode'] === 'retired') { return; }
+        $this->applyObservedSite($assetId, $a['site_name'], $site);
+    }
+
+    private function applyObservedSite(int $assetId, ?string $current, ?string $site): void
+    {
         $site = $site === null || $site === '' ? null : mb_substr($site, 0, 100);
-        if ($a['site_name'] === $site) { return; }
+        if ($current === $site) { return; }
         $this->db->beginTransaction();
         try {
             $this->db->prepare('UPDATE ioc_behavior_assets SET site_name=? WHERE id=?')->execute([$site, $assetId]);
-            if ($a['site_name'] !== null) {
-                $this->db->prepare("UPDATE ioc_behavior_assets SET mode='learning',quality_status='learning',
-                    learning_started_at=UTC_TIMESTAMP(),training_checked_at=NULL WHERE id=?")->execute([$assetId]);
-                $this->db->prepare('DELETE FROM ioc_behavior_known WHERE asset_id=?')->execute([$assetId]);
-                $this->history($assetId, 'site_changed', 'system', '站點歸屬變更，重新學習 28 天');
-            }
+            if ($current !== null) { $this->restartLearning($assetId, 'site_changed', 'system', '站點歸屬變更，重新學習 28 天'); }
             $this->db->commit();
         } catch (\Throwable $e) { $this->db->rollBack(); throw $e; }
     }
@@ -330,6 +401,8 @@ final class BehaviorService
             $seen[$id] = true;
             $rows[] = [$id, trim($name)];
         }
+        // 一律依識別碼由小到大處理：兩位管理者交叉確認重疊的批次時，列鎖的順序一致，不會互相等到死結
+        usort($rows, static fn (array $x, array $y): int => $x[0] <=> $y[0]);
         $this->db->beginTransaction();
         try {
             foreach ($rows as [$id, $name]) {
@@ -375,6 +448,10 @@ final class BehaviorService
         $observed = $this->asset($observedId);
         if ($observed['device_id'] !== null || $observed['mode'] === 'retired'
             || !str_starts_with($observed['identity_key'], 'observed:')) { throw new ValidationError(['只能關聯尚未確認的暫時設備']); }
+        if ($observed['confirmed_at'] !== null) {
+            // 關聯只會把這台退役、不合併歷史：已確認的主機可能已經訓練出基線、正在監控，一次點擊就會把這些全丟掉（等 M2b 的合併）
+            throw new ValidationError(['已確認的主機不能直接關聯 LibreNMS 設備：關聯不會合併歷史，已訓練的基線與監控會遺失。請先停用，或等合併功能']);
+        }
         $q = $this->db->prepare('SELECT id FROM ioc_behavior_assets WHERE device_id=?'); $q->execute([$deviceId]); $targetId = (int) $q->fetchColumn();
         if (!$targetId) { throw new NotFound('LibreNMS 裝置尚未同步'); }
         $this->db->beginTransaction();
