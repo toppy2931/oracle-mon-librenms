@@ -353,12 +353,12 @@ dbtest('detail：只有管理者；回傳位址、區間、警示（含通知狀
     assertSame(1, count($svc->detail($temp, DBT_H)['links']), '從暫時資產那端看也看得到關聯');
 });
 
-dbtest('已知限制：人工關聯之後，同一個 IP 的流量仍會另建新的暫時資產（關聯只留紀錄，不改流量歸屬）', static function (PDO $db): void {
+dbtest('observeUnknown 本身不看已關聯的位址（那是採集器的事：流量歸屬見 behavior_merge_dbtest.php 的 tick 測試）', static function (PDO $db): void {
     $svc = new BehaviorService($db);
-    $dev = $svc->syncDevice(30, 'fw-3', '172.16.3.1', '台南');     // LibreNMS 認為這台的 IP 還是 .1
-    $temp = $svc->observeUnknown('172.16.3.99');                  // 實際流量來自 .99
+    $dev = $svc->syncDevice(30, 'fw-3', '172.16.3.1', '台南');
+    $temp = $svc->observeUnknown('172.16.3.99');
     $svc->linkAsset($temp, 30, '核對過 DHCP 租約與 MAC', 'admin', DBT_H);
-    $next = $svc->observeUnknown('172.16.3.99');                  // 採集器下一輪看到同一個 IP
-    assertTrue($next !== $temp && $next !== $dev, '退役的暫時資產不會被沿用，裝置資產也不會接手：又多一個待確認設備');
-    assertSame(null, dbtVal($db, 'SELECT device_id FROM ioc_behavior_assets WHERE id=?', [$next]));
+    assertSame([$dev], $svc->linkedAddresses()['172.16.3.99'], '關聯後這個位址對到設備資產');
+    $next = $svc->observeUnknown('172.16.3.99');
+    assertTrue($next !== $temp && $next !== $dev, 'observeUnknown 只管暫時身分：退役的不沿用，也不會接到設備上；採集器先查 linkedAddresses 才不會走到這裡');
 });

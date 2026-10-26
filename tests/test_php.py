@@ -205,6 +205,42 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
         self.assertNotIn("FROM ioc_behavior_schedules", collector, "採集器不能自己查時段，偵測與訓練都要走 BehaviorService::scheduleFor")
         self.assertRegex(collector, r"device_id IS NOT NULL OR confirmed_at IS NOT NULL", "只訓練身分確認過的資產")
 
+    def test_linking_merges_history_and_is_wired_end_to_end(self):
+        """M2b：關聯要先預覽、合併歷史，採集器要依「管理員確認過的位址」對應流量並把多個位址併成一筆；漏接任何一段都是假功能。"""
+        endpoint = (ROOT / "librenms" / "html" / "ioc-behavior.php").read_text(encoding="utf-8")
+        for action, call in (("preview_link", "->previewLink("), ("link_asset", "->linkAsset("), ("unlink_address", "->unlinkAddress(")):
+            self.assertIn("case '%s':" % action, endpoint)
+            self.assertIn(call, endpoint)
+        ui = (ROOT / "librenms" / "html" / "js" / "ioc-behavior.js").read_text(encoding="utf-8")
+        for token in ("preview_link", "link_asset", "unlink_address", "link_suggestions"):
+            self.assertIn(token, ui)
+        self.assertIn("linkable(a)", ui, "已確認的主機也要能關聯")
+        self.assertIn("data.devices", ui, "關聯的設備選單要用伺服器給齊的 devices，資產清單只有最新 300 筆")
+        self.assertNotRegex(ui, r"canHandle && confirmable\(a\) \? h\('div', \{ class: 'toolbar' \}, linkId",
+                            "關聯不能只開給未確認的主機（已確認的也要能合併進設備）")
+        self.assertRegex(ui, r"preview_link[\s\S]{0,1200}window\.confirm", "關聯前要先顯示預覽並請管理員確認")
+        self.assertRegex(endpoint, r"->linkAsset\([^;]*\$str\('plan_token'\)", "執行關聯一定要帶預覽的 token，管理員同意的是預覽看到的那一份")
+        self.assertIn("plan_token: plan.token", ui)
+        self.assertIn("mode_names", ui, "模式名稱由伺服器給，畫面不再自己寫一份")
+        self.assertNotRegex(ui, r"modeName\s*=\s*\{[^}]*learning", "模式名稱只能有一份（BehaviorService::MODE_NAMES）")
+        collector = (ROOT / "librenms" / "ioc" / "BehaviorCollector.php").read_text(encoding="utf-8")
+        self.assertRegex(collector, r"->linkedAddresses\(\$knownDeviceIds \?\? array_column\(\$devices, 'id'\)\)", "採集器只認 LibreNMS 裡還在的設備的已確認位址（含停用、忽略的）")
+        self.assertIn("->observeLinked(", collector)
+        self.assertIn("BehaviorAnalyzer::combineTraffic(", collector, "一個資產的多個位址要先併成一筆，不然同一區間的唯一鍵會讓後寫的蓋掉先寫的")
+        self.assertIn("->acquireTickLock(", collector, "寫區間要和關聯互斥，不然關聯合併時採集器還在寫暫時資產")
+        self.assertIn("->releaseTickLock()", collector)
+        service = (ROOT / "librenms" / "ioc" / "BehaviorService.php").read_text(encoding="utf-8")
+        self.assertIn("GET_LOCK(", service)
+        self.assertEqual(service.count("$this->exclusively("), 2, "關聯與解除位址都要走 exclusively：取鎖、交易、放鎖的順序只有一份")
+        self.assertEqual(service.count("takeTickLock();"), 1, "取鎖只在 exclusively 裡")
+        self.assertRegex(service, r"GET_LOCK\(\?,\?\)[\s\S]{0,200}\$this->lockName\(\)", "鎖名稱要帶資料庫名稱的雜湊（GET_LOCK 的名稱是整台伺服器共用的）")
+        tick = (ROOT / "system" / "ioc-behavior-tick.php").read_text(encoding="utf-8")
+        self.assertRegex(tick, r"->tick\([^;]*\$knownDeviceIds\)", "停用、忽略的設備也要算「還在 LibreNMS」，不然維修停用會放掉它的已確認位址")
+        self.assertIn("m.source_ip", ui, "警示列要顯示流量來源位址")
+        self.assertIn("evidence_kind='admin_confirmed'", service)
+        self.assertNotRegex(service, r"SELECT id,address FROM ioc_behavior_addresses WHERE asset_id=\? ORDER BY id DESC LIMIT 1",
+                            "位址要依（資產，位址）比對，不能只看最新一列，不然多個位址輪流出現會每一輪都新增一列")
+
     def test_portal_embeds_config_safely(self):
         src = (ROOT / "librenms" / "html" / "ioc-portal.php").read_text(encoding="utf-8")
         for flag in ("JSON_HEX_TAG", "JSON_HEX_AMP", "JSON_HEX_APOS", "JSON_HEX_QUOT"):

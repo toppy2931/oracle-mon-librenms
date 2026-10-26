@@ -47,8 +47,15 @@ try {
             // items：[{id, name?}]；形狀與長度由服務檢查（整批在同一個交易裡，任何一台不合格就全部不動）
             $confirmed = $svc->confirmHosts(is_array($in['items'] ?? null) ? $in['items'] : [], $str('note'), $actor, $level);
             ioc_json(['ok' => true, 'confirmed' => $confirmed]);
+        case 'preview_link':
+            // 唯讀：關聯會合併哪些區間、已知目的地與位址；實際關聯（link_asset）照同一份計畫做
+            ioc_json(['plan' => $svc->previewLink($id('asset_id'), $id('device_id'), $level)]);
         case 'link_asset':
-            $svc->linkAsset($id('asset_id'), $id('device_id'), $str('reason'), $actor, $level);
+            // plan_token 必填：管理員同意的是預覽看到的那一份，之後資料變了（模式、提醒不同）就要重新預覽
+            $svc->linkAsset($id('asset_id'), $id('device_id'), $str('reason'), $actor, $level, $str('plan_token'));
+            ioc_json(['ok' => true]);
+        case 'unlink_address':
+            $svc->unlinkAddress($id('asset_id'), $str('address'), $actor, $level);
             ioc_json(['ok' => true]);
         case 'save_source_inventory':
             $svc->saveSourceInventory($str('source_key'), $str('kind'), $str('scope_label'),

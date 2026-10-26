@@ -30,11 +30,13 @@ try {
             'name' => (string) ($row->display ?: ($row->sysName ?: $row->hostname)),
             'ip' => $ip, 'site' => $ip !== null ? $sites->siteOf($ip) : null];
     }
+    // LibreNMS 裡所有還在的設備（含停用、忽略的）：管理員確認過的位址不因維修停用而放掉，只有從 LibreNMS 刪掉的才放掉
+    $knownDeviceIds = array_map('intval', Illuminate\Support\Facades\DB::table('devices')->pluck('device_id')->all());
     try { $logs = Ioc\GraylogClient::fromConf('/etc/oracle-mon/graylog-reader.conf'); }
     catch (Ioc\GraylogUnavailable $e) { $logs = new Ioc\UnavailableLogSource('Graylog 來源尚未就緒'); }
     $collector = new Ioc\BehaviorCollector($db, $logs);
     // 觀測主機沒有 LibreNMS 設備，站點只能依 IP 落在哪個「站點與網段」判斷
-    $collector->tick($devices, $nets, null, static fn (string $ip): ?string => $sites->siteOf($ip));
+    $collector->tick($devices, $nets, null, static fn (string $ip): ?string => $sites->siteOf($ip), $knownDeviceIds);
     $collector->repairOpenCases();
 } catch (Throwable $e) {
     error_log('IOC behavior collection failed: ' . get_class($e));

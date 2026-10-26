@@ -52,6 +52,74 @@ final class BehaviorAnalyzer
     }
 
     /**
+     * 同一個資產在一個區間裡可能有好幾個位址（LibreNMS 的 IP，加上管理員確認過的位址）：把各位址的流量併成這個資產的一筆。
+     * 連線數、位元組、有欄位的筆數逐項相加，目的地與埠清單取聯集；有流量的位址只有一個時，目的地數與埠數沿用日誌端算好的基數
+     * （和只有一個位址的資產完全一樣），有兩個以上才用聯集的個數。沒有流量的位址不影響結果：只要有一個位址有流量，
+     * 這個區間就以它為準（缺席的位址無從判斷，也不能因此把有資料的區間說成缺資料；這是取捨：沒流量的位址可能只是真的沒流量，
+     * 也可能是它的日誌中斷了，兩者分不出來，關聯預覽會提醒管理員）。top_ip 是連線數最多的位址（警示與事件案用它說明流量從哪來）。
+     *
+     * @param array<int,array{ip?:string,count:int,bytes:int,with_bytes:int,dest_count:int,port_count:int,card_dst:int,card_port:int,dest_list:array,port_list:array,ambiguous:bool}> $parts
+     * @return array{connections:int,bytes:int,destinations:int,ports:int,with_bytes:int,dest_count:int,port_count:int,ambiguous:bool,dest_list:array,port_list:array,top_ip:?string}
+     */
+    public static function combineTraffic(array $parts): array
+    {
+        $out = ['connections' => 0, 'bytes' => 0, 'destinations' => 0, 'ports' => 0, 'with_bytes' => 0,
+            'dest_count' => 0, 'port_count' => 0, 'ambiguous' => false, 'dest_list' => [], 'port_list' => [], 'top_ip' => null];
+        $dest = []; $ports = []; $active = []; $topCount = 0;
+        foreach ($parts as $p) {
+            $out['connections'] += $p['count'];
+            $out['bytes'] += $p['bytes'];
+            $out['with_bytes'] += $p['with_bytes'];
+            $out['dest_count'] += $p['dest_count'];
+            $out['port_count'] += $p['port_count'];
+            $out['ambiguous'] = $out['ambiguous'] || $p['ambiguous'];
+            foreach ($p['dest_list'] as $d) { $dest[$d] = true; }
+            foreach ($p['port_list'] as $port) { $ports[$port] = true; }
+            if ($p['count'] > 0) {
+                $active[] = $p;
+                if ($p['count'] > $topCount) { $topCount = $p['count']; $out['top_ip'] = $p['ip'] ?? null; }
+            }
+        }
+        $out['dest_list'] = array_keys($dest);
+        $out['port_list'] = array_keys($ports);
+        $single = count($active) <= 1;
+        $out['destinations'] = $single ? ($active ? $active[0]['card_dst'] : 0) : count($dest);
+        $out['ports'] = $single ? ($active ? $active[0]['card_port'] : 0) : count($ports);
+        return $out;
+    }
+
+    /**
+     * 關聯設備時，同一個區間兩邊（設備、暫時資產）都有流量：併成一列。連線數與位元組相加，目的地與埠取聯集；
+     * 兩邊都是 complete 才是 complete，有一邊不完整就是 partial（不進基線），原因合併後截到 120 字。
+     * 呼叫端只在兩邊都不是 missing 時才用它。
+     *
+     * @param array{connections:mixed,bytes_total:mixed,destinations_json:string,ports_json:string,quality:string,quality_reason:string,observed_at:string} $device
+     * @param array{connections:mixed,bytes_total:mixed,destinations_json:string,ports_json:string,quality:string,quality_reason:string,observed_at:string} $observed
+     * @return array{connections:int,bytes_total:int,destinations:int,ports:int,destinations_json:string,ports_json:string,quality:string,quality_reason:string,observed_at:string}
+     */
+    public static function mergeWindowRows(array $device, array $observed): array
+    {
+        $union = static function (string $a, string $b): array {
+            $set = [];
+            foreach ([$a, $b] as $json) {
+                foreach ((array) json_decode($json, true) as $v) { $set[$v] = true; }
+            }
+            return array_keys($set);
+        };
+        $dest = $union($device['destinations_json'], $observed['destinations_json']);
+        $ports = $union($device['ports_json'], $observed['ports_json']);
+        $complete = $device['quality'] === 'complete' && $observed['quality'] === 'complete';
+        $reasons = array_values(array_unique(array_filter([$device['quality_reason'], $observed['quality_reason']], static fn (string $r): bool => $r !== '')));
+        return ['connections' => (int) $device['connections'] + (int) $observed['connections'],
+            'bytes_total' => (int) $device['bytes_total'] + (int) $observed['bytes_total'],
+            'destinations' => count($dest), 'ports' => count($ports),
+            'destinations_json' => json_encode($dest, JSON_THROW_ON_ERROR), 'ports_json' => json_encode($ports, JSON_THROW_ON_ERROR),
+            'quality' => $complete ? 'complete' : 'partial',
+            'quality_reason' => $complete ? '' : mb_substr('合併了兩個位址的區間：' . implode('；', $reasons), 0, 120),
+            'observed_at' => max($device['observed_at'], $observed['observed_at'])];
+    }
+
+    /**
      * 區間起點（UTC）換成排程時區後的分桶與是否在上班時段。上班＝本地星期在工作日內且時間落在 [開始, 結束)。
      * 基線分桶固定把週一到週五算 weekday、週六日算 weekend，與設定的工作日無關。
      *

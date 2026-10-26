@@ -72,17 +72,16 @@ dbtest('confirmHosts：確認後保留區間與學習起點；名稱可自訂、
     assertTrue($byId[$a]['confirmed_at'] !== null && $byId[$b]['confirmed_at'] !== null, '工作台看得到兩台都是已確認的');
 });
 
-dbtest('linkAsset：已確認的主機不能直接關聯 LibreNMS 設備（只會退役、不合併歷史，等 M2b）；未確認的仍可以', static function (PDO $db): void {
+dbtest('linkAsset：已確認的主機也能關聯 LibreNMS 設備（M2b 會把歷史合併過去，細節見 behavior_merge_dbtest.php）', static function (PDO $db): void {
     $svc = new BehaviorService($db);
     $dev = $svc->syncDevice(30, 'fw-3', '172.16.3.1', null);
     $confirmed = bhdObserved($db, '172.16.9.1');
     $plain = bhdObserved($db, '172.16.9.2');
     $svc->confirmHosts([['id' => $confirmed]], '核對過', 'admin', DBT_H);
-    assertThrows(ValidationError::class, fn () => $svc->linkAsset($confirmed, 30, '核對過 DHCP', 'admin', DBT_H), '已確認');
-    assertSame(['learning', 0], [dbtVal($db, 'SELECT mode FROM ioc_behavior_assets WHERE id=?', [$confirmed]), (int) dbtVal($db, 'SELECT COUNT(*) FROM ioc_behavior_links')], '被擋下：不能留下任何痕跡');
+    $svc->linkAsset($confirmed, 30, '核對過 DHCP', 'admin', DBT_H);
     $svc->linkAsset($plain, 30, '核對過 DHCP', 'admin', DBT_H);
-    assertSame('retired', dbtVal($db, 'SELECT mode FROM ioc_behavior_assets WHERE id=?', [$plain]));
-    unset($dev);
+    assertSame(['retired', 'retired'], [dbtVal($db, 'SELECT mode FROM ioc_behavior_assets WHERE id=?', [$confirmed]), dbtVal($db, 'SELECT mode FROM ioc_behavior_assets WHERE id=?', [$plain])]);
+    assertSame(2, (int) dbtVal($db, 'SELECT COUNT(*) FROM ioc_behavior_links WHERE target_asset_id=?', [$dev]));
 });
 
 // ---- 位址比對與站點歸屬 ----

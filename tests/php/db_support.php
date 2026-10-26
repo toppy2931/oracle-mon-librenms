@@ -45,6 +45,15 @@ function dbtPdo(): PDO
     return $pdo;
 }
 
+/** 第二條連線（同一個 ioc_test_* schema）：測命名鎖這類「兩條連線之間」的行為。 */
+function dbtSecondPdo(): PDO
+{
+    dbtPdo();       // 先過一次資料庫名稱的檢查
+    $pdo = new PDO((string) getenv('IOC_TEST_DSN'), (string) getenv('IOC_TEST_USER'), (string) getenv('IOC_TEST_PASS'), [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+    $pdo->exec('SET NAMES utf8mb4 COLLATE utf8mb4_unicode_ci');
+    return $pdo;
+}
+
 /** 每個資料庫測試開始前把所有資料表清空（保留結構）。 */
 function dbtClean(PDO $db): void
 {

@@ -205,6 +205,63 @@ test('基線訓練門檻：有效天數、有連線的天數與區間數不足�
     assertSame(null, BehaviorAnalyzer::trainingGroups($short, 'Asia/Taipei'), '涵蓋的日期少於 20');
 });
 
+test('combineTraffic：多個位址的流量併成一筆；單一有流量的位址沿用日誌端的基數；沒流量的位址不影響結果', static function (): void {
+    $part = static fn (int $count, int $bytes, array $dest, array $ports, array $o = []): array => $o + ['count' => $count, 'bytes' => $bytes, 'with_bytes' => $count,
+        'dest_count' => $count, 'port_count' => $count, 'card_dst' => count($dest), 'card_port' => count($ports), 'dest_list' => $dest, 'port_list' => $ports, 'ambiguous' => false];
+    $a = $part(20, 5000, ['203.0.113.1', '203.0.113.2'], [443]);
+    $b = $part(10, 3000, ['203.0.113.2', '203.0.113.3'], [443, 80]);
+    $silent = $part(0, 0, [], []);
+
+    $t = BehaviorAnalyzer::combineTraffic([$a, $b]);
+    assertSame([30, 8000, 3, 2, 30, 30, 30, false], [$t['connections'], $t['bytes'], $t['destinations'], $t['ports'], $t['with_bytes'], $t['dest_count'], $t['port_count'], $t['ambiguous']]);
+    assertSame(['203.0.113.1', '203.0.113.2', '203.0.113.3'], $t['dest_list']);
+    assertSame([443, 80], $t['port_list']);
+
+    $single = BehaviorAnalyzer::combineTraffic([$silent, $b]);
+    assertSame([10, 3000, 2, 2], [$single['connections'], $single['bytes'], $single['destinations'], $single['ports']], '只有一個位址有流量：和只有一個位址的資產完全一樣');
+    $card = $part(10, 3000, ['203.0.113.2'], [443], ['card_dst' => 7, 'card_port' => 5]);
+    $c = BehaviorAnalyzer::combineTraffic([$card, $silent]);
+    assertSame([7, 5], [$c['destinations'], $c['ports']], '單一位址：沿用日誌端算好的基數，不是清單長度');
+
+    $none = BehaviorAnalyzer::combineTraffic([$silent, $silent]);
+    assertSame([0, 0, 0, 0, []], [$none['connections'], $none['bytes'], $none['destinations'], $none['ports'], $none['dest_list']]);
+    assertSame(0, BehaviorAnalyzer::combineTraffic([])['connections']);
+    assertSame(true, BehaviorAnalyzer::combineTraffic([$a, $part(1, 1, [], [], ['ambiguous' => true])])['ambiguous'], '任何一個位址有衝突，整筆就有衝突');
+    assertSame('complete', BehaviorAnalyzer::windowQuality($t['connections'], false, $t['ambiguous'], $t['with_bytes'], $t['dest_count'], $t['port_count']));
+    $partial = BehaviorAnalyzer::combineTraffic([$a, $part(10, 3000, ['203.0.113.2'], [443], ['with_bytes' => 9])]);
+    assertSame('partial', BehaviorAnalyzer::windowQuality($partial['connections'], false, $partial['ambiguous'], $partial['with_bytes'], $partial['dest_count'], $partial['port_count']), '缺的筆數逐項相加：一個位址缺位元組，整筆就是 partial');
+});
+
+test('combineTraffic：top_ip 是連線數最多的位址（打平取前面的）；沒有流量的位址不算；全都沒流量是 null；沒帶位址也不會出錯', static function (): void {
+    $part = static fn (string $ip, int $count): array => ['ip' => $ip, 'count' => $count, 'bytes' => 0, 'with_bytes' => $count, 'dest_count' => $count, 'port_count' => $count,
+        'card_dst' => 0, 'card_port' => 0, 'dest_list' => [], 'port_list' => [], 'ambiguous' => false];
+    assertSame('172.16.1.77', BehaviorAnalyzer::combineTraffic([$part('172.16.1.10', 3), $part('172.16.1.77', 9), $part('172.16.1.88', 0)])['top_ip']);
+    assertSame('172.16.1.10', BehaviorAnalyzer::combineTraffic([$part('172.16.1.10', 5), $part('172.16.1.77', 5)])['top_ip'], '打平：取前面的');
+    assertSame(null, BehaviorAnalyzer::combineTraffic([$part('172.16.1.10', 0), $part('172.16.1.77', 0)])['top_ip']);
+    assertSame(null, BehaviorAnalyzer::combineTraffic([])['top_ip']);
+    $noIp = $part('x', 4);
+    unset($noIp['ip']);
+    assertSame(null, BehaviorAnalyzer::combineTraffic([$noIp])['top_ip'], '呼叫端沒帶位址：不回報，也不丟錯');
+});
+
+test('mergeWindowRows：連線與位元組相加、目的地與埠取聯集；兩邊都完整才完整；原因合併後不超過欄位長度', static function (): void {
+    $row = static fn (string $q, int $c, int $b, array $d, array $p, string $r = '', string $obs = '2026-10-20 10:00:00'): array => ['connections' => $c, 'bytes_total' => $b,
+        'destinations_json' => json_encode($d), 'ports_json' => json_encode($p), 'quality' => $q, 'quality_reason' => $r, 'observed_at' => $obs];
+    $m = BehaviorAnalyzer::mergeWindowRows($row('complete', 5, 500, ['3.3.3.3'], [443]), $row('complete', 7, 700, ['3.3.3.3', '4.4.4.4'], [443, 8080], '', '2026-10-21 10:00:00'));
+    assertSame([12, 1200, 2, 2, 'complete', '', '2026-10-21 10:00:00'], [$m['connections'], $m['bytes_total'], $m['destinations'], $m['ports'], $m['quality'], $m['quality_reason'], $m['observed_at']]);
+    assertSame(['3.3.3.3', '4.4.4.4'], json_decode($m['destinations_json'], true));
+    assertSame([443, 8080], json_decode($m['ports_json'], true), '埠仍是數字');
+
+    $p = BehaviorAnalyzer::mergeWindowRows($row('partial', 3, 300, ['6.6.6.6'], [443], '1 筆日誌缺 net_bytes'), $row('complete', 4, 400, ['6.6.6.6'], [443]));
+    assertSame('partial', $p['quality']);
+    assertSame('合併了兩個位址的區間：1 筆日誌缺 net_bytes', $p['quality_reason']);
+    $both = BehaviorAnalyzer::mergeWindowRows($row('partial', 1, 1, [], [], '甲'), $row('partial', 1, 1, [], [], '甲'));
+    assertSame('合併了兩個位址的區間：甲', $both['quality_reason'], '相同的原因不重複');
+    $long = BehaviorAnalyzer::mergeWindowRows($row('partial', 1, 1, [], [], str_repeat('長', 100)), $row('partial', 1, 1, [], [], str_repeat('短', 100)));
+    assertTrue(mb_strlen($long['quality_reason']) <= 120, '欄位是 VARCHAR(120)，超過在嚴格模式會讓寫入失敗');
+    assertSame('partial', BehaviorAnalyzer::mergeWindowRows($row('complete', 1, 1, [], []), $row('partial', 1, 1, [], [], 'x'))['quality']);
+});
+
 test('Webhook 設定只接受不含帳密或片段的 HTTPS 與 32 位元組密鑰', static function (): void {
     $secret = str_repeat('ab', 32);
     $valid = BehaviorWebhook::parseConfig("WEBHOOK_URL=https://notify.example.test/ioc\nWEBHOOK_SECRET_HEX=$secret\n");
