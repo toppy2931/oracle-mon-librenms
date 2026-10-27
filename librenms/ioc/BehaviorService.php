@@ -144,6 +144,26 @@ final class BehaviorService
         return self::DEFAULT_SCHEDULE + ['source' => 'builtin'];
     }
 
+    /**
+     * 入口「連線動態」播放：管理員看單一主機近 $hours 小時的連線狀態（BehaviorVizExport 的格式）。
+     * **不遮罩**——這是內網入口裡管理員看自己的資料，目的 IP 只有管理員拿得到（同詳情頁的位址）；要給別人的檔案請用 tools/export-behavior-viz.php（預設遮罩）。
+     * 成功才留稽核「誰看了哪台主機」（失敗不留）；稽核寫入在匯出的唯讀交易之外（BehaviorVizExport 只有 SELECT，有靜態測試保證）。
+     * 沒有這台或已移除就是 NotFound，不會回傳空場景讓畫面當成「沒有連線」。
+     *
+     * @param int|null $now 只給測試用（固定「現在」）；端點不傳，用真實時間
+     * @return array<string,mixed>
+     */
+    public function vizData(int $id, int $hours, string $actor, ?string $level, ?int $now = null): array
+    {
+        Access::requireHandler($level, '只有管理者可以檢視連線動態');
+        $opts = ['assets' => [$id], 'max_assets' => 1, 'hours' => $hours, 'mask' => false];
+        if ($now !== null) { $opts['now'] = $now; }
+        $data = (new BehaviorVizExport($this->db))->export($opts, $level);
+        if ($data['assets'] === []) { throw new NotFound('找不到主機'); }
+        $this->audit('viz_viewed', 'asset:' . $id, $actor);
+        return $data;
+    }
+
     public function detail(int $id, ?string $level): array
     {
         Access::requireHandler($level, '只有管理者可以檢視裝置行為詳情');

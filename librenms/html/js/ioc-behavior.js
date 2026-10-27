@@ -1,7 +1,7 @@
 /* 裝置行為工作台。所有遠端文字都交給 h()/textContent，沒有 innerHTML。 */
 (() => {
   'use strict';
-  window.IocBehavior = ({ h, section, table, api, root, toast, canHandle, unavailable, openCases }) => {
+  window.IocBehavior = ({ h, section, table, api, root, toast, canHandle, unavailable, openCases, vizUrl }) => {
     let selected = null;
     let requestSeq = 0;
     const call = (body) => api('/ioc-behavior.php', body);
@@ -110,10 +110,12 @@
           const name = h('button', { class: 'btn', type: 'button', onclick: () => detail(a.id) }, a.name);
           if (!lifecycle) {
             return [name, ...common, (a.confirmed_at || '—') + (a.confirmed_by ? ' · ' + a.confirmed_by : ''),
-              h('button', { class: 'btn danger', type: 'button', onclick: () => {
-                if (window.confirm('移除主機「' + a.name + '」（' + (a.address || '—') + '）？\n移除後不再追蹤與監控這台主機，歷史與警示紀錄保留；之後這個位址的流量會成為新的待確認主機。'))
-                  change({ action: 'set_mode', asset_id: Number(a.id), mode: 'retired' }, '已移除主機');
-              } }, '移除')];
+              h('div', { class: 'rowacts' },
+                h('button', { class: 'btn', type: 'button', title: '播放這台主機近 24 小時的連線狀態', onclick: (e) => playViz(a, e.currentTarget) }, '▶ 連線動態'),
+                h('button', { class: 'btn danger', type: 'button', onclick: () => {
+                  if (window.confirm('移除主機「' + a.name + '」（' + (a.address || '—') + '）？\n移除後不再追蹤與監控這台主機，歷史與警示紀錄保留；之後這個位址的流量會成為新的待確認主機。'))
+                    change({ action: 'set_mode', asset_id: Number(a.id), mode: 'retired' }, '已移除主機');
+                } }, '移除'))];
           }
           let box = '';
           if (confirmable(a)) {
@@ -139,6 +141,52 @@
       }
       fill();
       return section(title, hint, box);
+    }
+    // ---- 連線動態：入口內嵌的 3D 播放器（同源 iframe，用 VM 本機的 three.js，不連外部 CDN）----
+    // 資料含目的 IP，所以只經 postMessage 送給這個 iframe（targetOrigin 是 location.origin），不放進網址；
+    // 取不到資料、或播放器沒載入，都明講原因，不畫空場景（空場景會被誤認成「沒有連線」）。
+    let vizOpen = false;
+    async function playViz(a, opener) {
+      if (vizOpen) return;
+      if (!vizUrl) { toast('3D 播放器尚未部署：請在 VM 重新執行 update.sh', true); return; }
+      vizOpen = true;
+      const status = h('p', { class: 'note viz-status' }, '載入連線資料中…');
+      const frame = h('iframe', { class: 'viz-frame', title: a.name + ' 的連線動態', referrerpolicy: 'no-referrer', hidden: true });
+      const close = h('button', { class: 'btn', type: 'button', onclick: () => shut() }, '關閉（Esc）');
+      const overlay = h('div', { class: 'viz-overlay', role: 'dialog', 'aria-modal': 'true', 'aria-label': a.name + ' 的連線動態' },
+        h('div', { class: 'viz-bar' }, h('strong', null, '▶ ' + a.name + ' · 連線動態'),
+          h('span', { class: 'note' }, '近 24 小時、每 5 分鐘一格；缺資料的格子標「無法取得」，不是零流量'), close),
+        status, frame);
+      const fail = (msg) => { status.textContent = msg; status.hidden = false; frame.hidden = true; };
+      const pending = call({ action: 'viz_data', asset_id: Number(a.id), hours: 24 }).then((r) => r.viz);
+      pending.catch((e) => fail('無法取得連線資料：' + e.message));       // 播放器有沒有就緒都要顯示原因
+      let timer = null;
+      const inerted = [...document.body.children].filter((el) => el.tagName !== 'SCRIPT' && !el.hasAttribute('inert'));
+      function shut() {
+        clearTimeout(timer);
+        window.removeEventListener('message', onMessage); document.removeEventListener('keydown', onKey);
+        overlay.remove(); inerted.forEach((el) => el.removeAttribute('inert'));
+        vizOpen = false;
+        if (opener && opener.isConnected) opener.focus();      // 焦點回到按下去的那顆按鈕
+      }
+      const onKey = (e) => { if (e.key === 'Escape') shut(); };
+      const onMessage = (e) => {
+        if (!(e.origin === location.origin && e.source === frame.contentWindow) || !e.data || e.data.type !== 'viz-ready') return;
+        clearTimeout(timer);
+        pending.then((data) => {
+          if (!overlay.isConnected) return;                   // 資料抵達前已關掉：不再送（frame.contentWindow 已是 null）
+          status.hidden = true; frame.hidden = false; frame.contentWindow.postMessage({ type: 'viz-data', data }, location.origin);
+        }, () => {});
+      };
+      window.addEventListener('message', onMessage);          // 先掛監聽再設 src，才不會漏掉播放器的 viz-ready
+      document.addEventListener('keydown', onKey);
+      // 滑鼠點進 3D 畫面後鍵盤焦點在 iframe 裡，keydown 不會到父頁面；同源，所以直接在播放器視窗也掛一份（視窗隨 iframe 一起消失）
+      frame.addEventListener('load', () => { try { frame.contentWindow.addEventListener('keydown', onKey); } catch (_) { /* 非同源就拿不到，關閉鈕仍可用 */ } });
+      inerted.forEach((el) => el.setAttribute('inert', ''));   // 背景不能被 Tab 到
+      document.body.append(overlay);
+      close.focus();
+      timer = setTimeout(() => fail('播放器沒有回應：請確認 VM 已部署最新版（重新執行 update.sh）後再重新整理'), 10000);
+      frame.src = vizUrl;
     }
     function schedulePanel(data) {
       const schedules = data.schedules || [];

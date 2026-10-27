@@ -126,7 +126,18 @@ sudo mysql librenms -e "SELECT asset_id, address, evidence_kind, last_seen_at FR
 
 `tools/behavior-viz/behavior-3d.html` 是一個 three.js 的單檔頁面：被選的監控主機在地球上的站點位置，成串的光點流向右側一排目的地面板（橘色＝新目的地、白色＝已知、灰色＝這一格沒連到、空框＝來源缺資料），節點旁有帶引線的資訊卡，底下是 24 小時（288 格）的時間軸可拖曳或播放。畫面規則沿用本專案的鐵則：**缺資料顯示「無法取得」，不畫成零流量**；partial 的格子變暗並標「不完整」。
 
-- **它是 Artifact 用的頁面，不部署到 VM**（`install.sh`／`update.sh` 不會安裝它，測試會擋）：three.js 從 cdnjs 載入，不符合入口「不引用外部 CDN」的規則。內嵌的只有合成的範例資料（標「範例資料」）；Artifact 存在 claude.ai，**不要把真實的內網資料放進去發布**。
+- **同一份頁面兩種用法：** ① 發布成 **Artifact**（three.js r128 與 OrbitControls 從 jsdelivr 載入，內嵌的只有合成的範例資料，標「範例資料」；Artifact 存在 claude.ai，**不要把真實的內網資料放進去發布**）；② 入口內嵌播放（見下一節），VM 上用本機的 three.js 副本，不連任何外部 CDN。
+- **視角操作：** 用 three.js 的 **OrbitControls**（左鍵旋轉、滾輪縮放、阻尼；不平移、極角與方位角有限制以保持版面可讀）；舞台右下角有借自 `supply-world.html` 的按鈕群：回到預設視角（0.9 秒平滑過渡）、自動旋轉、縮放＋／－。點面板要「移動不超過 5px 且不超過 500ms」才算點選，拖曳旋轉不會誤選；手機寬度（卡片收起）點面板或來源節點會從底部滑出詳情抽屜。`prefers-reduced-motion` 時不慣性、不過渡、不自動旋轉。
+
+### 入口內嵌播放：已確認主機的「▶ 連線動態」
+
+「裝置行為分析」→「已確認主機」分頁，每列操作欄有「▶ 連線動態」（旁邊是「移除」）。按下後開全螢幕層，從頭播放這台主機近 24 小時（1 小時／秒，可暫停、拖曳、調速）；Esc 或「關閉」收起，焦點回到按鈕。
+
+- **資料不經網址、不外傳：** 入口呼叫 `viz_data`（`ioc-behavior.php`，僅管理員）取得單一主機的資料（`BehaviorService::vizData`，用 `BehaviorVizExport`，**不遮罩**——這是內網入口裡管理員看自己的資料），等 iframe（同源的 `/ioc-behavior-viz.html?embed=1`）回報 `viz-ready` 後用 `postMessage(…, location.origin)` 送進去；入口只接受同源、而且來自這個 iframe 的 `viz-ready`，iframe 只接受同源、而且來自父視窗的 `viz-data`，資料一樣走 `validate()` 逐欄驗證。
+- **存取留痕：** 成功才寫一筆稽核 `viz_viewed`（`asset:<id>`，操作者與時間），失敗（沒權限、找不到、已移除、參數不合法）不寫。內嵌模式不產生範例資料：資料沒送到時畫面只寫「等待主機資料…」。
+- **取不到要明講：** 取資料失敗顯示「無法取得連線資料：原因」；播放器頁沒載入（沒部署）10 秒後顯示「播放器沒有回應：請確認 VM 已部署最新版」；`update.sh` 沒部署播放器時按鈕會提示。都不會畫成空場景或零流量。
+- **部署：** `system/install-behavior.sh`（`update.sh` 每次重跑）安裝 `librenms/html/vendor/three/`（three.min.js、OrbitControls.js、LICENSE，repo 內釘死 SHA-256）與 `/opt/librenms/html/ioc-behavior-viz.html`（`tools/behavior-viz/make-local-page.py` 由 Artifact 版轉換：只換兩個 script 網址、補文件外框；網址帶檔案雜湊避免舊快取）。沒有 `python3` 就略過播放器（其餘功能不受影響）。`uninstall.sh` 會清掉這些檔。
+- 部署後在 VM 確認：`ls -l /opt/librenms/html/ioc-behavior-viz.html /opt/librenms/html/vendor/three/`，在「已確認主機」按「▶ 連線動態」，再查稽核：`sudo mysql librenms -e "SELECT actor,action,subject,occurred_at FROM ioc_behavior_audit WHERE action='viz_viewed' ORDER BY id DESC LIMIT 5;"`。
 - **看自己的資料：** 頁首「載入 JSON」在瀏覽器本機讀檔（`FileReader`）：不上傳、不存起來（沒有 fetch／localStorage）、上限 8 MB、逐欄驗證、文字一律當純文字顯示（去掉雙向控制字元、截長）；格式錯誤會拒絕並保留目前的畫面；**沒有遮罩的資料會在頁首與提示標紅，請勿截圖或分享**。
 - **資料只記錄「有沒有連到」：** 資料表沒有「哪個目的地走哪個埠」的配對，也沒有目的地的地理資料，所以光點的疏密是該區間的總連線數平均分配給有連線的目的地（圖例有寫），埠的顏色是主機整體的埠比例；目的地不上地球，只有來源站點在地球上（座標取 LibreNMS 設備的位置，0,0 視為未設定，沒有就放在台灣）。
 - **手機寬度：** 資訊卡與圖例收起，只留場景、狀態列與時間軸，細節看「連線摘要」；WebGL 不能用時整頁退成文字版摘要。
@@ -145,7 +156,7 @@ sudo -u librenms php /opt/oracle-mon-librenms/tools/export-behavior-viz.php --ho
 - **基線：** 只匯出一個代表值：目前版本、離峰時段桶（週末，或小時落在上班時段之外）、樣本數夠用（≥ 6）的各桶 P95 的中位數；畫面上的「基線 P95」就是它，不是偵測用的各時段門檻。
 - **格式 `ioc-behavior-viz/1`：** `{schema, masked, generated_at, window_minutes, hours, assets:[{id, label, address, site, geo?, kind(device|confirmed|observed), mode(learning|monitoring), baseline_version, schedule:{timezone,workdays,start,end}, baseline:{p95_conn,p95_bytes}|null, ports:[{port,share}], windows:[{t,conn,bytes,dest_n,port_n,q}], destinations:[{ip,first_seen,last_seen,seen_windows,w:[區間索引],new}], destinations_total, alerts:[{t,detector,severity,summary}]}]}`。時間都是 UTC 的 ISO 8601。
 
-檢查：`tests/php/viz_export_test.php`（遮罩與選項的單元測試）、`tests/php/viz_export_dbtest.php`（資料庫層：形狀、遮罩後找不到任何真實名稱／位址、唯讀、出錯收交易、權限）、`tests/test_behavior_viz.py`（頁面不 innerHTML、不 fetch、不存 localStorage、只載入釘版本的 cdnjs、陸地遮罩合理、匯出腳本只有 SELECT 且不部署）。要用匯出的格式端到端試頁面：跑資料庫層測試時設 `IOC_VIZ_EXPORT_FILE=/path/to/file.json`，測試會把遮罩後的 24 小時匯出寫成檔案，再用頁首「載入 JSON」打開。
+檢查：`tests/php/viz_export_test.php`（遮罩與選項的單元測試）、`tests/php/viz_export_dbtest.php`（資料庫層：形狀、遮罩後找不到任何真實名稱／位址、唯讀、出錯收交易、權限）、`tests/test_behavior_viz.py`（頁面不 innerHTML、不 fetch、不存 localStorage、只載入釘在 `0.128.0` 的兩個 jsdelivr script、用 OrbitControls 而不是自寫的軌道、內嵌模式只信任同源父視窗、陸地遮罩合理；vendor 檔的 SHA-256；轉換後的本機副本沒有外部網址且只換了兩個網址；匯出腳本只有 SELECT 且不部署）、`tests/php/viz_playback_dbtest.php`（`vizData`：權限、稽核恰好一筆且失敗不留、找不到／已移除）、`tests/test_php.py`（按鈕只在已確認主機、端點先驗權限再讀資料、`postMessage` 只送同源）。要用匯出的格式端到端試頁面：跑資料庫層測試時設 `IOC_VIZ_EXPORT_FILE=/path/to/file.json`，測試會把遮罩後的 24 小時匯出寫成檔案，再用頁首「載入 JSON」打開。
 
 ## 已知限制（2026-10-26 讀程式碼確認；標「待 VM 查證」的尚未實測）
 

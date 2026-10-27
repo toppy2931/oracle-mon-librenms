@@ -272,6 +272,47 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
                          "confirmBar 在已確認主機分頁是 null，replaceChildren(null) 會把文字「null」插進畫面")
         self.assertRegex(ui, r"window\.confirm\([^;]*移除主機[^;]*\)[\s\S]{0,200}mode: 'retired'", "已確認主機的「移除」要先確認，再把它設成已移除")
 
+    def test_viz_playback_is_wired_from_the_confirmed_row_to_a_same_origin_player(self):
+        """「已確認主機」的「連線動態」：按鈕 → 端點 viz_data（僅管理員、先驗權限再讀資料、成功才留稽核）→ 同源 iframe 播放器（postMessage 送資料）。
+        資料含目的 IP：不能走網址、不能送給非同源的視窗、取不到要明講而不是畫空場景。"""
+        endpoint = (ROOT / "librenms" / "html" / "ioc-behavior.php").read_text(encoding="utf-8")
+        self.assertIn("case 'viz_data':", endpoint)
+        self.assertRegex(endpoint, r"->vizData\(\$id\('asset_id'\), isset\(\$in\['hours'\]\) \? \$int\('hours'\) : 24, \$actor, \$level\)")
+        service = (ROOT / "librenms" / "ioc" / "BehaviorService.php").read_text(encoding="utf-8")
+        body = service[service.index("public function vizData("):service.index("public function detail(")]
+        self.assertLess(body.index("Access::requireHandler("), body.index("->export("), "先檢查權限才讀資料")
+        self.assertLess(body.index("->export("), body.index("$this->audit('viz_viewed'"), "成功才留稽核")
+        self.assertIn("'mask' => false", body)
+        self.assertIn("throw new NotFound(", body, "找不到或已移除要明講，不能回傳空場景")
+        ui = (ROOT / "librenms" / "html" / "js" / "ioc-behavior.js").read_text(encoding="utf-8")
+        confirmed = ui[ui.index("if (!lifecycle) {"):ui.index("let box = '';")]
+        self.assertIn("playViz(a", confirmed, "按鈕只在已確認主機那一列")
+        self.assertIn("連線動態", confirmed)
+        self.assertNotIn("playViz(", ui[ui.index("let box = '';"):ui.index("const heads = lifecycle")], "待確認／設備那一列沒有這個按鈕")
+        play = ui[ui.index("async function playViz("):]
+        play = play[:play.index("\n    function schedulePanel")]
+        self.assertIn("action: 'viz_data'", play)
+        self.assertLess(play.index("addEventListener('message'"), play.index("frame.src ="), "先掛監聽再設 iframe 的 src，才不會漏掉 viz-ready")
+        self.assertRegex(play, r"e\.origin === location\.origin && e\.source === frame\.contentWindow", "只接受同源、而且是這個播放器 iframe 送來的 viz-ready")
+        self.assertIn("postMessage({ type: 'viz-data', data }, location.origin)", play, "資料只送給同源（不用 '*'、不放進網址）")
+        self.assertNotIn("'*'", play)
+        self.assertIn("無法取得連線資料", play, "取資料失敗要明講原因")
+        self.assertIn("播放器沒有回應", play, "播放器沒載入（沒部署）也要明講")
+        self.assertIn("'Escape'", play)
+        self.assertRegex(play, r"frame\.addEventListener\('load',[^\n]*frame\.contentWindow\.addEventListener\('keydown', onKey\)",
+                         "滑鼠點進 3D 畫面後焦點在 iframe 裡，Esc 要在播放器視窗也掛，不然關不掉")
+        self.assertIn("if (!overlay.isConnected) return;", play, "資料抵達前已關閉就不再送（frame.contentWindow 已是 null）")
+        self.assertIn("opener.focus()", play, "關閉後焦點回到按鈕")
+        self.assertIn("el.setAttribute('inert', '')", play, "對話層開著時背景不能被 Tab 到")
+        self.assertIn("el.removeAttribute('inert')", play, "關閉後要把背景恢復")
+        self.assertIn("viz-overlay", play)
+        self.assertNotRegex(play, r"\bsandbox\b|innerHTML", "播放器是自己的頁面，不加 sandbox；也不用 innerHTML")
+        portal = (ROOT / "librenms" / "html" / "ioc-portal.php").read_text(encoding="utf-8")
+        self.assertRegex(portal, r"'vizUrl'\s*=>\s*\$viz_url", "播放器網址由伺服器算（帶檔案雜湊避免吃到舊快取）")
+        self.assertIn("hash_file('sha256', $viz_page)", portal)
+        self.assertIn("vizUrl: CFG.vizUrl", portal)
+        self.assertRegex(portal, r"\.viz-overlay\{[^}]*position:fixed[^}]*z-index:8", "對話層要低於 #toast（z-index:9）")
+
     def test_portal_embeds_config_safely(self):
         src = (ROOT / "librenms" / "html" / "ioc-portal.php").read_text(encoding="utf-8")
         for flag in ("JSON_HEX_TAG", "JSON_HEX_AMP", "JSON_HEX_APOS", "JSON_HEX_QUOT"):

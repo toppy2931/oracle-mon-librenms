@@ -35,6 +35,9 @@ try {
             ioc_json(['list' => $svc->listAssets($str('view'), $int('page'), $int('per_page'), $str('sort'), $str('dir'), $level)]);
         case 'detail': ioc_json(['detail' => $svc->detail($id('asset_id'), $level)]);
         case 'preview_baseline': ioc_json(['baseline' => $svc->previewBaseline($id('asset_id'), $level)]);
+        case 'viz_data':
+            // 「連線動態」播放用的單一主機資料（含目的 IP，僅管理員；成功才留稽核）；時數 1–168，沒給就是 24
+            ioc_json(['viz' => $svc->vizData($id('asset_id'), isset($in['hours']) ? $int('hours') : 24, $actor, $level)]);
         case 'set_mode':
             $svc->setMode($id('asset_id'), $str('mode'), $actor, $level);
             ioc_json(['ok' => true]);
