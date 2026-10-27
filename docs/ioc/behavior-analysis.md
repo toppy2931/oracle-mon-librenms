@@ -88,7 +88,8 @@ sudo mysql librenms -e "SELECT id, name, mode, confirmed_by, confirmed_at FROM i
 1. **啟用監控＝立即訓練。** 詳情頁按「啟用監控」，畫面先呼叫唯讀的 `preview_baseline`，顯示「用 N 個完整區間（X 天）訓練，涵蓋 K 個離峰時段；沒涵蓋的時段不判斷」與上班時段來源，管理員確認後 `set_mode` 才在同一個交易裡訓練新版基線、把資產設成監控中，並寫歷程 `baseline_ready`、`mode_changed` 與稽核。已在監控中不重做。
 2. **只用相關的區間。** 品質完整（`complete`）、最近 28 天內（`BehaviorService::BASELINE_MAX_DAYS`）、在學習起點之後結束的區間；所以「重新學習」之後舊資料不會進新基線。
 3. **最低資料量（提案值，可調）：** 完整區間 ≥ 144 格（約 12 小時），其中有連線的 ≥ 12 格（`BehaviorAnalyzer::BASELINE_MIN_WINDOWS`、`BASELINE_MIN_ACTIVE_WINDOWS`）；不達標就擋下並寫出現有幾格、至少需要幾格。偵測本來就要求每個離峰時段桶樣本 ≥ 6（`BASELINE_MIN_SAMPLES`），沒涵蓋的時段不判斷，所以資料少只是涵蓋少、不會誤報；一個離峰時段都沒涵蓋時，預覽會警告「啟用後不會判斷離峰異常」。
-4. **其他條件不變：** 身分（LibreNMS 設備或已確認）、防火牆日誌來源就緒且 15 分鐘內有更新、已移除的不能直接啟用。
+4. **其他條件：** 身分（LibreNMS 設備或已確認）、已移除的不能直接啟用，以及防火牆日誌來源狀態為 `ready` 或 `partial`、而且 15 分鐘內有更新；`error`、`missing`（沒收到日誌）、其他狀態或過期都擋下。
+   **`partial` 可以啟用**（2026-10-27 起）：來源 `partial` 只代表「有些區間不完整」（缺 `net_bytes`／目的 IP／目的埠，或分組被截斷）；多主機的環境裡任何一個資產有一格不完整，整個來源就是 `partial`，這台 VM 幾乎一直如此。原本要求必須 `ready`，結果沒有任何資產啟用得了（VM 驗證時第一次按就被擋）。訓練只用完整區間、資料量由第 3 點的檢查把關，所以來源 `partial` 不需要擋。
 5. **副作用：** 不再先經過「模擬警示」階段，風險靠啟用前的涵蓋度確認與每小時去重降低。舊資料裡的 `preview` 模擬警示照常顯示，不再產生新的。
 6. **站點、時段變更：** 監控中的資產站點歸屬或套用的時段改變時改回學習中，需要重新按「啟用監控」。
 7. **資料遷移：** `Schema::statements()` 末尾有一句冪等的 `UPDATE ioc_behavior_assets SET mode='learning',quality_status='learning' WHERE mode='ready'`，把舊版的「待啟用」資產遷回學習中（基線版本與區間保留）。
@@ -133,6 +134,7 @@ sudo mysql librenms -e "SELECT asset_id, address, evidence_kind, last_seen_at FR
 ```bash
 sudo mysql librenms -e "SELECT SUM(quality_reason LIKE '%缺 net_bytes%') AS no_bytes, SUM(quality_reason LIKE '%缺目的 IP%') AS no_dst, SUM(quality_reason LIKE '%缺目的埠%') AS no_port, SUM(quality_reason LIKE '%同一個 IP%') AS ambiguous, SUM(quality_reason LIKE '%截斷%') AS truncated, COUNT(*) AS partial_total FROM ioc_behavior_windows WHERE quality='partial' AND window_start >= UTC_TIMESTAMP() - INTERVAL 1 DAY;"
 ```
+- **分組達查詢列數上限（500）時，這個區間所有有流量的資產都是 `partial`**（VM 實測 2026-10-27：上班時段的區間常被截斷，詳情頁的區間表寫「分組達查詢列數上限，這個區間的資料可能被截斷」）。偵測只看離峰時段、離峰流量小，通常不會截斷，所以不影響離峰偵測，但忙的時段不會進基線、截斷的那一格也不會判斷。要量化可查每小時被截斷的區間比例（`quality_reason LIKE '%截斷%'`）；調高上限前要先量 Graylog 的查詢成本，目前沒有改。
 - **一個 tick 只處理最新一個完整區間，不回補**：採集器停擺期間的區間不會補算，啟用監控時可用的完整區間會因此變少。
 - **每個區間只檢查與學習前 100 個目的地與目的埠**：超過的部分不會被判為「新」，也不會被學習。
 
