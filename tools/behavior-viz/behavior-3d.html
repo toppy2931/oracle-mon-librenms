@@ -49,7 +49,7 @@ h1 { margin: 0; font-size: 16px; font-weight: 700; letter-spacing: .02em; white-
 .leaders { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
 .leaders line { stroke: var(--red); stroke-width: 1.4; opacity: .9; }
 .tags3d { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
-.tag3d { position: absolute; left: 0; top: 0; transform: translate(-50%, -100%); padding: 0 7px; border: 1px solid var(--line);
+.tag3d { position: absolute; left: 0; top: 0; transform: translate(-50%, -50%); padding: 0 7px; border: 1px solid var(--line);
   border-radius: 6px; background: rgba(9, 19, 33, .78); font: 11px/1.6 ui-monospace, "Cascadia Mono", Consolas, monospace; white-space: nowrap; }
 .tag3d.hot { border-color: var(--orange); color: var(--orange); }
 .tag3d.src { border-color: var(--red); color: #ffd0d0; }
@@ -143,7 +143,7 @@ select { padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; ba
     </div>
   </header>
   <main class="stage" id="stage">
-    <canvas id="gl" role="img" aria-label="監控主機對外連線的 3D 示意圖：來源主機、成串的連線光點與目的地面板。文字內容請看「連線摘要」。"></canvas>
+    <canvas id="gl" role="img" aria-label="監控主機對外連線的 3D 示意圖：來源主機（一體機）、成串的連線光點與目的地（雲）。文字內容請看「連線摘要」。"></canvas>
     <svg class="leaders" id="leaders" aria-hidden="true">
       <defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#ff6b6b"/></marker></defs>
     </svg>
@@ -343,8 +343,25 @@ function srcState(a, i) {
 
 /* ------------------------------------------------------------------ three.js 場景 */
 const canvas = $('gl'), stage = $('stage');
-let renderer, scene, camera, globe, globeQ = new THREE.Quaternion(), srcGroup, srcMesh, srcEdges, srcHalo, srcRing, atmos;
-const flows = [], panels = [], pickables = [], tmp = new THREE.Vector3(), tmp2 = new THREE.Vector3();
+let renderer, scene, camera, globe, globeQ = new THREE.Quaternion(), srcGroup, srcDev, srcMesh, srcEdges, srcHit, srcBodyMat, srcKeyMat, srcHalo, srcRing, atmos;
+const flows = [], panels = [], pickables = [], tmp = new THREE.Vector3(), tmp2 = new THREE.Vector3(), tmpQ = new THREE.Quaternion();
+const DEV_Q = new THREE.Quaternion().setFromEuler(new THREE.Euler(0.2, 0.45, 0));     // 來源一體機在世界座標的朝向：站直、轉向右邊的目的地、上緣微微往鏡頭傾（才看得到桌上的鍵盤）
+const bx = (w, h, d) => new THREE.BoxGeometry(w, h, d);
+const part = (g, mat, x, y, z) => { const m = new THREE.Mesh(g, mat); m.position.set(x, y, z); return m; };
+const edgeMat = (c) => new THREE.LineBasicMaterial({ color: c, transparent: true, opacity: 0.9, blending: THREE.AdditiveBlending, depthWrite: false });      // 發光邊線：疊加混色，在深色底上會亮
+const glassMat = () => new THREE.MeshLambertMaterial({ color: 0x7885e8, emissive: 0x2a2f8a, transparent: true, opacity: 0.9 });      // 半透明的藍紫玻璃機身，顏色由每幀的 STYLE 決定（底色太淡會被光照打成全白）
+let glowTexture = null;
+/** 設備背後柔和的光暈：用 canvas 畫一張放射狀漸層（不載入圖片），顏色由每幀的 STYLE 決定。 */
+function glowSprite(w, h) {
+  if (!glowTexture) {
+    const c = document.createElement('canvas'); c.width = c.height = 128;
+    const g = c.getContext('2d'), grad = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+    grad.addColorStop(0, 'rgba(255,255,255,0.9)'); grad.addColorStop(0.35, 'rgba(255,255,255,0.35)'); grad.addColorStop(1, 'rgba(255,255,255,0)');
+    g.fillStyle = grad; g.fillRect(0, 0, 128, 128); glowTexture = new THREE.CanvasTexture(c);
+  }
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: glowTexture, color: 0x7defff, transparent: true, opacity: 0.3, blending: THREE.AdditiveBlending, depthWrite: false }));
+  s.scale.set(w, h, 1); s.position.set(0, 0, -0.8); return s;
+}
 const GLOBE = { c: new THREE.Vector3(-15, -9.5, -19), r: 13 };
 const orbit = { target: new THREE.Vector3(1.5, -0.8, -3), dist: 36 };       // 預設視角：看向 target、距離 dist（resize 依長寬比決定）
 let controls;
@@ -426,14 +443,47 @@ function buildGlobe() {
     fragmentShader: 'varying vec3 vN; void main(){ float i=pow(clamp(0.66-dot(vN,vec3(0.0,0.0,1.0)),0.0,1.0),2.6); gl_FragColor=vec4(0.22,0.46,0.92,1.0)*i*0.9; }' }));
   globe.add(atmos);
   srcGroup = new THREE.Group(); globe.add(srcGroup);
-  const box = new THREE.BoxGeometry(1.9, 1.9, 1.9);
-  srcMesh = new THREE.Mesh(box, new THREE.MeshLambertMaterial({ color: 0xff6b6b, emissive: 0x5a1010, transparent: true, opacity: 0.95 }));
-  srcEdges = new THREE.LineSegments(new THREE.EdgesGeometry(box), new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 }));
+  // 來源主機：一體機（螢幕與主機合一、下巴、單腳支架，前面放鍵盤與滑鼠），全用內建幾何拼出來，不載入模型或圖片。螢幕玻璃的顏色就是狀態色（紅／橘／白／藍／灰）。
+  // 球面的法線大致朝向鏡頭，設備若跟著它長出去就會變成從上面往下看一台躺著的電腦，所以放進 srcDev，每幀用 DEV_Q 抵銷球的旋轉
+  srcDev = new THREE.Group(); srcDev.scale.setScalar(1.05); srcGroup.add(srcDev);
+  srcBodyMat = new THREE.MeshLambertMaterial({ color: 0x5160a8, emissive: 0x171d52, transparent: true, opacity: 0.94 });
+  srcKeyMat = new THREE.MeshLambertMaterial({ color: 0x1b2352, emissive: 0x0a0e2a, transparent: true, opacity: 0.94 });
+  const housing = bx(2.7, 1.8, 0.16);       // 螢幕與主機合一的機身；螢幕玻璃偏上，下緣留一條「下巴」
+  srcMesh = part(bx(2.44, 1.34, 0.03), new THREE.MeshLambertMaterial({ color: 0xff6b6b, emissive: 0x5a1010, transparent: true, opacity: 0.95 }), 0, 0.6, 0.095);
+  srcEdges = new THREE.LineSegments(new THREE.EdgesGeometry(housing), edgeMat(0x7defff)); srcEdges.position.set(0, 0.45, 0);
+  srcHit = part(bx(3.0, 2.8, 2.0), new THREE.MeshBasicMaterial({ visible: false }), 0, 0.05, 0.3); srcHit.userData.k = -2;      // 看不見但射線打得到：整台一體機都能點，不必瞄準細節
+  srcDev.add(part(housing, srcBodyMat, 0, 0.45, 0), srcMesh, srcEdges, srcHit,
+    part(bx(2.0, 0.1, 0.01), srcKeyMat, 0, 1.18, 0.115), part(bx(1.5, 0.07, 0.01), srcKeyMat, -0.25, 0.92, 0.115), part(bx(1.8, 0.07, 0.01), srcKeyMat, -0.1, 0.72, 0.115), part(bx(1.2, 0.07, 0.01), srcKeyMat, -0.45, 0.52, 0.115),      // 螢幕上的視窗標題列與文字行
+    part(bx(0.5, 0.62, 0.12), srcBodyMat, 0, -0.82, -0.06), part(bx(1.2, 0.07, 0.8), srcBodyMat, 0, -1.15, 0.05),      // 支架與底座
+    part(bx(1.9, 0.05, 0.55), srcKeyMat, -0.2, -1.12, 1.0), part(bx(0.24, 0.05, 0.36), srcKeyMat, 1.2, -1.12, 1.0));      // 鍵盤與滑鼠
   srcHalo = new THREE.Mesh(new THREE.SphereGeometry(2.1, 20, 14), new THREE.MeshBasicMaterial({ color: 0xff6b6b, transparent: true, opacity: 0.16, blending: THREE.AdditiveBlending, depthWrite: false }));
   srcRing = new THREE.Mesh(new THREE.RingGeometry(1.5, 1.8, 48), new THREE.MeshBasicMaterial({ color: 0xff6b6b, transparent: true, opacity: 0.7, side: THREE.DoubleSide, depthWrite: false }));
-  srcMesh.userData.k = -2; srcGroup.add(srcMesh, srcEdges, srcHalo);
+  srcGroup.add(srcHalo);
   globe.add(srcRing);
-  pickables.push(srcMesh);
+  pickables.push(srcHit);
+}
+const PUFFS = [[-1.3, 0.05, 0.62], [-0.55, 0.42, 0.82], [0.4, 0.55, 0.95], [1.3, 0.12, 0.66]];       // 雲的四個圓丘：x、y、半徑
+/**
+ * 目的地：一朵發光玻璃的雲（網際網路上的一個目的地）；cluster（「其他 N 個目的地」）是三朵疊在一起的雲，才和單一目的地分得出來。
+ * 半透明雲身＋背後的光暈＋底下三個發光點（資料往來）。回傳的欄位對應每幀要更新的東西：mat（雲身）、edges（缺資料時才畫的外框）、fade／led（發光點）、glow（光暈）。
+ * mesh 是雲的底，也是點選與標籤的位置；它和所有圓丘都放在 detail 裡，缺資料時一起不畫、也點不到。
+ */
+function buildCloud(cluster) {
+  const mat = glassMat(), led = new THREE.MeshBasicMaterial({ color: 0x37f0ff, transparent: true, opacity: 0.96 }), detail = new THREE.Group();
+  const K = cluster ? 1.15 : 0.9, Y = 0.8;       // Y：把雲壓扁一點，不然會比目的地的垂直間距還高、壓到上下兩朵
+  const glow = glowSprite(cluster ? 11 : 8.2, cluster ? 5 : 3.8);
+  const lobes = (ox, oy, oz, s) => {       // 一朵雲：底（橢球）＋四個圓丘；回傳底
+    const k = K * s, b = part(new THREE.SphereGeometry(1, 28, 16), mat, ox, oy - 0.3 * k * Y, oz); b.scale.set(2.15 * k, 0.62 * k * Y, 0.8 * k); detail.add(b);
+    for (const [x, y, r] of PUFFS) { const m = part(new THREE.SphereGeometry(r * k, 24, 16), mat, ox + x * k, oy + y * k * Y, oz); m.scale.set(1, Y, 0.8); detail.add(m); }
+    return b;
+  };
+  const mesh = lobes(0, 0, 0, 1);
+  if (cluster) { lobes(-1.5, 0.75, -1.1, 0.8); lobes(1.7, 0.6, -1.0, 0.75); }
+  detail.add(glow);
+  for (const x of [-0.3, 0, 0.3]) detail.add(part(new THREE.SphereGeometry(0.08, 10, 8), led, x * K, -0.5 * K * Y, 0.78 * K));      // 底下三個發光點：資料往來
+  const frame = cluster ? bx(7.0, 2.8, 2.8) : bx(4.4 * K, 1.9 * K * Y, 1.7 * K), edges = new THREE.LineSegments(new THREE.EdgesGeometry(frame), edgeMat(0x7defff));
+  edges.position.set(0, cluster ? 0.5 : 0.2 * K * Y, cluster ? -0.4 : 0);
+  return { mat, mesh, edges, detail, fade: [led], led, glow };
 }
 function placeSource(a) {
   const geo = a.geo || { lat: 23.0, lng: 120.2 };
@@ -456,12 +506,12 @@ function clearFlows() {
   }
   flows.length = 0; panels.length = 0; pickables.length = 1; $('tags3d').replaceChildren();
 }
-const layout = { v: 1 };       // 直式螢幕把面板在垂直方向拉開
-function panelPos(k, n) {
+const layout = { v: 1, s: 1 };       // 直式螢幕：v 把雲在垂直方向拉開，s 把雲放大（場景被拉遠後圖示會比置中的標籤還小）
+function panelPos(k, n, cluster) {
   const u = n > 1 ? k / (n - 1) : 0.5;
-  return new THREE.Vector3(3.6 + 5.2 * Math.sin(u * Math.PI) + 1.2 * u, (7.2 - 15.6 * u) * layout.v, -3.6 + 4.2 * Math.sin(u * Math.PI * 2 - 0.6));
+  return new THREE.Vector3(3.6 + 5.2 * Math.sin(u * Math.PI) + 1.2 * u, (7.2 - 15.6 * u - (cluster ? 1.0 : 0)) * layout.v, -3.6 + 4.2 * Math.sin(u * Math.PI * 2 - 0.6));      // 「其他」是一團雲，比單朵大，再往下挪一點才不會壓到上一朵
 }
-function relayout() { panels.forEach((p, k) => { p.P.copy(panelPos(k, panels.length)); p.group.position.copy(p.P); }); }
+function relayout() { panels.forEach((p, k) => { p.P.copy(panelPos(k, panels.length, p.others)); p.group.position.copy(p.P); p.group.scale.setScalar(layout.s); }); }
 function buildAsset(a) {
   clearFlows();
   const list = a.destinations.slice().sort((x, y) => y.seen_windows - x.seen_windows).slice(0, 8);
@@ -473,14 +523,12 @@ function buildAsset(a) {
   const cls = (port) => port === 443 ? 0 : port === 80 ? 1 : port === 53 ? 2 : 3;
   const cum = []; let acc = 0; for (const s of shares) { acc += s.share; cum.push([acc, cls(s.port)]); }
   items.forEach((it, k) => {
-    const P = panelPos(k, items.length);
-    const g = new THREE.Group(); g.position.copy(P); g.rotation.set(0.38, -0.5, 0.0);
-    const geo = new THREE.BoxGeometry(3.7, 0.34, 2.1);
-    const mat = new THREE.MeshLambertMaterial({ color: 0xd7e1ee, emissive: 0x1b2a3d, transparent: true, opacity: 0.96 });
-    const mesh = new THREE.Mesh(geo, mat); mesh.userData.k = k;
-    const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55 }));
-    g.add(mesh, edges); scene.add(g);
-    const arrow = new THREE.Mesh(new THREE.ConeGeometry(0.3, 0.8, 10), new THREE.MeshBasicMaterial({ color: 0xffffff })); scene.add(arrow);
+    const P = panelPos(k, items.length, it.others);
+    const g = new THREE.Group(); g.position.copy(P); g.rotation.set(0.28, -0.5, 0.0); g.scale.setScalar(layout.s);
+    const { mat, mesh, edges, detail, fade, led, glow } = buildCloud(it.others);     // 每個目的地一朵雲，「其他 N 個目的地」是三朵疊在一起（資料沒有設備類型，不能隨便換成路由器、伺服器之類）
+    mesh.userData.k = k;
+    g.add(edges, detail); scene.add(g);       // mesh 已經在 detail 裡
+    const arrow = new THREE.Mesh(new THREE.ConeGeometry(0.26, 0.7, 10), new THREE.MeshBasicMaterial({ color: 0x7defff, transparent: true, opacity: 0.85, blending: THREE.AdditiveBlending, depthWrite: false })); scene.add(arrow);      // 流向的箭頭：發光的青色小箭頭，跟邊線同一個風格
     const arrowTip = new THREE.Vector3();
     const rank = new Float32Array(N), phase = new Float32Array(N), speed = new Float32Array(N), jit = new Float32Array(N), ang = new Float32Array(N), sz = new Float32Array(N), col = new Float32Array(N * 3);
     for (let i = 0; i < N; i++) {
@@ -496,19 +544,19 @@ function buildAsset(a) {
     points.frustumCulled = false; scene.add(points);
     const tag = h('div', { class: 'tag3d' }); $('tags3d').append(tag);
     flows.push({ points, u, k, hump: 2.2 + (k % 3) * 1.1 * (k % 2 ? -1 : 1) });
-    panels.push({ it, d: it.d, others: it.others, group: g, mesh, mat, edges, arrow, arrowTip, P, tag, state: 'known' });
+    panels.push({ it, d: it.d, others: it.others, group: g, mesh, mat, edges, detail, fade, led, glow, arrow, arrowTip, P, tag, state: 'known' });
     pickables.push(mesh);
   });
   panels.hasOthers = hasOthers;
   placeSource(a);
 }
-const STYLE = {
-  known: { color: 0xd7e1ee, emissive: 0x1b2a3d, opacity: 0.96, edge: 0xffffff, vis: true },
-  new: { color: 0xea6a12, emissive: 0x7a2c00, opacity: 0.98, edge: 0xffc58a, vis: true },
-  idle: { color: 0x5b6d85, emissive: 0x0b1626, opacity: 0.5, edge: 0x8fa4bf, vis: true },
-  partial: { color: 0xb6c0cf, emissive: 0x151f2e, opacity: 0.55, edge: 0xc9d3e0, vis: true },
-  missing: { color: 0x778ba6, emissive: 0x000000, opacity: 0.0, edge: 0x778ba6, vis: true },
-  hidden: { color: 0x000000, emissive: 0x000000, opacity: 0.0, edge: 0x000000, vis: false },
+const STYLE = {      // 發光玻璃的配色。edge：邊線與光暈的顏色；led：雲底下的發光點（青＝連著、淡橘＝新目的地、黃＝這格資料不完整、灰＝這格沒連到）
+  known: { color: 0x7885e8, emissive: 0x2a2f8a, opacity: 0.9, edge: 0x7defff, led: 0x37f0ff, vis: true },
+  new: { color: 0xea6a12, emissive: 0x7a2c00, opacity: 0.95, edge: 0xffc58a, led: 0xffd9a8, vis: true },
+  idle: { color: 0x4a5a85, emissive: 0x101a3a, opacity: 0.5, edge: 0x6f86b3, led: 0x5b6d85, vis: true },
+  partial: { color: 0x6b78b8, emissive: 0x1b2250, opacity: 0.55, edge: 0xa9c4ff, led: 0xf5c451, vis: true },
+  missing: { color: 0x778ba6, emissive: 0x000000, opacity: 0.0, edge: 0x778ba6, led: 0x778ba6, vis: true },
+  hidden: { color: 0x000000, emissive: 0x000000, opacity: 0.0, edge: 0x000000, led: 0x000000, vis: false },
 };
 
 /* ------------------------------------------------------------------ 畫面：晶片、卡片、摘要、時間軸 */
@@ -523,10 +571,12 @@ function kindName(a) { return { device: 'LibreNMS 設備', confirmed: '已確認
 function legend() {
   const sw = (c, t) => h('div', { class: 'row' }, h('i', { style: 'background:' + c }), t);
   return [h('b', null, '圖例'),
-    sw('#ff9f43', '橘色面板：新目的地（過去沒出現過）'), sw('#d7e1ee', '白色面板：已知目的地'), sw('#5b6d85', '灰色面板：這一格沒有連到'),
+    sw('#ff9f43', '橘色雲：新目的地（過去沒出現過）'), sw('#7885e8', '藍紫色雲：已知目的地'), sw('#4a5a85', '暗藍灰色雲：這一格沒有連到'),
+    h('div', { class: 'row' }, h('i', { style: 'background:#37f0ff' }), '雲底下的發光點：青＝連著、黃＝這格資料不完整、灰＝沒連到'),
+    h('div', { class: 'row' }, h('i', { style: 'background:#e7eef8' }), '一體機螢幕＝來源主機，顏色是狀態（白正常、藍學習中、橘高於基線、紅警示）；三朵疊起來的雲＝前 8 名以外的目的地合計'),
     h('div', { class: 'row' }, h('i', { style: 'border:1px dashed #778ba6' }), '空框：來源缺資料，無法取得（不是零流量）'),
     h('div', { class: 'row' }, h('i', { style: 'background:#61a8ff' }), '443', h('i', { style: 'background:#f5c451;margin-left:6px' }), '80', h('i', { style: 'background:#b58cff;margin-left:6px' }), '53', h('i', { style: 'background:#e8eff9;margin-left:6px' }), '其他埠'),
-    h('p', null, '資料只記錄「有沒有連到」某目的地，光點的疏密是該時段總連線數平均分配到有連線的目的地。拖曳旋轉、滾輪縮放、點面板釘住資訊卡。')];
+    h('p', null, '資料只記錄「有沒有連到」某目的地，光點的疏密是該時段總連線數平均分配到有連線的目的地。拖曳旋轉、滾輪縮放、點雲釘住資訊卡。')];
 }
 function tags(list) { return h('div', { class: 'tags' }, list.map(([c, t]) => h('span', { class: 'tag ' + c }, t))); }
 function srcCard(a, i) {
@@ -699,7 +749,7 @@ function resize() {
   // 場景左右約需 40 個單位的寬度：直式螢幕加大視角（廣角）而不是把相機拉到看不清楚
   camera.fov = clamp(2 * Math.atan(Math.tan(16 * Math.PI / 180) * Math.max(1, 1.55 / asp)) * 180 / Math.PI, 32, 82); camera.updateProjectionMatrix();
   orbit.dist = asp >= 1.2 ? clamp(36 * (16 / 9) / Math.max(1.05, asp), 30, 54) : 40;
-  orbit.target.x = asp >= 1.2 ? 1.5 : 3; layout.v = asp >= 1.2 ? 1 : 1.9; relayout();
+  orbit.target.x = asp >= 1.2 ? 1.5 : 3; layout.v = asp >= 1.2 ? 1 : 1.9; layout.s = asp >= 1.2 ? 1 : 2; relayout();
   controls.maxDistance = Math.max(54, orbit.dist * 1.35); if (!S.touched) goHome(false);
   drawSpark(); if (S.asset) syncSheet();
 }
@@ -713,11 +763,12 @@ function frame(now) {
   const i = Math.round(S.i); if (i !== shownI || updateCards.force) { updateCards(); drawSpark(); }
   stepCamera(now);
   globe.quaternion.slerp(globeQ, 1 - Math.exp(-dt * 3.5)); globe.updateMatrixWorld(true);
+  srcGroup.getWorldQuaternion(tmpQ); srcDev.quaternion.copy(tmpQ).invert().multiply(DEV_Q);      // 抵銷球的旋轉：電腦站直、面向鏡頭
   srcGroup.getWorldPosition(tmp); const S0 = tmp.clone();
   const a = S.asset, ss = srcState(a, i), fs = panels.map((p) => p.f || { st: 'known', density: 0 });
   const sCol = { alert: 0xff6b6b, warn: 0xff9f43, normal: 0xe7eef8, learn: 0x61a8ff, missing: 0x778ba6 }[ss];
-  srcMesh.material.color.setHex(sCol); srcMesh.material.emissive.setHex(ss === 'alert' ? 0x5a1010 : ss === 'warn' ? 0x5a3410 : 0x0b1626); srcMesh.material.opacity = ss === 'missing' ? 0.12 : 0.95;
-  srcEdges.material.color.setHex(ss === 'missing' ? 0x778ba6 : 0xffffff); srcHalo.material.color.setHex(sCol);
+  srcMesh.material.color.setHex(sCol); srcMesh.material.emissive.setHex(ss === 'alert' ? 0x5a1010 : ss === 'warn' ? 0x5a3410 : 0x0b1626); srcMesh.material.opacity = ss === 'missing' ? 0.12 : 0.95; srcBodyMat.opacity = ss === 'missing' ? 0.2 : 0.94; srcKeyMat.opacity = srcBodyMat.opacity;
+  srcEdges.material.color.setHex(ss === 'missing' ? 0x778ba6 : 0x7defff); srcHalo.material.color.setHex(sCol);
   srcHalo.material.opacity = (ss === 'alert' ? 0.22 + 0.12 * Math.sin(clock * 5) : ss === 'warn' ? 0.16 : 0.07); srcRing.material.color.setHex(sCol);
   const rs = 1 + (ss === 'alert' ? 0.25 * (0.5 + 0.5 * Math.sin(clock * 4)) : 0); srcRing.scale.set(rs, rs, 1);
   const edgeEls = [];
@@ -729,15 +780,20 @@ function frame(now) {
     f.u.uTintMix.value = st.st === 'new' ? 0.92 : 0; f.u.uDim.value = st.st === 'partial' ? 0.55 : 1;
     const bytesPer = a.windows[i].conn ? a.windows[i].bytes / a.windows[i].conn : 0; f.u.uSize.value = 2.8 + clamp(Math.log10(Math.max(1000, bytesPer)) - 3, 0, 4) * 0.5;
     p.state = st.st; p.group.visible = sty.vis;
-    p.mat.color.setHex(sty.color); p.mat.emissive.setHex(sty.emissive); p.mat.opacity = S.hover === idx ? Math.min(1, sty.opacity + 0.2) : sty.opacity; p.mesh.visible = st.st !== 'missing';
-    p.edges.material.color.setHex(sty.edge); p.edges.material.opacity = st.st === 'missing' ? 0.55 : 0.85; p.edges.material.transparent = true;
+    const op = S.hover === idx ? Math.min(1, sty.opacity + 0.2) : sty.opacity;
+    p.mat.color.setHex(sty.color); p.mat.emissive.setHex(sty.emissive); p.mat.opacity = op; p.mesh.visible = p.detail.visible = st.st !== 'missing';       // 缺資料只剩空框：機殼與前面板細節都不畫
+    p.fade.forEach((m) => { m.opacity = op; }); p.led.color.setHex(sty.led);
+    p.glow.material.color.setHex(sty.edge); p.glow.material.opacity = (st.st === 'new' ? 0.55 : 0.3) * op;       // 光暈：新目的地最亮，淡出的狀態跟著淡
+    p.edges.visible = st.st === 'missing';       // 外框只在缺資料時畫成空框，平常用光暈與玻璃本身表達
+    p.edges.material.color.setHex(sty.edge); p.edges.material.opacity = st.st === 'missing' ? 0.55 : 0.9; p.edges.material.transparent = true;
     p.arrow.visible = sty.vis && st.st !== 'missing' && st.density > 0.02;
     if (p.arrow.visible) { const end = new THREE.Vector3(), pre = new THREE.Vector3(); const bz = (t, o) => { const u = 1 - t; return o.copy(S0).multiplyScalar(u * u * u).addScaledVector(f.u.uB.value, 3 * u * u * t).addScaledVector(f.u.uC.value, 3 * u * t * t).addScaledVector(P, t * t * t); };
-      bz(0.93, pre); bz(1, end); const dir = end.clone().sub(pre).normalize(); p.arrow.position.copy(P).addScaledVector(dir, -1.9).addScaledVector(new THREE.Vector3(0, 0.1, 0), 1); p.arrow.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir); }
-    const sp = project(P.clone().add(new THREE.Vector3(0, 1.4, 0)));
+      bz(0.93, pre); bz(1, end); const dir = end.clone().sub(pre).normalize(); p.arrow.position.copy(P).addScaledVector(dir, -2.7 * layout.s).addScaledVector(new THREE.Vector3(0, 0.1, 0), 1); p.arrow.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir); }
+    const sp = project(P);       // 標籤置中在自己的那朵雲上；放在上方會壓到上一朵、讓人認錯目的地
     p.tag.style.display = sty.vis && sp[2] ? '' : 'none';
-    if (sty.vis) { p.tag.style.transform = 'translate(' + sp[0].toFixed(1) + 'px,' + sp[1].toFixed(1) + 'px) translate(-50%,-100%)'; p.tag.style.left = 0; p.tag.style.top = 0;
-      p.tag.className = 'tag3d' + (st.st === 'new' ? ' hot' : '') + (S.hover === idx || S.pinned === idx ? ' hl' : ''); const label = p.others ? p.d.ip : p.d.ip + ' · ' + (st.here ? '連線中' : '—'); if (p.tag.textContent !== label) p.tag.textContent = label; }
+    if (sty.vis) { p.tag.style.transform = 'translate(' + sp[0].toFixed(1) + 'px,' + sp[1].toFixed(1) + 'px) translate(-50%,-50%)'; p.tag.style.left = 0; p.tag.style.top = 0;
+      // 窄螢幕只寫 IP（標籤比雲還寬會蓋住圖示）；連線與否看發光點與點選後的詳情
+      p.tag.className = 'tag3d' + (st.st === 'new' ? ' hot' : '') + (S.hover === idx || S.pinned === idx ? ' hl' : ''); const label = p.others || narrow() ? p.d.ip : p.d.ip + ' · ' + (st.here ? '連線中' : '—'); if (p.tag.textContent !== label) p.tag.textContent = label; }
   });
   // 資訊卡的引線：來源卡上緣到來源節點、目的地卡左緣到面板
   const stRect = stage.getBoundingClientRect(), svg = $('leaders'); const need = 1 + cardOrder.length;
@@ -746,7 +802,7 @@ function frame(now) {
   const sc = $('cardSrc').firstElementChild;
   if (sc && stageRect.w >= 760) { const r = sc.getBoundingClientRect(), pt = project(srcGroup.getWorldPosition(new THREE.Vector3())); setLine(leaderEls[0], r.left - stRect.left + r.width * 0.5, r.top - stRect.top, pt[0], pt[1] + 14, pt[2]); } else leaderEls[0].style.display = 'none';
   const dc = [...$('cardsDst').children];
-  cardOrder.forEach((k, n) => { const el = dc[n], l = leaderEls[1 + n]; if (!el || stageRect.w < 760) { l.style.display = 'none'; return; } const r = el.getBoundingClientRect(), pt = project(panels[k].P.clone().add(new THREE.Vector3(1.9, 0.2, 0)));
+  cardOrder.forEach((k, n) => { const el = dc[n], l = leaderEls[1 + n]; if (!el || stageRect.w < 760) { l.style.display = 'none'; return; } const r = el.getBoundingClientRect(), pt = project(panels[k].P.clone().add(new THREE.Vector3(2.4 * layout.s, 0.2, 0)));
     setLine(l, r.left - stRect.left, r.top - stRect.top + Math.min(26, r.height / 2), pt[0], pt[1], pt[2] && panels[k].state !== 'hidden'); });
   renderer.render(scene, camera);
 }

@@ -5,6 +5,9 @@
 """
 import base64
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -70,6 +73,51 @@ class BehaviorVizPageTests(unittest.TestCase):
         self.assertIsNone(re.search(r"@import|<link\b", src), "樣式不能引用外部檔案")
         # 例外：SVG 命名空間（createElementNS 用，不是網路位址）
         self.assertIsNone(re.search(r"""['"`]https?://(?!www\.w3\.org/2000/svg)""", script(src)), "腳本裡不能寫死任何外部網址")
+
+    def test_inline_script_is_syntactically_valid(self):
+        # 其他靜態檢查都是字串比對，行尾多一個註解就能把同一行後面的程式吃掉而全部照過（做換圖示時真的發生過）
+        node = shutil.which("node")
+        if not node:
+            self.skipTest("這台沒有 node，略過語法檢查")
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d) / "page.js"
+            p.write_text(script(text(PAGE)), encoding="utf-8")
+            r = subprocess.run([node, "--check", str(p)], capture_output=True, text=True)
+        self.assertEqual(r.returncode, 0, r.stderr)
+
+    def test_labels_sit_on_the_device_they_name(self):
+        src = text(PAGE)
+        js = script(src)
+        # 標籤原本錨在面板上方 1.4 單位，會壓在上一台、最上面那台的標籤還被裁出畫面，讓人把卡片的 IP 對到錯的設備
+        self.assertIn("const sp = project(P);", js, "標籤的錨點是自己設備的中心")
+        self.assertIsNone(re.search(r"project\(P\.clone\(\)\.add\(", js), "不能再把錨點往上偏")
+        self.assertNotIn("translate(-50%,-100%)", src)
+        self.assertNotIn("translate(-50%, -100%)", src)
+        self.assertEqual(js.count("translate(-50%,-50%)"), 1)
+        self.assertRegex(src, r"\.tag3d \{[^}]*translate\(-50%, -50%\)")
+
+    def test_devices_are_built_from_primitives_and_keep_the_state_behaviour(self):
+        js = script(text(PAGE))
+        self.assertIsNone(re.search(r"GLTFLoader|OBJLoader|TextureLoader|ImageLoader|FileLoader|new\s+Image\s*\(", js), "設備圖示全用內建幾何與 canvas 畫的光暈拼出來，不載入模型或圖片")
+        self.assertIn("function buildCloud(cluster)", js)
+        self.assertNotIn("buildServer", js, "目的地只畫成雲：資料沒有設備類型，不能憑空換成伺服器、路由器之類")
+        self.assertIn("buildCloud(it.others)", js, "每個目的地一朵雲，「其他 N 個目的地」是一團（和單一目的地分得出來）")
+        self.assertIn("if (cluster) {", js)
+        self.assertIn("panelPos(k, items.length, it.others)", js, "雲比伺服器大，要比照往下挪，不然會壓到上一台")
+        # 來源筆電不跟著球面法線倒下去：每幀抵銷球的旋轉
+        self.assertRegex(js, r"srcDev\.quaternion\.copy\(tmpQ\)\.invert\(\)\.multiply\(DEV_Q\)")
+        # 整台筆電都能點（看不見的命中盒），缺資料的設備連細節都不畫、也點不到；雲的外框只在缺資料時畫成空框
+        self.assertIn("pickables.push(srcHit)", js)
+        self.assertIn("p.mesh.visible = p.detail.visible = st.st !== 'missing'", js)
+        self.assertIn("p.edges.visible = st.st === 'missing'", js)
+        self.assertIn("srcBodyMat.opacity = ss === 'missing'", js, "來源缺資料時筆電本體也要淡出，不能只剩螢幕變淡")
+        self.assertIn("srcKeyMat.opacity = srcBodyMat.opacity", js)
+        self.assertRegex(js, r"p\.glow\.material\.color\.setHex\(sty\.edge\)", "光暈的顏色跟著狀態")
+        for state in ("known", "new", "idle", "partial", "missing", "hidden"):
+            self.assertRegex(js, state + r": \{[^}]*led: 0x", "每種狀態都要有指示燈顏色：" + state)
+        # 直式螢幕把伺服器放大，窄螢幕的標籤只寫 IP，否則標籤比圖示還寬會把它蓋住
+        self.assertRegex(js, r"layout\.s = asp >= 1\.2 \? 1 : 2")
+        self.assertIn("p.others || narrow() ? p.d.ip", js)
 
     def test_artifact_page_contract(self):
         src = text(PAGE)
