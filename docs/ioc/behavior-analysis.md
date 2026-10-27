@@ -122,6 +122,31 @@ sudo mysql librenms -e "SELECT l.observed_asset_id, l.target_asset_id, l.confirm
 sudo mysql librenms -e "SELECT asset_id, address, evidence_kind, last_seen_at FROM ioc_behavior_addresses WHERE evidence_kind='admin_confirmed';"
 ```
 
+## 3D 連線視圖與匯出
+
+`tools/behavior-viz/behavior-3d.html` 是一個 three.js 的單檔頁面：被選的監控主機在地球上的站點位置，成串的光點流向右側一排目的地面板（橘色＝新目的地、白色＝已知、灰色＝這一格沒連到、空框＝來源缺資料），節點旁有帶引線的資訊卡，底下是 24 小時（288 格）的時間軸可拖曳或播放。畫面規則沿用本專案的鐵則：**缺資料顯示「無法取得」，不畫成零流量**；partial 的格子變暗並標「不完整」。
+
+- **它是 Artifact 用的頁面，不部署到 VM**（`install.sh`／`update.sh` 不會安裝它，測試會擋）：three.js 從 cdnjs 載入，不符合入口「不引用外部 CDN」的規則。內嵌的只有合成的範例資料（標「範例資料」）；Artifact 存在 claude.ai，**不要把真實的內網資料放進去發布**。
+- **看自己的資料：** 頁首「載入 JSON」在瀏覽器本機讀檔（`FileReader`）：不上傳、不存起來（沒有 fetch／localStorage）、上限 8 MB、逐欄驗證、文字一律當純文字顯示（去掉雙向控制字元、截長）；格式錯誤會拒絕並保留目前的畫面；**沒有遮罩的資料會在頁首與提示標紅，請勿截圖或分享**。
+- **資料只記錄「有沒有連到」：** 資料表沒有「哪個目的地走哪個埠」的配對，也沒有目的地的地理資料，所以光點的疏密是該區間的總連線數平均分配給有連線的目的地（圖例有寫），埠的顏色是主機整體的埠比例；目的地不上地球，只有來源站點在地球上（座標取 LibreNMS 設備的位置，0,0 視為未設定，沒有就放在台灣）。
+- **手機寬度：** 資訊卡與圖例收起，只留場景、狀態列與時間軸，細節看「連線摘要」；WebGL 不能用時整頁退成文字版摘要。
+
+### 匯出（VM 上，唯讀）
+
+```bash
+sudo -u librenms php /opt/oracle-mon-librenms/tools/export-behavior-viz.php --hours 24 > behavior-viz.json
+```
+
+選項：`--hours 1–168`（預設 24）、`--assets 21,29`（只匯出這些主機，依給的順序）、`--top 8`（每台最多幾個目的地，總數照實記在 `destinations_total`）、`--max-assets 12`、`--no-mask`。不是網頁端點、不走 sudo 腳本、不進 `install.sh`，只給 VM 管理員在終端機手動執行；需要先跑過 `update.sh`（匯出邏輯在 `includes/ioc/BehaviorVizExport.php`）。整個匯出包在 `START TRANSACTION READ ONLY` 裡，只有 SELECT，出錯會收掉交易。
+
+- **預設遮罩：** 主機位址末段改 `x`、目的地併成 `/24`（IPv6 是 `/48`）、主機名改「主機 A／B」、內部編號改流水號、站點座標只留一位小數；**代號對照（主機 A ＝ 哪一台）只印在終端機（stderr），不在 JSON 裡**。`--no-mask` 才輸出真實名稱與位址，請只在內部使用。遮罩只是降低外流風險，不是匿名化：站點名稱、時間與流量形狀仍在。
+- **缺的格子是 `missing`：** 每台主機固定 `hours × 12` 格，資料表裡沒有的格子與缺資料的格子都是 `missing` 且不帶數字、不列目的地。
+- **「新目的地」：** 目的地在 `ioc_behavior_known` 的第一次出現時間落在匯出期間內才算（只有完整區間會登錄成已知，沒有已知紀錄的不宣稱是新的）。
+- **基線：** 只匯出一個代表值：目前版本、離峰時段桶（週末，或小時落在上班時段之外）、樣本數夠用（≥ 6）的各桶 P95 的中位數；畫面上的「基線 P95」就是它，不是偵測用的各時段門檻。
+- **格式 `ioc-behavior-viz/1`：** `{schema, masked, generated_at, window_minutes, hours, assets:[{id, label, address, site, geo?, kind(device|confirmed|observed), mode(learning|monitoring), baseline_version, schedule:{timezone,workdays,start,end}, baseline:{p95_conn,p95_bytes}|null, ports:[{port,share}], windows:[{t,conn,bytes,dest_n,port_n,q}], destinations:[{ip,first_seen,last_seen,seen_windows,w:[區間索引],new}], destinations_total, alerts:[{t,detector,severity,summary}]}]}`。時間都是 UTC 的 ISO 8601。
+
+檢查：`tests/php/viz_export_test.php`（遮罩與選項的單元測試）、`tests/php/viz_export_dbtest.php`（資料庫層：形狀、遮罩後找不到任何真實名稱／位址、唯讀、出錯收交易、權限）、`tests/test_behavior_viz.py`（頁面不 innerHTML、不 fetch、不存 localStorage、只載入釘版本的 cdnjs、陸地遮罩合理、匯出腳本只有 SELECT 且不部署）。要用匯出的格式端到端試頁面：跑資料庫層測試時設 `IOC_VIZ_EXPORT_FILE=/path/to/file.json`，測試會把遮罩後的 24 小時匯出寫成檔案，再用頁首「載入 JSON」打開。
+
 ## 已知限制（2026-10-26 讀程式碼確認；標「待 VM 查證」的尚未實測）
 
 - **已確認主機只靠 IP 維繫**：沒有 MAC／DHCP 證據，位址被 DHCP 租給別台機器時，新機器的流量會算進原本那台（見「已確認主機」的 `reappeared` 與「移除」）。

@@ -1,0 +1,717 @@
+<title>設備連線行為</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<!--
+  Artifact 用的單檔頁面（引用 cdnjs 的 three.js，不由 install.sh 部署到 VM）。內嵌的只有合成的範例資料；
+  真實資料用頁首「載入 JSON」在瀏覽器本機讀入（tools/export-behavior-viz.php 產生），不上傳、不存起來。
+  資料格式與遮罩規則見 docs/ioc/behavior-analysis.md「3D 連線視圖與匯出」。陸地點陣用 build-land-mask.py 產生。
+-->
+<style>
+:root {
+  /* 版面：頂列（標題、主機晶片、動作）／舞台（WebGL 場景、兩側資訊卡、引線）／底部時間軸。單一深色外觀，與入口同一組色票。 */
+  --bg: #050b14; --panel: #0f1c2e; --panel2: #132238; --line: #203551; --text: #e7eef8; --muted: #8fa4bf;
+  --green: #36d399; --yellow: #f5c451; --orange: #ff9f43; --red: #ff6b6b; --blue: #61a8ff; --gray: #778ba6; --violet: #b58cff;
+  --card: rgba(9, 19, 33, .88);
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body { margin: 0; background: var(--bg); color: var(--text); overflow: hidden;
+  font: 13px/1.5 "Noto Sans TC", "Microsoft JhengHei", "PingFang TC", system-ui, sans-serif; }
+button, select, input { font: inherit; color: inherit; }
+.app { height: 100%; display: flex; flex-direction: column; min-height: 0; }
+.bar { display: flex; flex-wrap: wrap; align-items: center; gap: 10px 14px; padding-block: 10px;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  border-bottom: 1px solid var(--line); background: linear-gradient(180deg, #0a1626, #07111f); }
+.brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
+h1 { margin: 0; font-size: 16px; font-weight: 700; letter-spacing: .02em; white-space: nowrap; }
+.badge { padding: 1px 9px; border: 1px solid var(--yellow); border-radius: 999px; color: var(--yellow); font-size: 11px; white-space: nowrap; }
+.badge.real { border-color: var(--green); color: var(--green); }
+.badge.warn { border-color: var(--red); color: var(--red); }
+.chips { display: flex; gap: 6px; flex: 1 1 320px; min-width: 0; overflow-x: auto; padding-block: 2px; scrollbar-width: thin; }
+.chip { flex: none; display: inline-flex; align-items: center; gap: 7px; padding: 4px 11px; border: 1px solid var(--line);
+  border-radius: 999px; background: var(--panel); cursor: pointer; white-space: nowrap; }
+.chip:hover { border-color: var(--blue); }
+.chip[aria-pressed="true"] { border-color: var(--blue); background: #17304f; }
+.chip .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--gray); }
+.chip .dot.good { background: var(--green); } .chip .dot.warn { background: var(--orange); } .chip .dot.bad { background: var(--red); box-shadow: 0 0 8px var(--red); }
+.chip .dot.learn { background: var(--blue); } .chip .dot.none { background: transparent; border: 1px solid var(--gray); }
+.acts { display: flex; gap: 6px; flex-wrap: wrap; }
+.btn { padding: 4px 11px; border: 1px solid var(--line); border-radius: 8px; background: #0c1a2b; cursor: pointer; }
+.btn:hover { border-color: var(--blue); }
+.btn[aria-pressed="true"] { background: #17304f; border-color: var(--blue); }
+.btn.primary { background: #1b4a86; border-color: var(--blue); color: #fff; }
+:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+
+.stage { position: relative; flex: 1 1 auto; min-height: 0; overflow: hidden; background: var(--bg); touch-action: none; }
+#gl { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: grab; }
+#gl:active { cursor: grabbing; }
+.leaders { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: visible; }
+.leaders line { stroke: var(--red); stroke-width: 1.4; opacity: .9; }
+.tags3d { position: absolute; inset: 0; pointer-events: none; overflow: hidden; }
+.tag3d { position: absolute; left: 0; top: 0; transform: translate(-50%, -100%); padding: 0 7px; border: 1px solid var(--line);
+  border-radius: 6px; background: rgba(9, 19, 33, .78); font: 11px/1.6 ui-monospace, "Cascadia Mono", Consolas, monospace; white-space: nowrap; }
+.tag3d.hot { border-color: var(--orange); color: var(--orange); }
+.tag3d.src { border-color: var(--red); color: #ffd0d0; }
+.tag3d.hl { border-color: var(--blue); }
+
+.cards { position: absolute; display: flex; flex-direction: column; gap: 10px; pointer-events: none; }
+.cards.left { left: max(16px, env(safe-area-inset-left, 0px)); bottom: 14px; width: 258px; }
+.cards.right { right: max(16px, env(safe-area-inset-right, 0px)); top: 12px; bottom: 14px; width: 244px; justify-content: space-between; }
+.card { pointer-events: auto; border: 1px solid #355070; border-radius: 4px; background: var(--card); padding: 9px 11px 8px; font-size: 12px;
+  backdrop-filter: blur(3px); }
+.card.hot { border-color: var(--orange); }
+.card.src { border-color: var(--red); }
+.card.hl { box-shadow: 0 0 0 1px var(--blue); }
+.card h3 { margin: 0 0 4px; font-size: 13px; font-weight: 700; word-break: break-all; }
+.card dl { margin: 0; display: grid; grid-template-columns: max-content 1fr; gap: 1px 10px; }
+.card dt { color: var(--muted); } .card dd { margin: 0; min-width: 0; word-break: break-all; font-variant-numeric: tabular-nums; }
+.tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.tag { padding: 0 7px; border-radius: 3px; background: #14304f; color: #cfe1f7; font-size: 11px; }
+.tag.red { background: #5b1f26; color: #ffd0d0; } .tag.orange { background: #5a3410; color: #ffd6a8; }
+.tag.green { background: #0f3b2e; color: #b9f1da; } .tag.gray { background: #26364a; color: #c2cfdf; } .tag.blue { background: #14304f; }
+
+.legend { position: absolute; left: max(16px, env(safe-area-inset-left, 0px)); top: 12px; max-width: 300px; padding: 8px 11px;
+  border: 1px solid var(--line); border-radius: 8px; background: var(--card); font-size: 11.5px; color: var(--muted); }
+.legend b { color: var(--text); font-weight: 600; }
+.legend .row { display: flex; align-items: center; gap: 7px; margin-top: 3px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; flex: none; }
+.legend p { margin: 6px 0 0; line-height: 1.45; }
+.notice { position: absolute; left: 50%; top: 12px; transform: translateX(-50%); max-width: min(560px, calc(100% - 32px)); padding: 7px 14px;
+  border: 1px solid var(--red); border-radius: 8px; background: #2b1217; color: #ffd0d0; font-size: 12px; }
+.notice.ok { border-color: var(--green); background: #0d2a21; color: #b9f1da; }
+.status { position: absolute; left: 50%; bottom: 12px; transform: translateX(-50%); padding: 3px 12px; border: 1px solid var(--line);
+  border-radius: 999px; background: var(--card); font-size: 12px; white-space: nowrap; max-width: calc(100% - 32px); overflow: hidden; text-overflow: ellipsis; }
+.status.bad { border-color: var(--red); color: #ffd0d0; }
+.status.mid { border-color: var(--yellow); color: #ffe9b0; }
+
+.summary { position: absolute; inset: 0; overflow: auto; padding: 16px max(16px, env(safe-area-inset-right, 0px)) 16px max(16px, env(safe-area-inset-left, 0px));
+  background: rgba(5, 11, 20, .96); }
+.summary h2 { margin: 0 0 4px; font-size: 15px; }
+.summary p { margin: 0 0 10px; color: var(--muted); }
+.tablewrap { overflow-x: auto; }
+table { border-collapse: collapse; min-width: 560px; width: 100%; }
+th, td { padding: 5px 10px; border-bottom: 1px solid var(--line); text-align: left; font-variant-numeric: tabular-nums; }
+th { color: var(--muted); font-weight: 500; white-space: nowrap; }
+
+.timeline { display: flex; align-items: center; gap: 12px; padding-block: 8px; flex-wrap: wrap;
+  padding-left: max(16px, env(safe-area-inset-left, 0px)); padding-right: max(16px, env(safe-area-inset-right, 0px));
+  border-top: 1px solid var(--line); background: linear-gradient(0deg, #0a1626, #07111f); }
+.timeline .ctl { display: flex; align-items: center; gap: 8px; }
+.timeline .track { position: relative; flex: 1 1 360px; min-width: 220px; height: 48px; }
+#spark { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+#scrub { position: absolute; left: 0; right: 0; top: 0; bottom: 0; width: 100%; margin: 0; opacity: 0; cursor: pointer; }
+.track:focus-within { outline: 2px solid var(--blue); outline-offset: 2px; border-radius: 4px; }
+.timeline .now { flex: 1 1 100%; color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.timeline .now b { color: var(--text); font-weight: 600; }
+select { padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: #0c1a2b; }
+.sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+
+@media (max-width: 760px) {
+  .cards.right, .cards.left, .legend { display: none; }      /* 手機：場景＋狀態列＋時間軸，細節看「連線摘要」 */
+  .tag3d { font-size: 10px; padding: 0 4px; }
+  .timeline .now { font-size: 11px; }
+  h1 { font-size: 15px; }
+}
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto; } }
+</style>
+
+<div class="app">
+  <header class="bar">
+    <div class="brand"><h1>設備連線行為</h1><span class="badge" id="srcBadge">範例資料</span></div>
+    <div class="chips" id="chips" role="group" aria-label="監控主機"></div>
+    <div class="acts">
+      <button class="btn" id="btnLoad" type="button">載入 JSON</button>
+      <button class="btn" id="btnSummary" type="button" aria-pressed="false">連線摘要</button>
+      <button class="btn" id="btnLegend" type="button" aria-pressed="true">圖例</button>
+      <input id="file" type="file" accept=".json,application/json" hidden aria-label="選擇連線行為 JSON 檔">
+    </div>
+  </header>
+  <main class="stage" id="stage">
+    <canvas id="gl" role="img" aria-label="監控主機對外連線的 3D 示意圖：來源主機、成串的連線光點與目的地面板。文字內容請看「連線摘要」。"></canvas>
+    <svg class="leaders" id="leaders" aria-hidden="true">
+      <defs><marker id="arr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto"><path d="M0,0 L10,5 L0,10 z" fill="#ff6b6b"/></marker></defs>
+    </svg>
+    <div class="tags3d" id="tags3d" aria-hidden="true"></div>
+    <div class="legend" id="legend"></div>
+    <div class="cards left" id="cardSrc"></div>
+    <div class="cards right" id="cardsDst"></div>
+    <div class="notice" id="notice" role="status" hidden></div>
+    <div class="status" id="status" role="status"></div>
+    <section class="summary" id="summary" hidden aria-label="連線摘要"></section>
+  </main>
+  <footer class="timeline">
+    <div class="ctl">
+      <button class="btn primary" id="btnPlay" type="button" aria-label="播放">▶ 播放</button>
+      <label class="sr" for="speed">播放速度</label>
+      <select id="speed"><option value="1">5 分鐘／秒</option><option value="4">20 分鐘／秒</option><option value="12" selected>1 小時／秒</option><option value="36">3 小時／秒</option></select>
+    </div>
+    <div class="track"><canvas id="spark" aria-hidden="true"></canvas><input id="scrub" type="range" min="0" max="287" step="1" value="0" aria-label="時間（五分鐘區間）"></div>
+    <div class="now" id="now"></div>
+  </footer>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script>
+(() => {
+'use strict';
+const LAND_MASK = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH/4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADf//8AAf///wAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB////D//////n/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/gf/x////////wAAAAAbgAAB4AAAAAAPwAAAAAAAAAAAAAAAAAAAAAAAAAAAf//8A///////+AAAAB/ngAAAAAAAAAAH8AAAAAAAAAAAAAAAAAAAAAAAAcH3Hv/5////////8AAAAA/gAAAAAAAAAAAAD4AAAAAAAAAAAAAAAAAAAAAAcIAAQP/AH///////+AAAAAPCAAAAAAAAAAAAAYAAAAAAAAAAAAAAAAAAAAADwDAc+f+AP///////4AAAAAAAAAAAAAB4AAAAB/8AAAAAAAAAAAAAAAAAAAAAH9wc374AAAf/////8AAAAAAAAAAAAH4AAAA////AAAB/gAAAAAAAAAAAAAAAAwAAA/QAAAH/////8AAAAAAAAAAAAOAAAAP///wAAAAAAAAAAAAAAAAAAAAP8AYe+c3AAAD/////4AAAAAAAAAAAA4AAAH////++HgAOAAAAAAAAAAAAAAAfv+4+w/4gAAB/////wAAAAAAAAAAADwAHgH///////4AfgAAAAAgHwAAAAAAPf/4O4//9AAB/////wAAAAAAAAAAADwAPb////////4m//gAAAAAAAf+AAAAAA/+A8f//4AB////8gAAAAAAA/gAAAAAfv/////////////8AAAAAB///+H//H/+PeDwf+AA3////AAAAAAA//4AAAA8fv///////////////P8f/gAAAAAAAA/H9wMH4D//wAAAP//////8AAAP/84AYIAAAAAAAAAAAAAAAAAD/8AAAAAAAAAAAAIHmAP/AAAH///////wAAABzAAAAYAAAAAAAAAAAAAAAAABH7AAAAAAAAAAAAAf8AD/gAAf///////gAAGBwAAAAgAAAAAAAAAAAAAAAAAgPAAAAAAAAAAAAAF/8Dn/gAP//gD////ADgB8AAAAAAAAAAAAAAAAAAAAAAAAgEf///////////zw7/AAP/gAAP4AAAB/4/+f//////////////////////8AMAf//////////+DIA/gAH/gAAAAAAAH/z/////////////////////////+AAH///////////8AwgOAAD+AAAAAAAA//H/////////////////////////6AAP///////////wAA/AAAB+AAAAAAAB/+H//////////////////////nP+AAAH//z////////wAA/wAAAOAAAAAAAB//D/////////////////////+A/4AAAA/zAD///////gAA/4wAAAAAAAAAAB//Ab///////////////////+eDgAAAAABwAA///////4AA/94AAAAAAAAAYA5+A///////////////////4AAHAAAAAADcAAD//////4AAf/8AAAAAAAAA8AC+C///////////////////wAAfgAAAAAMAAAA///////wAf/8AAAAAAAAA4AO8H///////////////////AAA/gAAAABgAAAA///////8A///AAAAAAAAA8ANwH//////////////////8AAB/AAAAAEAAAAAf///////z///4AAAAAAAHOAEDv//////////////////+AAA+AAAAAAAAAABH///////x///8AAAAAAAHHAf/////////////////////6AA8AAAAAAAAAAAD///////x///8AAAAAAAGPz//////////////////////6AAwAAAAAAAAAAAD///////9///6AAAAAAAAPj//////////////////////6AAQAAAAAAAAAAAC///////////EAAAAAAAAYf//////////////////////7AAAAAAAAAAAAAABv////////+MNAAAAAAAAD///////////////////////zAAAAAAAAAAAAAAAH////////7gfgAAAAAAAf///////////////////////yAAAAAAAAAAAAAAAL/////////gCgAAAAAAAH///////////////////////iAAAAAAAAAAAAAAAP/////////pAAAAAAAAAD/////uP/x//////////////DAAAAAAAAAAAAAAAP/////////+AAAAAAAAAB//v//Gf/B/////////////+AAAAAAAAAAAAAAAAP////////8wAAAAAAAAAB//H/+AP+P/////////////8CAAAAAAAAAAAAAAAP////////wAAAAAAAAADj/jz/8AD/H/////////////4HgAAAAAAAAAAAAAAP////////gAAAAAAAAAH/4Bw/8AA/B////////////+APAAAAAAAAAAAAAAAP////////gAAAAAAAAAH/wA8f8Ph/g////////////8AAAAAAAAAAAAAAAAAP///////8AAAAAAAAAAH/gMHfJ///x///////////v4AMAAAAAAAAAAAAAAAP///////8AAAAAAAAAAH/AMCOP///h//////////+JwAMAAAAAAAAAAAAAAAH///////4AAAAAAAAAAH/AAAHH///g//////////8BwAIAAAAAAAAAAAAAAAH///////wAAAAAAAAAAH+AAYGH///w//////////+w4A4AAAAAAAAAAAAAAAD///////wAAAAAAAAAAAgf+ACBs//////////////g4D4AAAAAAAAAAAAAAAB///////wAAAAAAAAAAAj/+AAAA//////////////AYf4AAAAAAAAAAAAAAAA///////gAAAAAAAAAAB//8AAAA//////////////Ah2AAAAAAAAAAAAAAAAAP/////+AAAAAAAAAAAD//+AAAB//////////////gDwAAAAAAAAAAAAAAAAAH/////8AAAAAAAAAAAH///4GAB//////////////gDAAAAAAAAAAAAAAAAAAG/////4AAAAAAAAAAAP///8P4h//////////////wCAAAAAAAAAAAAAAAAAACf////4AAAAAAAAAAAP////v////////////////gAAAAAAAAAAAAAAAAAAABP//hgYAAAAAAAAAAAP//////3//P///////////wAAAAAAAAAAAAAAAAAAAAv//AAYAAAAAAAAAAAf//////9//H///////////wAAAAAAAAAAAAAAAAAAAB3/+AAcAAAAAAAAAAB///////4//h///////////gAAAAAAAAAAAAAAAAAAAAR/+AANAAAAAAAAAAD///////8//wH//////////AAAAAAAAAAAAAAAAAAAAAJ/+AAEAAAAAAAAAAH///////+f/0B/////////+AAAAAAAAAAAAAAAAAAAAAI/8AAAAAAAAAAAAAH///////+f/44Af///////+QAAAAAAAAAAAAAAAAAAAAAf8AAAAAAAAAAAAAP////////H//+AP///////4gAAAAAAAAAAAAAAAAAAAAAP8AAuAAAAAAAAAAP////////H///AD///v///ggAAAAAAAAAAAAAAAAAAAAAH+AABgAAAAAAAAAf////////n//+AD//4P//YAAAAAAAAAAAAAAAAAAAAAAAP+A4AYAAAAAAAAAP////////j//+AAf/4H/+AAAAAAAAAAAAAAAAgAAAAAAAH/B4ABwAAAAAAAAP////////h//8AAf/gD/8YAAAAAAAAAAAAAAAAAAAAAAAD/nwAD9AAAAAAAAP////////x//4AAf/AD/8QAAAAAAAAAAAAAAAAAAAAAAAAf/wAAAAAAAAAAAP////////4//gAAf+AD/+AAwAAAAAAAAAAAAAAAAAAAAAAH/wAAAAAAAAAAAf////////4f+AAAf8AD//AAwAAAAAAAAAAAAAAAAAAAAAAAH/AAAAAAAAAAAf////////8f8AAAPwAAP/gAwAAAAAAAAAAAAAAAAAAAAAAAD/gAAAAAAAAAAf////////+fgAAAPwAAP/gAwAAAAAAAAAAAAAAAAAAAAAAAA/AAAAAAAAAAAf/////////eAAAAHwAAP/gAMAAAAAAAAAAAAAAAAAAAAAAAAHgAAAAAAAAAAf/////////gAAAAHwAAM/gACAAAAAAAAAAAAAAAAAAAAAAAADABAAAAAAAAAP/////////gYAAADwAAEfgAJAAAAAAAAAAAAAAAAAAAAAAAADgPfOAAAAAAAH/////////34AAADwAAIOABAAAAAAAAAAAAAAAAAAAAAAAAAAyPf+AAAAAAAD//////////4AAADoAAIEACBAAAAAAAAAAAAAAAAAAAAAAAAA8///AAAAAAAB//////////wAAABIAAMAAAFAAAAAAAAAAAAAAAAAAAAAAAAAE///gAAAAAAB//////////wAAAAMAAEAAALgAAAAAAAAAAAAAAAAAAAAAAAAAf//wAAAAAAAf/////////gAAAAMAADAAMCAAAAAAAAAAAAAAAAAAAAAAAAAA////gAAAAAAP/B///////gAAAAAAADgAOAAAAAAAAAAAAAAAAAAAAAAAAAAAf///wAAAAAACAA///////AAAAAAAAxgA+AAAAAAAAAAAAAAAAAAAAAAAAAAAf///4AAAAAAAAAD/////+AAAAAAAAZgB4AAAAAAAAAAAAAAAAAAAAAAAAAAB////4AAAAAAAAAD/////8AAAAAAAAMwH8AAAAAAAAAAAAAAAAAAAAAAAAAAB////8AAAAAAAAAH/////4AAAAAAAAHQf8AIAAAAAAAAAAAAAAAAAAAAAAAAD////8AAAAAAAAAH/////gAAAAAAAAHgf88IAAAAAAAAAAAAAAAAAAAAAAAAD////+AAAAAAAAAH/////AAAAAAAAADwf8AAgAAAAAAAAAAAAAAAAAAAAAAAH/////4AAAAAAAAH/////AAAAAAAAABwP5wBwAAAAAAAAAAAAAAAAAAAAAAAH/////6AAAAAAAAD////+AAAAAAAAAB8P5wATwAAAAAAAAAAAAAAAAAAAAAAD//////4AAAAAAAB////8AAAAAAAAAA8AxQif+AAAAAAAAAAAAAAAAAAAAAAH//////8AAAAAAAB////4AAAAAAAAAAcAAIAD/gAAAAAAAAAAAAAAAAAAAAAH///////gAAAAAAA////4AAAAAAAAAAMAAIAI/ywAAAAAAAAAAAAAAAAAAAAH///////gAAAAAAA////4AAAAAAAAAADgAAAI/8BAAAAAAAAAAAAAAAAAAAAD///////gAAAAAAAf///4AAAAAAAAAAB+AAAA/4AIAAAAAAAAAAAAAAAAAAAB///////gAAAAAAAf///4AAAAAAAAAAAAmogAOMAAAAAAAAAAAAAAAAAAAAAB///////AAAAAAAAf///8AAAAAAAAAAAABCAAAGADAAAAAAAAAAAAAAAAAAAA///////AAAAAAAAf///8AAAAAAAAAAAAAAAAAAgAAAAAAAAAAAAAAAAAAAAAf/////+AAAAAAAAP///8AAAAAAAAAAAAAAAgCAAAAAAAAAAAAAAAAAAAAAAAf/////8AAAAAAAAf///+AQAAAAAAAAAAAAB+CAAAAAAAAAAAAAAAAAAAAAAAP/////4AAAAAAAAf///+AQAAAAAAAAAAAAD8DAAAAAAAAAAAAAAAAAAAAAAAP/////4AAAAAAAA////+AwAAAAAAAAAAAA38DgAAAAAAAAAAAAAAAAAAAAAAH/////4AAAAAAAA////8BwAAAAAAAAAAAD/8DgAAAAA/////////////////+AAAAAH////////AAAADwP///////////8AA4P//+/+AAAAAAAAAAAAAAAAAAf////4AAAAAAAA////wPgAAAAAAAAAAAP//3wAAAACAAAAAAAAAAAAAAAAAAP////wAAAAAAAA////APgAAAAAAAAAAAP///wAAAAAAAAAAAAAAAAAAAAAAAP////wAAAAAAAAf//+APgAAAAAAAAAAAf///4AAAAAAAAAAAAAAAAAAAAAAAP////wAAAAAAAAf//+APgAAAAAAAAAAD////+AAIAAAAAAAAAAAAAAAAAAAAP////gAAAAAAAAP//+AfAAAAAAAAAAAf////+AAEAAAAAAAAAAAAAAAAAAAAP////AAAAAAAAAP///AfAAAAAAAAAAA//////AAAAAAAAAAAAAAAAAAAAAAAP///4AAAAAAAAAP//+APAAAAAAAAAAA//////gAAAAAAAAAAAAAAAAAAAAAAf///gAAAAAAAAAH//+AOAAAAAAAAAAB//////wAAAAAAAAAAAAAAAAAAAAAAf///AAAAAAAAAAH//4AEAAAAAAAAAAA//////4AAAAAAAAAAAAAAAAAAAAAAf//+AAAAAAAAAAH//4AAAAAAAAAAAAB//////4AAAAAAAAAAAAAAAAAAAAAAf//+AAAAAAAAAAH//4AAAAAAAAAAAAA//////4AAAAAAAAAAAAAAAAAAAAAAf//+AAAAAAAAAAD//wAAAAAAAAAAAAAf/////8AAAAAAAAAAAAAAAAAAAAAAf//8AAAAAAAAAAB//gAAAAAAAAAAAAAf/////4AAAAAAAAAAAAAAAAAAAAAA///8AAAAAAAAAAB//gAAAAAAAAAAAAAf/////4AAAAAAAAAAAAAAAAAAAAAA///4AAAAAAAAAAA//AAAAAAAAAAAAAAP/////4AAAAAAAAAAAAAAAAAAAAAAf//wAAAAAAAAAAA/+AAAAAAAAAAAAAAP/AP//wAAAAAAAAAAAAAAAAAAAAAA///gAAAAAAAAAAA/4AAAAAAAAAAAAAAf8AG//gAAAAAAAAAAAAAAAAAAAAAA//3AAAAAAAAAAAAYAAAAAAAAAAAAAAAOAAF//gAAAAAAAAAAAAAAAAAAAAAB//4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA//AAABAAAAAAAAAAAAAAAAAAB//4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/AAAAgAAAAAAAAAAAAAAAAAD//4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP/AAAAQAAAAAAAAAAAAAAAAAB//gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABYAAAAcAAAAAAAAAAAAAAAAAB/8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA4AAAAAAAAAAAAAAAAAD/8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAYAAAAAAAAAAAAAAAAAD/gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAcAAADQAAAAAAAAAAAAAAAAAD/4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAcAAAHAAAAAAAAAAAAAAAAAAB/gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAOAAAAAAAAAAAAAAAAAAD/gAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA4AAAAAAAAAAAAAAAAAAH+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAB4AAAAAAAAAAAAAAAAAAH+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAwAAAAAAAAAAAAAAAAAAH/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP+AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAP8AAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH4AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAH4BwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAADwAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD8AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA/AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAYAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAEAAAAAAAAAAAAAAAAAAAAAAAAABwAAAAAAAAAAAAAAAAAAH4AAAAAAB4HgAD8AAAAAAAAAAAAAAAAAAAAAAAAADgAAAAAAAAAAAAAAAAAA//AAAD//////////wAAAAAAAAAAAAAAAAAAAAAAADgAAAAAAAAAAAAAAAAAf///4Af///////////AAAAAAAAAAAAAAAAAAAAAAAz4AAAAAAAAAAAAAAAPz////8B/////////////wAAAAAAAAAAAAAAAAAAAAA78AAAAAAAAAAA8/8///////wf/////////////+AAAAAAAAAAAAAAAAAAAAH9+AAAAAAAAZ////////////w////////////////4AAAAAAAAAAAAAAAAAAAB+AAAAAAAB//////////////////////////////4AAAAAAAAABmAAB8f+HB/+AAAAAAAP//////////////////////////////gAAAAAAAAP/c/oAf/////4AAAAAAAP/////////////////////////////8AAAAAAAD/////////////gAAAAAAB//////////////////////////////wAAAAAAAD////////////wAAAAAAP///////////////////////////////wAAAAAD/////////////4AAAAAAD////////////////////////////////wAAAADh/////////////AAAAB8A/////////////////////////////////+AAAAA4Af///////////gAAAH+AA///////////////////////////////+AAAAAAAAH///////////+A/A/wAA///////////////////////////////8AAAAAAAf//////////////gAAAf////////////////////////////////+AAAAAAAH///////////////h////////////////////////////////////wAAAAAAP/////////////////////////////////////////////////////gA+/gAAH///////////////////////////////////////////////gAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';       // 360×180 位元圖（北→南、西→東、高位元在前），見 build-land-mask.py
+const $ = (id) => document.getElementById(id);
+const clamp = (x, a, b) => Math.min(b, Math.max(a, x));
+const fmt = (n) => Number(n || 0).toLocaleString('zh-TW');
+const fmtBytes = (n) => { n = Number(n || 0); const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0; while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; } return (i ? n.toFixed(n >= 100 ? 0 : 1) : String(Math.round(n))) + ' ' + u[i]; };
+const h = (tag, attrs, ...kids) => {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs || {})) {
+    if (v === false || v == null) continue;
+    if (k === 'class') e.className = v; else if (k.startsWith('on')) e.addEventListener(k.slice(2), v); else e.setAttribute(k, v === true ? '' : String(v));
+  }
+  for (const c of kids.flat(Infinity)) { if (c === null || c === undefined || c === false) continue; e.append(c instanceof Node ? c : document.createTextNode(String(c))); }
+  return e;
+};
+const reduced = window.matchMedia && matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+/* ------------------------------------------------------------------ 範例資料（合成，固定種子） */
+function rng(seed) { return () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0; let t = Math.imul(seed ^ seed >>> 15, 1 | seed); t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; }; };
+function makeDemo() {
+  const R = rng(20261027), N = 288, START = Date.UTC(2026, 9, 26, 8, 0, 0);
+  const iso = (ms) => new Date(ms).toISOString().replace('.000Z', 'Z');
+  const times = Array.from({ length: N }, (_, i) => iso(START + i * 300000));
+  const hourOf = (i) => (16 + Math.floor(i / 12)) % 24;            // 台北時間（起點是 UTC 08:00＝16:00）
+  const offHours = (i) => { const hr = hourOf(i); return hr < 9 || hr >= 18; };
+  const POOL = ['203.0.113.0/24', '198.51.100.0/24', '192.0.2.0/24', '198.18.1.0/24', '198.18.2.0/24', '198.18.3.0/24', '198.18.4.0/24', '198.18.5.0/24'];
+  const NEWD = ['198.18.6.0/24', '198.18.7.0/24', '198.18.8.0/24'];
+  const base = (i) => { const hr = hourOf(i); return hr >= 9 && hr < 18 ? 620 : (hr >= 7 && hr < 20 ? 220 : 28); };
+  const mk = (o) => {
+    const win = [], present = POOL.concat(NEWD).map(() => []), pop = [0.95, 0.82, 0.6, 0.45, 0.3, 0.2, 0.12, 0.06];
+    for (let i = 0; i < N; i++) {
+      let q = 'complete', conn = 0, bytes = 0, destN = 0, portN = 0;
+      const spike = o.anomaly && i >= 120 && i <= 129;
+      if (o.missing) { q = 'missing'; }
+      else {
+        conn = Math.max(0, Math.round(base(i) * (o.scale || 1) * (0.6 + 0.8 * R()) + (spike ? 700 + 900 * R() : 0)));
+        bytes = Math.round(conn * (210000 + 160000 * R()) * (spike ? 6.5 : 1));
+        if (o.partialBusy && !offHours(i) && R() < 0.45) q = 'partial';
+        if (R() < 0.02) q = 'partial';
+        if (conn === 0) q = 'missing';
+        else {
+          POOL.forEach((_, j) => { if (R() < pop[j] * Math.min(1, 0.25 + conn / 500)) present[j].push(i); });
+          if (spike && i >= 121) NEWD.forEach((_, j) => { if (R() < 0.9) present[POOL.length + j].push(i); });
+          let listed = 0; present.forEach((p) => { if (p[p.length - 1] === i) listed++; });
+          destN = listed + Math.round(R() * (conn > 300 ? 3 : 1)); portN = 2 + Math.round(R() * 3);
+        }
+      }
+      win.push({ t: times[i], conn, bytes, dest_n: destN, port_n: portN, q });
+    }
+    const off = win.filter((w, i) => offHours(i) && w.q === 'complete' && !(o.anomaly && i >= 118 && i <= 131)).map((w) => w.conn).sort((a, b) => a - b);
+    const offB = win.filter((w, i) => offHours(i) && w.q === 'complete' && !(o.anomaly && i >= 118 && i <= 131)).map((w) => w.bytes).sort((a, b) => a - b);
+    const p95 = (a) => a.length ? a[Math.min(a.length - 1, Math.floor(a.length * 0.95))] : 0;
+    const dests = [];
+    POOL.concat(NEWD).forEach((ip, j) => {
+      const w = present[j]; if (!w.length) return;
+      const isNew = j >= POOL.length;
+      dests.push({ ip, first_seen: isNew ? times[w[0]] : iso(START - (2 + j) * 86400000), last_seen: times[w[w.length - 1]], seen_windows: w.length, w, new: isNew });
+    });
+    dests.sort((a, b) => b.seen_windows - a.seen_windows);
+    const alerts = o.anomaly ? [
+      { t: times[121], detector: 'after_hours_surge', severity: 'high', summary: '離峰連線與位元組暴增，超過基線 P95 的 5 倍以上' },
+      { t: times[122], detector: 'new_external_pattern', severity: 'medium', summary: '離峰出現 3 個過去沒看過的外部目的地' }] : [];
+    return { id: o.id, label: o.label, address: o.address, site: o.site, geo: o.geo || null, kind: o.kind, mode: o.mode, baseline_version: o.mode === 'monitoring' ? 1 : 0,
+      schedule: { timezone: 'Asia/Taipei', workdays: '1,2,3,4,5', start: '09:00', end: '18:00' },
+      baseline: o.mode === 'monitoring' ? { p95_conn: p95(off), p95_bytes: p95(offB) } : null,
+      ports: [{ port: 443, share: 0.72 }, { port: 80, share: 0.1 }, { port: 53, share: 0.12 }, { port: 123, share: 0.06 }],
+      windows: win, destinations: dests, destinations_total: dests.length + (o.missing ? 0 : 2), alerts };
+  };
+  return { schema: 'ioc-behavior-viz/1', demo: true, masked: true, generated_at: iso(START + N * 300000), window_minutes: 5, default_index: 124, assets: [
+    mk({ id: 21, label: '財務部 PC-01', address: '10.20.1.x', site: '台南', kind: 'confirmed', mode: 'monitoring', anomaly: true, geo: { lat: 23.0, lng: 120.2 } }),
+    mk({ id: 12, label: '核心防火牆 FW-01', address: '10.20.0.x', site: '台南', kind: 'device', mode: 'learning', missing: true, geo: { lat: 23.0, lng: 120.2 } }),
+    mk({ id: 29, label: '檔案伺服器 FS-02', address: '10.20.2.x', site: '台中', kind: 'device', mode: 'monitoring', scale: 0.8, geo: { lat: 24.15, lng: 120.67 } }),
+    mk({ id: 31, label: '會議室 PC-03', address: '10.20.1.x', site: '台南', kind: 'confirmed', mode: 'learning', scale: 0.45, geo: { lat: 23.0, lng: 120.2 } }),
+    mk({ id: 46, label: '研發 NB-07', address: '10.20.3.x', site: '台中', kind: 'confirmed', mode: 'monitoring', partialBusy: true, scale: 1.2, geo: { lat: 24.15, lng: 120.67 } }),
+    mk({ id: 63, label: '待確認設備 10.20.9.x', address: '10.20.9.x', site: null, kind: 'observed', mode: 'learning', scale: 0.3 })] };
+}
+
+/* ------------------------------------------------------------------ 載入 JSON：逐欄驗證、截長、不信任任何內容 */
+const clean = (v, max) => String(v == null ? '' : v).replace(/[\u0000-\u001f\u007f\u202a-\u202e\u2066-\u2069]/g, '').slice(0, max);
+const nint = (v, lo, hi, def) => { v = Number(v); return Number.isFinite(v) ? clamp(Math.round(v), lo, hi) : def; };
+const nnum = (v, lo, hi, def) => { v = Number(v); return Number.isFinite(v) ? clamp(v, lo, hi) : def; };
+const isoOf = (v) => { const ms = Date.parse(v); if (!Number.isFinite(ms)) throw new Error('時間格式不正確：' + clean(v, 30)); return new Date(ms).toISOString().replace('.000Z', 'Z'); };
+const validTz = (tz) => { try { new Intl.DateTimeFormat('en-US', { timeZone: tz }); return tz; } catch (_) { return 'Asia/Taipei'; } };
+function validate(raw) {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('檔案內容不是 JSON 物件');
+  if (raw.schema !== 'ioc-behavior-viz/1') throw new Error('不認得的資料格式（需要 schema: "ioc-behavior-viz/1"）');
+  if (!Array.isArray(raw.assets) || !raw.assets.length) throw new Error('沒有任何主機資料（assets 是空的）');
+  const assets = raw.assets.slice(0, 50).map((a, ai) => {
+    if (!a || typeof a !== 'object') throw new Error('第 ' + (ai + 1) + ' 台主機的格式不正確');
+    if (!Array.isArray(a.windows) || a.windows.length < 2) throw new Error('「' + clean(a.label, 40) + '」至少要有 2 個時間區間');
+    const windows = a.windows.slice(0, 2016).map((w) => ({ t: isoOf(w && w.t), conn: nint(w.conn, 0, 1e9, 0), bytes: nnum(w.bytes, 0, 1e15, 0), dest_n: nint(w.dest_n, 0, 1e6, 0), port_n: nint(w.port_n, 0, 65535, 0),
+      q: ['complete', 'partial', 'missing'].includes(w.q) ? w.q : 'missing' }));
+    const n = windows.length;
+    const destinations = (Array.isArray(a.destinations) ? a.destinations : []).slice(0, 40).map((d) => ({ ip: clean(d && d.ip, 64) || '—',
+      first_seen: d && d.first_seen ? isoOf(d.first_seen) : null, last_seen: d && d.last_seen ? isoOf(d.last_seen) : null,
+      seen_windows: nint(d && d.seen_windows, 0, 1e6, 0), w: (Array.isArray(d && d.w) ? d.w : []).slice(0, 2016).map((x) => nint(x, -1, n, -1)).filter((x) => x >= 0 && x < n), new: d && d.new === true }));
+    const sch = a.schedule || {};
+    const hhmm = (s, def) => /^([01]\d|2[0-3]):[0-5]\d$/.test(String(s)) ? String(s) : def;
+    const geo = a.geo && Number.isFinite(Number(a.geo.lat)) && Number.isFinite(Number(a.geo.lng)) && Number(a.geo.lat) >= -90 && Number(a.geo.lat) <= 90 && Number(a.geo.lng) >= -180 && Number(a.geo.lng) <= 180
+      ? { lat: Number(a.geo.lat), lng: Number(a.geo.lng) } : null;
+    return { id: nint(a.id, 0, 2147483647, ai), label: clean(a.label, 60) || ('主機 ' + (ai + 1)), address: clean(a.address, 64), site: a.site ? clean(a.site, 40) : null, geo,
+      kind: ['device', 'confirmed', 'observed'].includes(a.kind) ? a.kind : 'observed', mode: a.mode === 'monitoring' ? 'monitoring' : 'learning', baseline_version: nint(a.baseline_version, 0, 1e6, 0),
+      schedule: { timezone: validTz(clean(sch.timezone, 40) || 'Asia/Taipei'), workdays: /^[1-7](,[1-7]){0,6}$/.test(String(sch.workdays)) ? String(sch.workdays) : '1,2,3,4,5', start: hhmm(sch.start, '09:00'), end: hhmm(sch.end, '18:00') },
+      baseline: a.baseline && Number.isFinite(Number(a.baseline.p95_conn)) ? { p95_conn: nnum(a.baseline.p95_conn, 0, 1e9, 0), p95_bytes: nnum(a.baseline.p95_bytes, 0, 1e15, 0) } : null,
+      ports: (Array.isArray(a.ports) ? a.ports : []).slice(0, 12).map((p) => ({ port: nint(p && p.port, 0, 65535, 0), share: nnum(p && p.share, 0, 1, 0) })),
+      windows, destinations, destinations_total: nint(a.destinations_total, destinations.length, 1e6, destinations.length),
+      alerts: (Array.isArray(a.alerts) ? a.alerts : []).slice(0, 100).map((x) => ({ t: isoOf(x && x.t), detector: clean(x && x.detector, 40), severity: ['low', 'medium', 'high', 'critical'].includes(x && x.severity) ? x.severity : 'medium', summary: clean(x && x.summary, 160) })) };
+  });
+  return { schema: raw.schema, demo: false, masked: raw.masked === true, generated_at: raw.generated_at ? isoOf(raw.generated_at) : null, default_index: -1, assets };
+}
+
+/* ------------------------------------------------------------------ 狀態與衍生值 */
+const S = { data: null, asset: null, i: 0, playing: false, rate: 12, pinned: -1, hover: -1, webgl: false, summary: false };
+const locFmt = {};
+function locInfo(a, i) {
+  a._loc = a._loc || [];
+  if (a._loc[i]) return a._loc[i];
+  const tz = a.schedule.timezone;
+  const f = locFmt[tz] || (locFmt[tz] = new Intl.DateTimeFormat('en-US', { timeZone: tz, weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', month: '2-digit', day: '2-digit' }));
+  const p = Object.fromEntries(f.formatToParts(new Date(a.windows[i].t)).map((x) => [x.type, x.value]));
+  const wd = { Mon: 1, Tue: 2, Wed: 3, Thu: 4, Fri: 5, Sat: 6, Sun: 7 }[p.weekday] || 1;
+  const mins = Number(p.hour) * 60 + Number(p.minute);
+  const [sh, sm] = a.schedule.start.split(':').map(Number), [eh, em] = a.schedule.end.split(':').map(Number);
+  const on = a.schedule.workdays.split(',').map(Number).includes(wd) && mins >= sh * 60 + sm && mins < eh * 60 + em;
+  return (a._loc[i] = { label: p.month + '-' + p.day + ' ' + p.hour + ':' + p.minute, off: !on });
+}
+const tLabel = (a, iso) => { const d = Date.parse(iso); if (!Number.isFinite(d)) return '—'; const f = locFmt[a.schedule.timezone] || (locFmt[a.schedule.timezone] = new Intl.DateTimeFormat('en-US', { timeZone: a.schedule.timezone, weekday: 'short', hour: '2-digit', minute: '2-digit', hourCycle: 'h23', month: '2-digit', day: '2-digit' }));
+  const p = Object.fromEntries(f.formatToParts(new Date(d)).map((x) => [x.type, x.value])); return p.month + '-' + p.day + ' ' + p.hour + ':' + p.minute; };
+function assetStatus(a) {
+  if (a.windows.every((w) => w.q === 'missing')) return 'none';
+  if (a.alerts.length) return 'bad';
+  if (a.destinations.some((d) => d.new)) return 'warn';
+  return a.mode === 'learning' ? 'learn' : 'good';
+}
+/** 某個區間的面板狀態：known／new／idle／hidden／partial／missing，以及這格的流量權重（目的地只記錄有無連線，所以平均分配）。 */
+function frameState(a, i, panels) {
+  const w = a.windows[i], here = panels.map((p) => p.d.w.includes(i));
+  const nPresent = here.filter(Boolean).length;
+  const extra = panels.hasOthers ? Math.max(0, w.dest_n - nPresent) : 0;
+  const denom = nPresent + extra || 1;
+  const maxConn = a._maxConn || (a._maxConn = Math.max(1, ...a.windows.map((x) => x.conn)));
+  const base = w.q === 'missing' ? 0 : Math.sqrt(w.conn / maxConn);
+  return panels.map((p, k) => {
+    const first = p.d.w.length ? p.d.w[0] : 1e9;
+    let st = 'known';
+    if (w.q === 'missing') st = 'missing';
+    else if (p.d.new && i < first) st = 'hidden';
+    else if (!here[k]) st = 'idle';
+    else if (p.d.new) st = 'new';
+    else if (w.q === 'partial') st = 'partial';
+    const share = p.others ? extra / denom : (here[k] ? 1 / denom : 0);
+    return { st, density: st === 'missing' || st === 'hidden' ? 0 : clamp(0.05 + 1.1 * base * Math.min(1, share * 2.2) + (st === 'new' ? 0.4 : 0), 0, 1) * (w.q === 'partial' ? 0.6 : 1), here: !!here[k] };
+  });
+}
+function srcState(a, i) {
+  const w = a.windows[i], loc = locInfo(a, i);
+  if (w.q === 'missing') return 'missing';
+  if (a.alerts.some((x) => { const k = a.windows.findIndex((y) => y.t === x.t); return k >= 0 && i >= k && i - k <= 6; })) return 'alert';
+  if (a.baseline && loc.off && w.conn > Math.max(20, a.baseline.p95_conn * 3)) return 'warn';
+  return a.mode === 'learning' ? 'learn' : 'normal';
+}
+
+/* ------------------------------------------------------------------ three.js 場景 */
+const canvas = $('gl'), stage = $('stage');
+let renderer, scene, camera, globe, globeQ = new THREE.Quaternion(), srcGroup, srcMesh, srcEdges, srcHalo, srcRing, atmos;
+const flows = [], panels = [], pickables = [], tmp = new THREE.Vector3(), tmp2 = new THREE.Vector3();
+const GLOBE = { c: new THREE.Vector3(-15, -9.5, -19), r: 13 };
+const orbit = { yaw: 0.02, pitch: 0.06, radius: 36, tYaw: 0.02, tPitch: 0.06, tRadius: 36, target: new THREE.Vector3(1.5, -0.8, -3) };
+const PAL = [[0.38, 0.66, 1.0], [0.96, 0.77, 0.32], [0.71, 0.55, 1.0], [0.91, 0.94, 0.98]];
+
+const VERT = `uniform float uTime; uniform float uDensity; uniform float uSize; uniform float uPx; uniform float uDim; uniform float uTintMix;
+uniform vec3 uA; uniform vec3 uB; uniform vec3 uC; uniform vec3 uD; uniform vec3 uTint;
+attribute float aRank; attribute float aPhase; attribute float aSpeed; attribute float aJit; attribute float aAng; attribute float aSz; attribute vec3 aCol;
+varying vec3 vCol; varying float vAlpha;
+vec3 bez(float t){ float u=1.0-t; return u*u*u*uA + 3.0*u*u*t*uB + 3.0*u*t*t*uC + t*t*t*uD; }
+void main(){
+  float t = fract(aPhase + uTime*aSpeed);
+  vec3 p = bez(t);
+  vec3 tg = normalize(bez(min(t+0.015,1.0)) - bez(max(t-0.015,0.0)));
+  vec3 side = normalize(cross(tg, vec3(0.0,1.0,0.0)));
+  vec3 up = cross(side, tg);
+  float spread = aJit * (0.12 + 0.88*sin(3.14159265*t));
+  p += side*cos(aAng)*spread + up*sin(aAng)*spread*0.6;
+  vec4 mv = modelViewMatrix*vec4(p,1.0);
+  gl_Position = projectionMatrix*mv;
+  gl_PointSize = aSz*uSize*uPx*(40.0/-mv.z);
+  float vis = step(aRank, uDensity);
+  float fade = smoothstep(0.0,0.07,t)*(1.0-smoothstep(0.92,1.0,t));
+  vAlpha = vis*fade*uDim;
+  vCol = mix(aCol, uTint, uTintMix);
+}`;
+const FRAG = `varying vec3 vCol; varying float vAlpha;
+void main(){ float d=length(gl_PointCoord-0.5); float a=smoothstep(0.5,0.0,d); a=a*a*1.7; if(vAlpha<0.01||a<0.01) discard; gl_FragColor=vec4(vCol, a*vAlpha); }`;
+
+function initGL() {
+  try {
+    if (typeof THREE === 'undefined') throw new Error('three.js 沒有載入');
+    renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
+    if (!renderer.getContext()) throw new Error('WebGL 無法使用');
+  } catch (e) { return false; }
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.setClearColor(0x050b14, 1);
+  scene = new THREE.Scene();
+  camera = new THREE.PerspectiveCamera(32, 1, 0.5, 400);
+  scene.add(new THREE.AmbientLight(0xffffff, 0.62));
+  const dl = new THREE.DirectionalLight(0xffffff, 0.85); dl.position.set(-6, 14, 12); scene.add(dl);
+  buildGlobe();
+  return true;
+}
+function decodeMask() {
+  const bin = atob(LAND_MASK), bits = new Uint8Array(360 * 180);
+  for (let i = 0; i < bits.length; i++) bits[i] = (bin.charCodeAt(i >> 3) >> (7 - (i & 7))) & 1;
+  return bits;
+}
+const geoVec = (lat, lng, r) => { const la = lat * Math.PI / 180, ln = lng * Math.PI / 180; return new THREE.Vector3(Math.cos(la) * Math.sin(ln) * r, Math.sin(la) * r, Math.cos(la) * Math.cos(ln) * r); };
+function buildGlobe() {
+  globe = new THREE.Group(); globe.position.copy(GLOBE.c); scene.add(globe);
+  const R = GLOBE.r, mask = decodeMask();
+  globe.add(new THREE.Mesh(new THREE.SphereGeometry(R * 0.996, 64, 48), new THREE.MeshBasicMaterial({ color: 0x07182b })));
+  const pos = [], N = 52000, ga = Math.PI * (3 - Math.sqrt(5));
+  for (let i = 0; i < N; i++) {
+    const y = 1 - 2 * (i + 0.5) / N, rr = Math.sqrt(1 - y * y), th = ga * i;
+    const x = Math.cos(th) * rr, z = Math.sin(th) * rr;
+    const lat = Math.asin(y) * 180 / Math.PI, lng = Math.atan2(x, z) * 180 / Math.PI;
+    const row = clamp(Math.floor(90 - lat), 0, 179), col = clamp(Math.floor(lng + 180), 0, 359);
+    if (mask[row * 360 + col]) pos.push(x * R * 1.002, y * R * 1.002, z * R * 1.002);
+  }
+  const g = new THREE.BufferGeometry(); g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3));
+  const dots = new THREE.Points(g, new THREE.ShaderMaterial({ transparent: true, depthWrite: false, uniforms: { uPx: { value: renderer.getPixelRatio() } },
+    vertexShader: 'uniform float uPx; varying float vB; void main(){ vec4 mv=modelViewMatrix*vec4(position,1.0); gl_Position=projectionMatrix*mv; vB=smoothstep(-0.25,0.6,dot(normalize(normalMatrix*position),vec3(0.0,0.0,1.0))); gl_PointSize=1.9*uPx*(40.0/-mv.z)+0.6; }',
+    fragmentShader: 'varying float vB; void main(){ float d=length(gl_PointCoord-0.5); if(d>0.5) discard; gl_FragColor=vec4(0.56,0.66,0.78,0.78*vB); }' }));
+  globe.add(dots);
+  atmos = new THREE.Mesh(new THREE.SphereGeometry(R * 1.1, 48, 32), new THREE.ShaderMaterial({ side: THREE.BackSide, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    vertexShader: 'varying vec3 vN; void main(){ vN=normalize(normalMatrix*normal); gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0); }',
+    fragmentShader: 'varying vec3 vN; void main(){ float i=pow(clamp(0.66-dot(vN,vec3(0.0,0.0,1.0)),0.0,1.0),2.6); gl_FragColor=vec4(0.22,0.46,0.92,1.0)*i*0.9; }' }));
+  globe.add(atmos);
+  srcGroup = new THREE.Group(); globe.add(srcGroup);
+  const box = new THREE.BoxGeometry(1.9, 1.9, 1.9);
+  srcMesh = new THREE.Mesh(box, new THREE.MeshLambertMaterial({ color: 0xff6b6b, emissive: 0x5a1010, transparent: true, opacity: 0.95 }));
+  srcEdges = new THREE.LineSegments(new THREE.EdgesGeometry(box), new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 }));
+  srcHalo = new THREE.Mesh(new THREE.SphereGeometry(2.1, 20, 14), new THREE.MeshBasicMaterial({ color: 0xff6b6b, transparent: true, opacity: 0.16, blending: THREE.AdditiveBlending, depthWrite: false }));
+  srcRing = new THREE.Mesh(new THREE.RingGeometry(1.5, 1.8, 48), new THREE.MeshBasicMaterial({ color: 0xff6b6b, transparent: true, opacity: 0.7, side: THREE.DoubleSide, depthWrite: false }));
+  srcMesh.userData.k = -2; srcGroup.add(srcMesh, srcEdges, srcHalo);
+  globe.add(srcRing);
+  pickables.push(srcMesh);
+}
+function placeSource(a) {
+  const geo = a.geo || { lat: 23.0, lng: 120.2 };
+  const v = geoVec(geo.lat, geo.lng, 1);
+  srcGroup.position.copy(v).multiplyScalar(GLOBE.r + 0.95);
+  srcRing.position.copy(v).multiplyScalar(GLOBE.r + 0.05); srcRing.quaternion.setFromUnitVectors(new THREE.Vector3(0, 0, 1), v);
+  srcGroup.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), v);
+  const qx = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(1, 0, 0), geo.lat * Math.PI / 180);
+  const qy = new THREE.Quaternion().setFromAxisAngle(new THREE.Vector3(0, 1, 0), -geo.lng * Math.PI / 180);
+  const dir = new THREE.Vector3(0.52, 0.2, 0.83).normalize();
+  const qd = new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), dir);
+  globeQ.copy(qd).multiply(qx).multiply(qy);
+}
+
+function clearFlows() {
+  for (const f of flows) { f.points.geometry.dispose(); f.points.material.dispose(); scene.remove(f.points); }
+  for (const p of panels) {
+    scene.remove(p.group, p.arrow);
+    [p.group, p.arrow].forEach((root) => root.traverse((o) => { if (o.geometry) o.geometry.dispose(); if (o.material) o.material.dispose(); }));
+  }
+  flows.length = 0; panels.length = 0; pickables.length = 1; $('tags3d').replaceChildren();
+}
+const layout = { v: 1 };       // 直式螢幕把面板在垂直方向拉開
+function panelPos(k, n) {
+  const u = n > 1 ? k / (n - 1) : 0.5;
+  return new THREE.Vector3(3.6 + 5.2 * Math.sin(u * Math.PI) + 1.2 * u, (7.2 - 15.6 * u) * layout.v, -3.6 + 4.2 * Math.sin(u * Math.PI * 2 - 0.6));
+}
+function relayout() { panels.forEach((p, k) => { p.P.copy(panelPos(k, panels.length)); p.group.position.copy(p.P); }); }
+function buildAsset(a) {
+  clearFlows();
+  const list = a.destinations.slice().sort((x, y) => y.seen_windows - x.seen_windows).slice(0, 8);
+  const hasOthers = a.destinations_total > list.length;
+  const items = list.map((d) => ({ d, others: false }));
+  if (hasOthers) items.push({ d: { ip: '其他 ' + (a.destinations_total - list.length) + ' 個目的地', first_seen: null, last_seen: null, seen_windows: 0, w: [], new: false }, others: true });
+  items.hasOthers = hasOthers;
+  const R = rng(7 + a.id), N = 520, shares = a.ports.length ? a.ports : [{ port: 443, share: 1 }];
+  const cls = (port) => port === 443 ? 0 : port === 80 ? 1 : port === 53 ? 2 : 3;
+  const cum = []; let acc = 0; for (const s of shares) { acc += s.share; cum.push([acc, cls(s.port)]); }
+  items.forEach((it, k) => {
+    const P = panelPos(k, items.length);
+    const g = new THREE.Group(); g.position.copy(P); g.rotation.set(0.38, -0.5, 0.0);
+    const geo = new THREE.BoxGeometry(3.7, 0.34, 2.1);
+    const mat = new THREE.MeshLambertMaterial({ color: 0xd7e1ee, emissive: 0x1b2a3d, transparent: true, opacity: 0.96 });
+    const mesh = new THREE.Mesh(geo, mat); mesh.userData.k = k;
+    const edges = new THREE.LineSegments(new THREE.EdgesGeometry(geo), new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.55 }));
+    g.add(mesh, edges); scene.add(g);
+    const arrow = new THREE.Mesh(new THREE.ConeGeometry(0.3, 0.8, 10), new THREE.MeshBasicMaterial({ color: 0xffffff })); scene.add(arrow);
+    const arrowTip = new THREE.Vector3();
+    const rank = new Float32Array(N), phase = new Float32Array(N), speed = new Float32Array(N), jit = new Float32Array(N), ang = new Float32Array(N), sz = new Float32Array(N), col = new Float32Array(N * 3);
+    for (let i = 0; i < N; i++) {
+      rank[i] = (i + R()) / N; phase[i] = R(); speed[i] = 0.085 + 0.09 * R(); jit[i] = 0.1 + 0.5 * R() * R(); ang[i] = R() * 6.2832; sz[i] = 0.7 + 0.9 * R();
+      const r = R(); const c = (cum.find((x) => r <= x[0]) || cum[cum.length - 1])[1]; col.set(PAL[c], i * 3);
+    }
+    const bg = new THREE.BufferGeometry();
+    bg.setAttribute('position', new THREE.BufferAttribute(new Float32Array(N * 3), 3));
+    [['aRank', rank, 1], ['aPhase', phase, 1], ['aSpeed', speed, 1], ['aJit', jit, 1], ['aAng', ang, 1], ['aSz', sz, 1], ['aCol', col, 3]].forEach(([n, arr, s]) => bg.setAttribute(n, new THREE.BufferAttribute(arr, s)));
+    const u = { uTime: { value: 0 }, uDensity: { value: 0 }, uSize: { value: 3.4 }, uPx: { value: renderer.getPixelRatio() }, uDim: { value: 1 }, uTintMix: { value: 0 },
+      uA: { value: new THREE.Vector3() }, uB: { value: new THREE.Vector3() }, uC: { value: new THREE.Vector3() }, uD: { value: P.clone() }, uTint: { value: new THREE.Vector3(1, 0.62, 0.26) } };
+    const points = new THREE.Points(bg, new THREE.ShaderMaterial({ uniforms: u, vertexShader: VERT, fragmentShader: FRAG, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending }));
+    points.frustumCulled = false; scene.add(points);
+    const tag = h('div', { class: 'tag3d' }); $('tags3d').append(tag);
+    flows.push({ points, u, k, hump: 2.2 + (k % 3) * 1.1 * (k % 2 ? -1 : 1) });
+    panels.push({ it, d: it.d, others: it.others, group: g, mesh, mat, edges, arrow, arrowTip, P, tag, state: 'known' });
+    pickables.push(mesh);
+  });
+  panels.hasOthers = hasOthers;
+  placeSource(a);
+}
+const STYLE = {
+  known: { color: 0xd7e1ee, emissive: 0x1b2a3d, opacity: 0.96, edge: 0xffffff, vis: true },
+  new: { color: 0xea6a12, emissive: 0x7a2c00, opacity: 0.98, edge: 0xffc58a, vis: true },
+  idle: { color: 0x5b6d85, emissive: 0x0b1626, opacity: 0.5, edge: 0x8fa4bf, vis: true },
+  partial: { color: 0xb6c0cf, emissive: 0x151f2e, opacity: 0.55, edge: 0xc9d3e0, vis: true },
+  missing: { color: 0x778ba6, emissive: 0x000000, opacity: 0.0, edge: 0x778ba6, vis: true },
+  hidden: { color: 0x000000, emissive: 0x000000, opacity: 0.0, edge: 0x000000, vis: false },
+};
+
+/* ------------------------------------------------------------------ 畫面：晶片、卡片、摘要、時間軸 */
+function chip(a) {
+  const st = assetStatus(a), label = { good: '監控中、無異常', warn: '有新目的地', bad: '有警示', learn: '學習中', none: '無法取得' }[st];
+  return h('button', { class: 'chip', type: 'button', 'aria-pressed': a === S.asset ? 'true' : 'false', title: a.label + '（' + label + '）', onclick: () => selectAsset(a) },
+    h('span', { class: 'dot ' + st, 'aria-hidden': 'true' }), a.label, h('span', { class: 'sr' }, '，' + label));
+}
+function renderChips() { $('chips').replaceChildren(...S.data.assets.map(chip)); }
+function modeName(a) { return a.mode === 'monitoring' ? '監控中（基線 v' + a.baseline_version + '）' : '學習中'; }
+function kindName(a) { return { device: 'LibreNMS 設備', confirmed: '已確認主機', observed: '待確認設備' }[a.kind]; }
+function legend() {
+  const sw = (c, t) => h('div', { class: 'row' }, h('i', { style: 'background:' + c }), t);
+  return [h('b', null, '圖例'),
+    sw('#ff9f43', '橘色面板：新目的地（過去沒出現過）'), sw('#d7e1ee', '白色面板：已知目的地'), sw('#5b6d85', '灰色面板：這一格沒有連到'),
+    h('div', { class: 'row' }, h('i', { style: 'border:1px dashed #778ba6' }), '空框：來源缺資料，無法取得（不是零流量）'),
+    h('div', { class: 'row' }, h('i', { style: 'background:#61a8ff' }), '443', h('i', { style: 'background:#f5c451;margin-left:6px' }), '80', h('i', { style: 'background:#b58cff;margin-left:6px' }), '53', h('i', { style: 'background:#e8eff9;margin-left:6px' }), '其他埠'),
+    h('p', null, '資料只記錄「有沒有連到」某目的地，光點的疏密是該時段總連線數平均分配到有連線的目的地。拖曳旋轉、滾輪縮放、點面板釘住資訊卡。')];
+}
+function tags(list) { return h('div', { class: 'tags' }, list.map(([c, t]) => h('span', { class: 'tag ' + c }, t))); }
+function srcCard(a, i) {
+  const w = a.windows[i], loc = locInfo(a, i), st = srcState(a, i), b = a.baseline;
+  const t = [[a.mode === 'monitoring' ? 'green' : 'blue', a.mode === 'monitoring' ? '監控中' : '學習中'], ['gray', kindName(a)]];
+  if (loc.off) t.push(['gray', '離峰時段']);
+  if (st === 'alert') t.push(['red', '警示中']); if (st === 'warn') t.push(['orange', '高於基線']);
+  if (w.q === 'partial') t.push(['orange', '資料不完整']); if (w.q === 'missing') t.push(['red', '無法取得']);
+  if (a.destinations.some((d) => d.new && d.w.length && d.w[0] <= i)) t.push(['orange', '新目的地']);
+  return h('div', { class: 'card src' + (st === 'alert' ? ' hot' : '') }, h('h3', null, a.label),
+    h('dl', null, h('dt', null, '位址'), h('dd', null, a.address || '—'), h('dt', null, '站點'), h('dd', null, a.site || '未歸屬'), h('dt', null, '模式'), h('dd', null, modeName(a)),
+      h('dt', null, '此刻連線'), h('dd', null, w.q === 'missing' ? '無法取得' : fmt(w.conn) + (b ? '／基線 P95 ' + fmt(b.p95_conn) : '')),
+      h('dt', null, '位元組'), h('dd', null, w.q === 'missing' ? '無法取得' : fmtBytes(w.bytes) + (b && b.p95_bytes ? '／P95 ' + fmtBytes(b.p95_bytes) : ''))),
+    tags(t));
+}
+function dstCard(a, i, p, f, hl) {
+  const d = p.d, t = [];
+  if (p.others) return h('div', { class: 'card' }, h('h3', null, d.ip), h('dl', null, h('dt', null, '說明'), h('dd', null, '前 8 名以外的目的地，只顯示合計')), tags([['gray', '合計']]));
+  t.push(f.st === 'new' ? ['orange', '新目的地'] : ['gray', d.new ? '新目的地（尚未出現）' : '已知目的地']);
+  t.push(f.here ? ['green', '此刻連線中'] : ['gray', '此刻沒有連到']);
+  return h('div', { class: 'card' + (f.st === 'new' ? ' hot' : '') + (hl ? ' hl' : ''), onclick: () => { S.pinned = S.pinned === p.k ? -1 : p.k; }, },
+    h('h3', null, d.ip), h('dl', null, h('dt', null, '首次出現'), h('dd', null, d.first_seen ? tLabel(a, d.first_seen) : '—'), h('dt', null, '最近出現'), h('dd', null, d.last_seen ? tLabel(a, d.last_seen) : '—'),
+      h('dt', null, '出現區間'), h('dd', null, d.seen_windows + '／' + a.windows.length)), tags(t));
+}
+let shownI = -1, cardOrder = [];
+function updateCards() {
+  const a = S.asset, i = Math.round(S.i);
+  if (i === shownI && !updateCards.force) return;
+  shownI = i; updateCards.force = false;
+  const fs = frameState(a, i, panels);
+  panels.forEach((p, k) => { p.k = k; p.f = fs[k]; });
+  $('cardSrc').replaceChildren(srcCard(a, i));
+  const order = panels.map((p, k) => ({ p, k, pri: (S.pinned === k ? 100 : 0) + (p.f.st === 'new' ? 50 : 0) + (p.f.here ? 10 : 0) + (p.others ? -20 : 0) + p.d.seen_windows / 1000 }))
+    .filter((x) => x.p.f.st !== 'hidden').sort((x, y) => y.pri - x.pri).slice(0, 4).sort((x, y) => x.p.P.y - y.p.P.y).reverse();
+  cardOrder = order.map((x) => x.k);
+  $('cardsDst').replaceChildren(...order.map((x) => dstCard(a, i, x.p, x.p.f, S.pinned === x.k)));
+  const w = a.windows[i], loc = locInfo(a, i);
+  setNow(a, i);
+  const st = $('status'), ss = srcState(a, i);
+  st.className = 'status' + (ss === 'alert' ? ' bad' : (w.q !== 'complete' ? ' mid' : ''));
+  st.textContent = w.q === 'missing' ? a.label + '：這一格來源缺資料，無法取得（不是零流量）' : (ss === 'alert' ? a.label + '：有警示，連線與位元組明顯高於基線' : a.label + (w.q === 'partial' ? '：這一格資料不完整，不進基線與偵測' : '：' + (loc.off ? '離峰' : '上班時段') + '，連線 ' + fmt(w.conn)));
+  $('scrub').value = String(i);
+  if (S.summary) renderSummary();
+}
+function renderSummary() {
+  const a = S.asset, i = Math.round(S.i), w = a.windows[i], loc = locInfo(a, i);
+  const rows = a.destinations.map((d) => { const here = d.w.includes(i); return h('tr', null, h('td', null, d.ip), h('td', null, d.first_seen ? tLabel(a, d.first_seen) : '—'), h('td', null, d.last_seen ? tLabel(a, d.last_seen) : '—'),
+    h('td', null, d.seen_windows + '／' + a.windows.length), h('td', null, w.q === 'missing' ? '無法取得' : (here ? '此刻連線中' : '此刻沒有連到')), h('td', null, d.new ? '新目的地' : '已知')); });
+  $('summary').replaceChildren(h('div', null, h('h2', null, a.label + ' · ' + modeName(a)),     // h() 會略過 null；replaceChildren(null) 會插入文字「null」
+    h('p', null, '位址 ' + (a.address || '—') + ' · 站點 ' + (a.site || '未歸屬') + ' · ' + kindName(a) + ' · ' + loc.label + '（' + a.schedule.timezone + '）' + (w.q === 'missing' ? ' · 這一格來源缺資料，無法取得' : ' · 連線 ' + fmt(w.conn) + '，位元組 ' + fmtBytes(w.bytes))),
+    a.alerts.length ? h('p', null, '警示：' + a.alerts.map((x) => tLabel(a, x.t) + ' ' + x.detector + '（' + x.severity + '）' + x.summary).join('；')) : null,
+    h('div', { class: 'tablewrap' }, h('table', null, h('thead', null, h('tr', null, ['目的地', '首次出現', '最近出現', '出現區間', '此刻', '狀態'].map((x) => h('th', null, x)))), h('tbody', null, rows.length ? rows : h('tr', null, h('td', { colspan: 6 }, '沒有目的地資料（來源缺資料時不能當成沒有連線）')))))));
+}
+function drawSpark() {
+  const c = $('spark'), a = S.asset; if (!a) return;
+  const dpr = Math.min(window.devicePixelRatio || 1, 2), W = c.clientWidth, H = c.clientHeight;
+  if (!W || !H) return; c.width = Math.round(W * dpr); c.height = Math.round(H * dpr);
+  const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+  const n = a.windows.length, bw = W / n, maxC = Math.max(1, ...a.windows.map((w) => w.conn), a.baseline ? a.baseline.p95_conn * 1.4 : 0);
+  for (let i = 0; i < n; i++) { if (locInfo(a, i).off) { g.fillStyle = 'rgba(32,53,81,.35)'; g.fillRect(i * bw, 0, Math.ceil(bw), H); } }
+  for (let i = 0; i < n; i++) {
+    const w = a.windows[i], x = i * bw;
+    if (w.q === 'missing') { g.fillStyle = '#778ba6'; g.fillRect(x, H - 2, Math.max(1, bw - 0.3), 2); continue; }
+    const bh = Math.max(1, (w.conn / maxC) * (H - 6));
+    g.fillStyle = w.q === 'partial' ? 'rgba(245,196,81,.55)' : '#61a8ff'; g.fillRect(x, H - bh, Math.max(1, bw - 0.3), bh);
+  }
+  if (a.baseline) { const y = H - (a.baseline.p95_conn / maxC) * (H - 6); g.strokeStyle = '#36d399'; g.setLineDash([4, 3]); g.beginPath(); g.moveTo(0, y); g.lineTo(W, y); g.stroke(); g.setLineDash([]); }
+  for (const x of a.alerts) { const k = a.windows.findIndex((w) => w.t === x.t); if (k >= 0) { g.fillStyle = '#ff6b6b'; g.beginPath(); g.moveTo(k * bw, 1); g.lineTo(k * bw + 5, 1); g.lineTo(k * bw + 2.5, 9); g.closePath(); g.fill(); } }
+  const cx = (Math.round(S.i) + 0.5) * bw; g.strokeStyle = '#e7eef8'; g.lineWidth = 1.5; g.beginPath(); g.moveTo(cx, 0); g.lineTo(cx, H); g.stroke(); g.lineWidth = 1;
+}
+
+/* ------------------------------------------------------------------ 互動 */
+function selectAsset(a) {
+  S.asset = a; S.pinned = -1;
+  $('scrub').max = String(a.windows.length - 1);
+  // 一開始停在最值得看的格子：範例資料用指定的；真實資料停在最近一次警示，沒有警示就是最新一格
+  const lastAlert = a.alerts.length ? a.windows.findIndex((w) => w.t === a.alerts[a.alerts.length - 1].t) : -1;
+  const def = S.data.default_index >= 0 && S.data.assets[0] === a ? S.data.default_index : (lastAlert >= 0 ? lastAlert : a.windows.length - 1);
+  S.i = clamp(def, 0, a.windows.length - 1);
+  renderChips(); shownI = -1;
+  if (S.webgl) { buildAsset(a); updateCards.force = true; updateCards(); } else textView();
+  drawSpark(); if (S.summary) renderSummary();
+}
+/** WebGL 不能用時：只有文字版摘要與時間軸，沒有場景與資訊卡。 */
+function textView() { const i = Math.round(S.i); setNow(S.asset, i); $('scrub').value = String(i); renderSummary(); }
+/** 時間軸下方的那一行：此刻的本地時間、離峰與否、連線、位元組、目的地、品質。h() 會攤平陣列；replaceChildren 不會。 */
+function setNow(a, i) {
+  const w = a.windows[i], loc = locInfo(a, i);
+  $('now').replaceChildren(h('span', null, h('b', null, loc.label), ' (' + a.schedule.timezone + (loc.off ? '，離峰' : '，上班時段') + ') · ',
+    w.q === 'missing' ? '連線 無法取得（來源缺資料）' : ['連線 ', h('b', null, fmt(w.conn)), ' · 位元組 ', h('b', null, fmtBytes(w.bytes)), ' · 目的地 ', h('b', null, fmt(w.dest_n)), ' · 品質 ', { complete: '完整', partial: '不完整' }[w.q]]));
+}
+function setNotice(msg, ok) { const n = $('notice'); n.hidden = !msg; n.textContent = msg || ''; n.className = 'notice' + (ok ? ' ok' : ''); if (msg) { clearTimeout(setNotice.t); setNotice.t = setTimeout(() => { n.hidden = true; }, ok ? 4000 : 9000); } }
+function loadData(data, badge) {
+  S.data = data; S.playing = false; setPlay();
+  const b = $('srcBadge'); b.textContent = badge; b.className = 'badge' + (data.demo ? '' : (data.masked ? ' real' : ' warn'));
+  S.pinned = -1; selectAsset(data.assets[0]);
+}
+function setPlay() { const b = $('btnPlay'); b.textContent = S.playing ? '⏸ 暫停' : '▶ 播放'; b.setAttribute('aria-label', S.playing ? '暫停' : '播放'); }
+$('btnPlay').addEventListener('click', () => { S.playing = !S.playing; if (S.playing && S.i >= S.asset.windows.length - 1) S.i = 0; setPlay(); });
+$('speed').addEventListener('change', (e) => { S.rate = Number(e.target.value) || 12; });
+$('scrub').addEventListener('input', (e) => { S.i = Number(e.target.value); S.playing = false; setPlay(); });
+$('btnLegend').addEventListener('click', (e) => { const on = e.currentTarget.getAttribute('aria-pressed') !== 'true'; e.currentTarget.setAttribute('aria-pressed', String(on)); $('legend').hidden = !on; });
+$('btnSummary').addEventListener('click', (e) => { S.summary = e.currentTarget.getAttribute('aria-pressed') !== 'true'; e.currentTarget.setAttribute('aria-pressed', String(S.summary)); $('summary').hidden = !S.summary; if (S.summary) renderSummary(); });
+$('btnLoad').addEventListener('click', () => $('file').click());
+$('file').addEventListener('change', (e) => {
+  const f = e.target.files && e.target.files[0]; e.target.value = '';
+  if (!f) return;
+  if (f.size > 8 * 1024 * 1024) { setNotice('檔案超過 8 MB，無法載入'); return; }
+  const r = new FileReader();
+  r.onerror = () => setNotice('讀取檔案失敗');
+  r.onload = () => {
+    try { const d = validate(JSON.parse(String(r.result))); loadData(d, '已載入：' + clean(f.name, 40) + (d.masked ? '（已遮罩）' : '（未遮罩）')); setNotice(d.masked ? '已載入 ' + d.assets.length + ' 台主機（只在你的瀏覽器處理，沒有上傳）' : '這份資料沒有遮罩：請勿截圖或分享畫面', d.masked); }
+    catch (err) { setNotice('載入失敗：' + (err && err.message ? err.message : '不是有效的 JSON')); }
+  };
+  r.readAsText(f);
+});
+let dragMoved = false; const ptrs = new Map(); let lastPinch = 0;
+canvas.addEventListener('pointerdown', (e) => { try { canvas.setPointerCapture(e.pointerId); } catch (_) { /* 合成事件或不支援時略過 */ } ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY }); dragMoved = false; lastPinch = 0; });
+canvas.addEventListener('pointermove', (e) => {
+  const p = ptrs.get(e.pointerId);
+  if (!p) { hoverPick(e); return; }
+  if (ptrs.size === 2) { const [a, b] = [...ptrs.values()]; const d0 = Math.hypot(a.x - b.x, a.y - b.y); p.x = e.clientX; p.y = e.clientY; const [c, d] = [...ptrs.values()]; const d1 = Math.hypot(c.x - d.x, c.y - d.y); if (d0 > 0) orbit.tRadius = clamp(orbit.tRadius * d0 / d1, 20, 54); dragMoved = true; return; }
+  const dx = e.clientX - p.x, dy = e.clientY - p.y; p.x = e.clientX; p.y = e.clientY;
+  if (Math.abs(dx) + Math.abs(dy) > 1) dragMoved = true;
+  orbit.tYaw = clamp(orbit.tYaw - dx * 0.004, -0.7, 0.7); orbit.tPitch = clamp(orbit.tPitch + dy * 0.003, -0.4, 0.55);
+});
+const endPtr = (e) => { if (ptrs.has(e.pointerId) && ptrs.size === 1 && !dragMoved) pick(e); ptrs.delete(e.pointerId); };
+canvas.addEventListener('pointerup', endPtr); canvas.addEventListener('pointercancel', (e) => ptrs.delete(e.pointerId));
+canvas.addEventListener('wheel', (e) => { e.preventDefault(); orbit.tRadius = clamp(orbit.tRadius * Math.exp(e.deltaY * 0.0012), 20, 54); }, { passive: false });
+let raycaster, ndc;
+function pickAt(e) {
+  const r = canvas.getBoundingClientRect(); ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+  raycaster.setFromCamera(ndc, camera);
+  // 看不見的面板（缺資料、尚未出現）不能被點到：three.js 的射線不看 visible
+  const hit = raycaster.intersectObjects(pickables, false).find((x) => x.object.visible && (!x.object.parent || x.object.parent.visible));
+  return hit ? hit.object.userData.k : -1;
+}
+function pick(e) { const k = pickAt(e); S.pinned = k >= 0 ? (S.pinned === k ? -1 : k) : -1; updateCards.force = true; }
+function hoverPick(e) { const k = pickAt(e); if (k !== S.hover) { S.hover = k; canvas.style.cursor = k !== -1 ? 'pointer' : ''; } }
+
+/* ------------------------------------------------------------------ 每幀 */
+const stageRect = { w: 1, h: 1 };
+function resize() {
+  stageRect.w = stage.clientWidth; stageRect.h = stage.clientHeight; if (!renderer) { drawSpark(); return; }
+  const asp = stageRect.w / stageRect.h;
+  renderer.setSize(stageRect.w, stageRect.h, false); camera.aspect = asp;
+  // 場景左右約需 40 個單位的寬度：直式螢幕加大視角（廣角）而不是把相機拉到看不清楚
+  camera.fov = clamp(2 * Math.atan(Math.tan(16 * Math.PI / 180) * Math.max(1, 1.55 / asp)) * 180 / Math.PI, 32, 82); camera.updateProjectionMatrix();
+  orbit.tRadius = asp >= 1.2 ? clamp(36 * (16 / 9) / Math.max(1.05, asp), 30, 54) : 40; orbit.radius = orbit.tRadius;
+  orbit.target.x = asp >= 1.2 ? 1.5 : 3; layout.v = asp >= 1.2 ? 1 : 1.9; relayout(); drawSpark();
+}
+function project(v) { tmp2.copy(v).project(camera); return [(tmp2.x * 0.5 + 0.5) * stageRect.w, (-tmp2.y * 0.5 + 0.5) * stageRect.h, tmp2.z < 1]; }
+let last = performance.now(), clock = 0, leaderEls = [];
+function frame(now) {
+  requestAnimationFrame(frame);
+  if (document.visibilityState === 'hidden' || !S.asset) { last = now; return; }
+  const dt = Math.min(0.05, (now - last) / 1000); last = now; clock += dt * (reduced ? 0.25 : 1);
+  if (S.playing) { S.i += dt * S.rate; if (S.i >= S.asset.windows.length - 1) { S.i = S.asset.windows.length - 1; S.playing = false; setPlay(); } }
+  const i = Math.round(S.i); if (i !== shownI || updateCards.force) { updateCards(); drawSpark(); }
+  const k = 1 - Math.exp(-dt * 6);
+  if (!reduced && !ptrs.size) orbit.tYaw += Math.sin(clock * 0.15) * 0.00035;
+  orbit.yaw += (orbit.tYaw - orbit.yaw) * k; orbit.pitch += (orbit.tPitch - orbit.pitch) * k; orbit.radius += (orbit.tRadius - orbit.radius) * k;
+  camera.position.set(orbit.target.x + orbit.radius * Math.sin(orbit.yaw) * Math.cos(orbit.pitch), orbit.target.y + orbit.radius * Math.sin(orbit.pitch), orbit.target.z + orbit.radius * Math.cos(orbit.yaw) * Math.cos(orbit.pitch));
+  camera.lookAt(orbit.target);
+  globe.quaternion.slerp(globeQ, 1 - Math.exp(-dt * 3.5)); globe.updateMatrixWorld(true);
+  srcGroup.getWorldPosition(tmp); const S0 = tmp.clone();
+  const a = S.asset, ss = srcState(a, i), fs = panels.map((p) => p.f || { st: 'known', density: 0 });
+  const sCol = { alert: 0xff6b6b, warn: 0xff9f43, normal: 0xe7eef8, learn: 0x61a8ff, missing: 0x778ba6 }[ss];
+  srcMesh.material.color.setHex(sCol); srcMesh.material.emissive.setHex(ss === 'alert' ? 0x5a1010 : ss === 'warn' ? 0x5a3410 : 0x0b1626); srcMesh.material.opacity = ss === 'missing' ? 0.12 : 0.95;
+  srcEdges.material.color.setHex(ss === 'missing' ? 0x778ba6 : 0xffffff); srcHalo.material.color.setHex(sCol);
+  srcHalo.material.opacity = (ss === 'alert' ? 0.22 + 0.12 * Math.sin(clock * 5) : ss === 'warn' ? 0.16 : 0.07); srcRing.material.color.setHex(sCol);
+  const rs = 1 + (ss === 'alert' ? 0.25 * (0.5 + 0.5 * Math.sin(clock * 4)) : 0); srcRing.scale.set(rs, rs, 1);
+  const edgeEls = [];
+  flows.forEach((f, idx) => {
+    const p = panels[idx], st = fs[idx], sty = STYLE[st.st] || STYLE.known;
+    f.u.uTime.value = clock; f.u.uDensity.value = st.density; f.u.uA.value.copy(S0); f.u.uD.value.copy(p.P);
+    const P = p.P, up = new THREE.Vector3(0, 1, 0), mid = tmp2.copy(P).sub(S0);
+    f.u.uB.value.copy(S0).addScaledVector(mid, 0.34).addScaledVector(up, f.hump); f.u.uC.value.copy(S0).addScaledVector(mid, 0.7).addScaledVector(up, f.hump * 0.5 - 1);
+    f.u.uTintMix.value = st.st === 'new' ? 0.92 : 0; f.u.uDim.value = st.st === 'partial' ? 0.55 : 1;
+    const bytesPer = a.windows[i].conn ? a.windows[i].bytes / a.windows[i].conn : 0; f.u.uSize.value = 2.8 + clamp(Math.log10(Math.max(1000, bytesPer)) - 3, 0, 4) * 0.5;
+    p.state = st.st; p.group.visible = sty.vis;
+    p.mat.color.setHex(sty.color); p.mat.emissive.setHex(sty.emissive); p.mat.opacity = S.hover === idx ? Math.min(1, sty.opacity + 0.2) : sty.opacity; p.mesh.visible = st.st !== 'missing';
+    p.edges.material.color.setHex(sty.edge); p.edges.material.opacity = st.st === 'missing' ? 0.55 : 0.85; p.edges.material.transparent = true;
+    p.arrow.visible = sty.vis && st.st !== 'missing' && st.density > 0.02;
+    if (p.arrow.visible) { const end = new THREE.Vector3(), pre = new THREE.Vector3(); const bz = (t, o) => { const u = 1 - t; return o.copy(S0).multiplyScalar(u * u * u).addScaledVector(f.u.uB.value, 3 * u * u * t).addScaledVector(f.u.uC.value, 3 * u * t * t).addScaledVector(P, t * t * t); };
+      bz(0.93, pre); bz(1, end); const dir = end.clone().sub(pre).normalize(); p.arrow.position.copy(P).addScaledVector(dir, -1.9).addScaledVector(new THREE.Vector3(0, 0.1, 0), 1); p.arrow.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), dir); }
+    const sp = project(P.clone().add(new THREE.Vector3(0, 1.4, 0)));
+    p.tag.style.display = sty.vis && sp[2] ? '' : 'none';
+    if (sty.vis) { p.tag.style.transform = 'translate(' + sp[0].toFixed(1) + 'px,' + sp[1].toFixed(1) + 'px) translate(-50%,-100%)'; p.tag.style.left = 0; p.tag.style.top = 0;
+      p.tag.className = 'tag3d' + (st.st === 'new' ? ' hot' : '') + (S.hover === idx || S.pinned === idx ? ' hl' : ''); const label = p.others ? p.d.ip : p.d.ip + ' · ' + (st.here ? '連線中' : '—'); if (p.tag.textContent !== label) p.tag.textContent = label; }
+  });
+  // 資訊卡的引線：來源卡上緣到來源節點、目的地卡左緣到面板
+  const stRect = stage.getBoundingClientRect(), svg = $('leaders'); const need = 1 + cardOrder.length;
+  while (leaderEls.length < need) { const l = document.createElementNS('http://www.w3.org/2000/svg', 'line'); l.setAttribute('marker-end', 'url(#arr)'); svg.append(l); leaderEls.push(l); }
+  leaderEls.forEach((l, n) => { l.style.display = n < need ? '' : 'none'; });
+  const sc = $('cardSrc').firstElementChild;
+  if (sc && stageRect.w >= 760) { const r = sc.getBoundingClientRect(), pt = project(srcGroup.getWorldPosition(new THREE.Vector3())); setLine(leaderEls[0], r.left - stRect.left + r.width * 0.5, r.top - stRect.top, pt[0], pt[1] + 14, pt[2]); } else leaderEls[0].style.display = 'none';
+  const dc = [...$('cardsDst').children];
+  cardOrder.forEach((k, n) => { const el = dc[n], l = leaderEls[1 + n]; if (!el || stageRect.w < 760) { l.style.display = 'none'; return; } const r = el.getBoundingClientRect(), pt = project(panels[k].P.clone().add(new THREE.Vector3(1.9, 0.2, 0)));
+    setLine(l, r.left - stRect.left, r.top - stRect.top + Math.min(26, r.height / 2), pt[0], pt[1], pt[2] && panels[k].state !== 'hidden'); });
+  renderer.render(scene, camera);
+}
+function setLine(l, x1, y1, x2, y2, ok) { if (!ok) { l.style.display = 'none'; return; } l.style.display = ''; l.setAttribute('x1', x1.toFixed(1)); l.setAttribute('y1', y1.toFixed(1)); l.setAttribute('x2', x2.toFixed(1)); l.setAttribute('y2', y2.toFixed(1)); }
+
+/* ------------------------------------------------------------------ 啟動 */
+function boot() {
+  $('legend').replaceChildren(...legend());
+  S.webgl = initGL();
+  if (S.webgl) { raycaster = new THREE.Raycaster(); ndc = new THREE.Vector2(); }
+  const demo = makeDemo();
+  if (!S.webgl) {
+    $('gl').hidden = true; $('legend').hidden = true; $('cardSrc').hidden = true; $('cardsDst').hidden = true; $('tags3d').hidden = true; $('leaders').hidden = true;
+    S.summary = true; $('summary').hidden = false; $('btnSummary').setAttribute('aria-pressed', 'true');
+    $('status').hidden = true; loadData(demo, '範例資料');
+    $('scrub').addEventListener('input', () => { textView(); drawSpark(); });
+    window.addEventListener('resize', drawSpark);
+    setNotice('這個環境無法使用 WebGL，改顯示文字版的連線摘要。'); return;
+  }
+  new ResizeObserver(resize).observe(stage); window.addEventListener('resize', resize);
+  loadData(demo, '範例資料'); resize(); requestAnimationFrame(frame);
+}
+boot();
+})();
+</script>
