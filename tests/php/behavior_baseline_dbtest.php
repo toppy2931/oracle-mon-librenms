@@ -80,6 +80,26 @@ dbtest('setMode 啟用監控：用目前的資料立即訓練基線、進入監�
     assertSame(1, count(array_keys(dbtHistory($db, $id), 'baseline_ready')));
 });
 
+dbtest('setMode 啟用監控：防火牆日誌來源 partial（有些區間不完整，VM 上的常態）也能啟用；error／missing／其他狀態與過期照擋', static function (PDO $db): void {
+    $svc = new BehaviorService($db);
+    $id = bbdAsset($db);
+    bbdWindows($db, $id, 144);
+    foreach (['error', 'missing', 'planned', 'unavailable'] as $status) {
+        dbtSource($db, $status);
+        assertThrows(ValidationError::class, fn () => $svc->setMode($id, 'monitoring', 'a', DBT_H), '防火牆日誌來源', '來源 ' . $status . ' 要擋');
+    }
+    dbtSource($db, 'partial', gmdate('Y-m-d H:i:s', time() - 20 * 60));
+    assertThrows(ValidationError::class, fn () => $svc->setMode($id, 'monitoring', 'a', DBT_H), '防火牆日誌來源', 'partial 但超過 15 分鐘沒更新也要擋');
+    assertSame(['learning', 0], [dbtVal($db, 'SELECT mode FROM ioc_behavior_assets WHERE id=?', [$id]), (int) dbtVal($db, 'SELECT baseline_version FROM ioc_behavior_assets WHERE id=?', [$id])], '被擋下不能改到資料');
+    dbtSource($db, 'partial');
+    $svc->setMode($id, 'monitoring', 'admin', DBT_H);
+    assertSame(['monitoring', 1], [dbtVal($db, 'SELECT mode FROM ioc_behavior_assets WHERE id=?', [$id]), (int) dbtVal($db, 'SELECT baseline_version FROM ioc_behavior_assets WHERE id=?', [$id])], '來源 partial、15 分鐘內有更新：可以啟用');
+    // 來源 partial 不放寬資料量：不夠還是擋，而且擋的是資料量
+    $few = bbdAsset($db, ['device_id' => 2]);
+    bbdWindows($db, $few, 143);
+    assertThrows(ValidationError::class, fn () => $svc->setMode($few, 'monitoring', 'a', DBT_H), '143', '來源 partial 不影響資料量檢查');
+});
+
 dbtest('setMode 啟用監控：資料不夠就擋下並說明缺多少，不改任何資料；來源、身分與已移除各自擋得住', static function (PDO $db): void {
     $svc = new BehaviorService($db);
     $few = bbdAsset($db);
@@ -91,8 +111,8 @@ dbtest('setMode 啟用監控：資料不夠就擋下並說明缺多少，不改�
     $gone = bbdAsset($db, ['device_id' => 3, 'mode' => 'retired']);
     bbdWindows($db, $gone, 200);
     assertThrows(ValidationError::class, fn () => $svc->setMode($few, 'monitoring', 'a', DBT_H), '防火牆日誌來源', '沒有來源狀態');
-    dbtSource($db, 'partial');
-    assertThrows(ValidationError::class, fn () => $svc->setMode($few, 'monitoring', 'a', DBT_H), '防火牆日誌來源', '來源不是 ready');
+    dbtSource($db, 'error');
+    assertThrows(ValidationError::class, fn () => $svc->setMode($few, 'monitoring', 'a', DBT_H), '防火牆日誌來源', '來源 error');
     dbtSource($db, 'ready', gmdate('Y-m-d H:i:s', time() - 20 * 60));
     assertThrows(ValidationError::class, fn () => $svc->setMode($few, 'monitoring', 'a', DBT_H), '防火牆日誌來源', '來源超過 15 分鐘沒更新');
     dbtSource($db, 'ready');

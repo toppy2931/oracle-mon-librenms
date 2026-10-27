@@ -239,9 +239,11 @@ final class BehaviorService
                     throw new ValidationError(['待確認設備須先確認為受管主機，才能啟用監控']);
                 }
                 // 上班時段不必先設定：沒有設備、站點層級的時段就用預設（scheduleFor）
+                // 來源 partial＝有些區間不完整（缺欄位、被截斷），這在多主機的環境是常態；訓練只用完整區間、資料量由 baselineCheck 把關，
+                // 所以 partial 可以啟用。error／missing／其他狀態（來源壞了、沒資料）或超過 15 分鐘沒更新才擋。
                 $source = $this->db->query("SELECT status,checked_at FROM ioc_behavior_sources WHERE source_key='fortigate_graylog'")->fetch(PDO::FETCH_ASSOC);
-                if (!$source || $source['status'] !== 'ready' || strtotime($source['checked_at'] . ' UTC') < time() - 900) {
-                    throw new ValidationError(['防火牆日誌來源未就緒或已過期']);
+                if (!$source || !in_array($source['status'], ['ready', 'partial'], true) || strtotime($source['checked_at'] . ' UTC') < time() - 900) {
+                    throw new ValidationError(['防火牆日誌來源異常或已過期（狀態需為 ready 或 partial，且 15 分鐘內有更新）']);
                 }
             }
             if ($asset['mode'] === $mode) { $this->db->rollBack(); return; }
