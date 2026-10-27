@@ -163,103 +163,48 @@ function bhWindows(int $days, array $override = [], int $connections = 10): arra
     return $rows;
 }
 
-test('基線訓練門檻：少於 6048 個完整區間不訓練；達標後依本地「平日／週末 × 小時」分桶', static function (): void {
-    assertSame(6048, BehaviorAnalyzer::TRAIN_MIN_WINDOWS);
-    assertSame(null, BehaviorAnalyzer::trainingGroups(array_slice(bhWindows(21), 0, 6047), 'Asia/Taipei'), '差一格');
+test('baselineBuckets：依本地「平日／週末 × 小時」分桶，不做任何門檻', static function (): void {
     $rows = bhWindows(21, [
         '2026-09-01 01:00:00' => ['bytes_total' => 777],     // 台北週二 09:00
         '2026-09-05 17:00:00' => ['bytes_total' => 888],     // UTC 週六 17:00 ＝ 台北週日 01:00
         '2026-09-04 16:00:00' => ['bytes_total' => 999],     // UTC 週五 16:00 ＝ 台北週六 00:00
     ]);
-    assertSame(6048, count($rows));
-    $g = BehaviorAnalyzer::trainingGroups($rows, 'Asia/Taipei');
-    assertTrue($g !== null, '剛好 6048 格、橫跨 22 個本地日期、全部有連線：達標');
+    $g = BehaviorAnalyzer::baselineBuckets($rows, 'Asia/Taipei');
     assertSame(6048, array_sum(array_map('count', $g)), '每一格都要分到某個桶');
     assertSame(48, count($g), '平日／週末 × 24 小時');
     assertTrue(in_array(777, array_column($g['weekday:9'], 'bytes_total'), true), '週二 09:00（台北）進 weekday:9');
     assertTrue(in_array(888, array_column($g['weekend:1'], 'bytes_total'), true), '日期要換成本地的：UTC 週六 17:00 是台北週日 01:00');
     assertTrue(in_array(999, array_column($g['weekend:0'], 'bytes_total'), true), 'UTC 週五 16:00 是台北週六 00:00');
-    $utc = BehaviorAnalyzer::trainingGroups($rows, 'UTC');
+    $utc = BehaviorAnalyzer::baselineBuckets($rows, 'UTC');
     assertTrue(in_array(777, array_column($utc['weekday:1'], 'bytes_total'), true), '同一格換成 UTC 排程就落在別的桶');
+    assertSame([], BehaviorAnalyzer::baselineBuckets([], 'Asia/Taipei'));
 });
 
-test('基線訓練門檻：有效天數、有連線的天數與區間數不足也不訓練', static function (): void {
-    // 全部沒有連線：沒有任何「有連線的區間」
-    assertSame(null, BehaviorAnalyzer::trainingGroups(bhWindows(21, [], 0), 'Asia/Taipei'));
-    // 有連線的日期夠（7 天，每天 1 個區間），但有連線的區間只有 7 個，少於 100
-    $few = bhWindows(21, [], 0);
-    for ($day = 0; $day < 7; $day++) { $few[$day * 288 + 100]['connections'] = 5; }
-    assertSame(null, BehaviorAnalyzer::trainingGroups($few, 'Asia/Taipei'), '有連線的區間少於 100');
-    // 100 個區間有連線，但只集中在 2 個本地日期
-    $two = bhWindows(21, [], 0);
-    for ($i = 0; $i < 100; $i++) { $two[$i * 2]['connections'] = 5; }            // 前 200 格 ≈ 16 小時，跨兩個台北日期
-    assertSame(null, BehaviorAnalyzer::trainingGroups($two, 'Asia/Taipei'), '有連線的日期少於 7 天');
-    // 100 個區間有連線、分散在 7 個本地日期：達標
-    $seven = bhWindows(21, [], 0);
-    for ($i = 0; $i < 100; $i++) { $seven[($i % 7) * 288 + intdiv($i, 7)]['connections'] = 5; }
-    assertTrue(BehaviorAnalyzer::trainingGroups($seven, 'Asia/Taipei') !== null, '7 個日期、100 個有連線的區間');
-    // 區間數夠、有連線的日期也夠（11 天），但涵蓋的日期不到 20 天（10 天的資料重複 3 次；真實資料有唯一鍵，不會發生，門檻仍要成立）
-    $short = [];
-    foreach (range(1, 3) as $_) { $short = array_merge($short, bhWindows(10)); }
-    assertTrue(count($short) >= BehaviorAnalyzer::TRAIN_MIN_WINDOWS);
-    assertSame(null, BehaviorAnalyzer::trainingGroups($short, 'Asia/Taipei'), '涵蓋的日期少於 20');
-});
+test('baselineCheck：最低資料量（144 格完整區間、12 格有連線）；原因說出缺多少；回報涵蓋天數與離峰時段', static function (): void {
+    $sched = ['timezone' => 'Asia/Taipei', 'workdays' => '1,2,3,4,5', 'start_time' => '09:00:00', 'end_time' => '18:00:00'];
+    assertSame([144, 12, 6], [BehaviorAnalyzer::BASELINE_MIN_WINDOWS, BehaviorAnalyzer::BASELINE_MIN_ACTIVE_WINDOWS, BehaviorAnalyzer::BASELINE_MIN_SAMPLES]);
+    $r143 = BehaviorAnalyzer::baselineCheck(array_slice(bhWindows(1), 0, 143), $sched);
+    assertSame([143, false], [$r143['windows'], $r143['ok']]);
+    assertTrue(strpos($r143['reasons'][0], '143') !== false && strpos($r143['reasons'][0], '144') !== false, $r143['reasons'][0]);
 
-test('combineTraffic：多個位址的流量併成一筆；單一有流量的位址沿用日誌端的基數；沒流量的位址不影響結果', static function (): void {
-    $part = static fn (int $count, int $bytes, array $dest, array $ports, array $o = []): array => $o + ['count' => $count, 'bytes' => $bytes, 'with_bytes' => $count,
-        'dest_count' => $count, 'port_count' => $count, 'card_dst' => count($dest), 'card_port' => count($ports), 'dest_list' => $dest, 'port_list' => $ports, 'ambiguous' => false];
-    $a = $part(20, 5000, ['203.0.113.1', '203.0.113.2'], [443]);
-    $b = $part(10, 3000, ['203.0.113.2', '203.0.113.3'], [443, 80]);
-    $silent = $part(0, 0, [], []);
+    // bhWindows 從台北週二 08:00 起：144 格＝08:00–20:00。上班 09:00–18:00，離峰是 08 點與 18、19 點，各 12 格（≥ 6）
+    $ok = BehaviorAnalyzer::baselineCheck(array_slice(bhWindows(1), 0, 144), $sched);
+    assertSame([144, 144, 1, 3, true, [], []], [$ok['windows'], $ok['active_windows'], $ok['days'], $ok['offhours_buckets'], $ok['ok'], $ok['reasons'], $ok['warnings']]);
+    assertSame(3, BehaviorAnalyzer::baselineCheck(bhWindows(2), $sched)['days'], '兩天份的區間橫跨三個本地日期');
 
-    $t = BehaviorAnalyzer::combineTraffic([$a, $b]);
-    assertSame([30, 8000, 3, 2, 30, 30, 30, false], [$t['connections'], $t['bytes'], $t['destinations'], $t['ports'], $t['with_bytes'], $t['dest_count'], $t['port_count'], $t['ambiguous']]);
-    assertSame(['203.0.113.1', '203.0.113.2', '203.0.113.3'], $t['dest_list']);
-    assertSame([443, 80], $t['port_list']);
+    $quiet = array_slice(bhWindows(1, [], 0), 0, 144);
+    for ($i = 0; $i < 11; $i++) { $quiet[$i]['connections'] = 5; }
+    $q = BehaviorAnalyzer::baselineCheck($quiet, $sched);
+    assertSame([11, false], [$q['active_windows'], $q['ok']]);
+    assertTrue(strpos($q['reasons'][0], '有連線') !== false && strpos($q['reasons'][0], '11') !== false, $q['reasons'][0]);
+    $quiet[11]['connections'] = 5;
+    assertSame(true, BehaviorAnalyzer::baselineCheck($quiet, $sched)['ok'], '剛好 12 格');
 
-    $single = BehaviorAnalyzer::combineTraffic([$silent, $b]);
-    assertSame([10, 3000, 2, 2], [$single['connections'], $single['bytes'], $single['destinations'], $single['ports']], '只有一個位址有流量：和只有一個位址的資產完全一樣');
-    $card = $part(10, 3000, ['203.0.113.2'], [443], ['card_dst' => 7, 'card_port' => 5]);
-    $c = BehaviorAnalyzer::combineTraffic([$card, $silent]);
-    assertSame([7, 5], [$c['destinations'], $c['ports']], '單一位址：沿用日誌端算好的基數，不是清單長度');
-
-    $none = BehaviorAnalyzer::combineTraffic([$silent, $silent]);
-    assertSame([0, 0, 0, 0, []], [$none['connections'], $none['bytes'], $none['destinations'], $none['ports'], $none['dest_list']]);
-    assertSame(0, BehaviorAnalyzer::combineTraffic([])['connections']);
-    assertSame(true, BehaviorAnalyzer::combineTraffic([$a, $part(1, 1, [], [], ['ambiguous' => true])])['ambiguous'], '任何一個位址有衝突，整筆就有衝突');
-    assertSame('complete', BehaviorAnalyzer::windowQuality($t['connections'], false, $t['ambiguous'], $t['with_bytes'], $t['dest_count'], $t['port_count']));
-    $partial = BehaviorAnalyzer::combineTraffic([$a, $part(10, 3000, ['203.0.113.2'], [443], ['with_bytes' => 9])]);
-    assertSame('partial', BehaviorAnalyzer::windowQuality($partial['connections'], false, $partial['ambiguous'], $partial['with_bytes'], $partial['dest_count'], $partial['port_count']), '缺的筆數逐項相加：一個位址缺位元組，整筆就是 partial');
-});
-
-test('combineTraffic：top_ip 是連線數最多的位址（打平取前面的）；沒有流量的位址不算；全都沒流量是 null；沒帶位址也不會出錯', static function (): void {
-    $part = static fn (string $ip, int $count): array => ['ip' => $ip, 'count' => $count, 'bytes' => 0, 'with_bytes' => $count, 'dest_count' => $count, 'port_count' => $count,
-        'card_dst' => 0, 'card_port' => 0, 'dest_list' => [], 'port_list' => [], 'ambiguous' => false];
-    assertSame('172.16.1.77', BehaviorAnalyzer::combineTraffic([$part('172.16.1.10', 3), $part('172.16.1.77', 9), $part('172.16.1.88', 0)])['top_ip']);
-    assertSame('172.16.1.10', BehaviorAnalyzer::combineTraffic([$part('172.16.1.10', 5), $part('172.16.1.77', 5)])['top_ip'], '打平：取前面的');
-    assertSame(null, BehaviorAnalyzer::combineTraffic([$part('172.16.1.10', 0), $part('172.16.1.77', 0)])['top_ip']);
-    assertSame(null, BehaviorAnalyzer::combineTraffic([])['top_ip']);
-    $noIp = $part('x', 4);
-    unset($noIp['ip']);
-    assertSame(null, BehaviorAnalyzer::combineTraffic([$noIp])['top_ip'], '呼叫端沒帶位址：不回報，也不丟錯');
-});
-
-test('mergeWindowRows：連線與位元組相加、目的地與埠取聯集；兩邊都完整才完整；原因合併後不超過欄位長度', static function (): void {
-    $row = static fn (string $q, int $c, int $b, array $d, array $p, string $r = '', string $obs = '2026-10-20 10:00:00'): array => ['connections' => $c, 'bytes_total' => $b,
-        'destinations_json' => json_encode($d), 'ports_json' => json_encode($p), 'quality' => $q, 'quality_reason' => $r, 'observed_at' => $obs];
-    $m = BehaviorAnalyzer::mergeWindowRows($row('complete', 5, 500, ['3.3.3.3'], [443]), $row('complete', 7, 700, ['3.3.3.3', '4.4.4.4'], [443, 8080], '', '2026-10-21 10:00:00'));
-    assertSame([12, 1200, 2, 2, 'complete', '', '2026-10-21 10:00:00'], [$m['connections'], $m['bytes_total'], $m['destinations'], $m['ports'], $m['quality'], $m['quality_reason'], $m['observed_at']]);
-    assertSame(['3.3.3.3', '4.4.4.4'], json_decode($m['destinations_json'], true));
-    assertSame([443, 8080], json_decode($m['ports_json'], true), '埠仍是數字');
-
-    $p = BehaviorAnalyzer::mergeWindowRows($row('partial', 3, 300, ['6.6.6.6'], [443], '1 筆日誌缺 net_bytes'), $row('complete', 4, 400, ['6.6.6.6'], [443]));
-    assertSame('partial', $p['quality']);
-    assertSame('合併了兩個位址的區間：1 筆日誌缺 net_bytes', $p['quality_reason']);
-    $both = BehaviorAnalyzer::mergeWindowRows($row('partial', 1, 1, [], [], '甲'), $row('partial', 1, 1, [], [], '甲'));
-    assertSame('合併了兩個位址的區間：甲', $both['quality_reason'], '相同的原因不重複');
-    $long = BehaviorAnalyzer::mergeWindowRows($row('partial', 1, 1, [], [], str_repeat('長', 100)), $row('partial', 1, 1, [], [], str_repeat('短', 100)));
-    assertTrue(mb_strlen($long['quality_reason']) <= 120, '欄位是 VARCHAR(120)，超過在嚴格模式會讓寫入失敗');
-    assertSame('partial', BehaviorAnalyzer::mergeWindowRows($row('complete', 1, 1, [], []), $row('partial', 1, 1, [], [], 'x'))['quality']);
+    // 所有區間都在上班時段：夠資料訓練，但沒有離峰時段的基線，要警告（啟用後不會判斷離峰異常）
+    $allDay = ['timezone' => 'Asia/Taipei', 'workdays' => '1,2,3,4,5,6,7', 'start_time' => '00:00:00', 'end_time' => '23:59:00'];
+    $none = BehaviorAnalyzer::baselineCheck(array_slice(bhWindows(1), 0, 144), $allDay);
+    assertSame([true, 0], [$none['ok'], $none['offhours_buckets']]);
+    assertTrue(strpos($none['warnings'][0], '離峰') !== false, $none['warnings'][0]);
 });
 
 test('Webhook 設定只接受不含帳密或片段的 HTTPS 與 32 位元組密鑰', static function (): void {

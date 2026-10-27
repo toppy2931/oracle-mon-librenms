@@ -257,21 +257,6 @@ dbtest('學習中（或重新學習中）只記已知目的地與埠、不產生
     assertSame(0, (int) dbtVal($db, 'SELECT COUNT(*) FROM ioc_behavior_alerts'), '重新學習期間不產生警示');
 });
 
-dbtest('就緒但尚未啟用監控：只產生模擬（preview）警示——沒有事件案、沒有通知；已知目的地之後不再算新的', static function (PDO $db): void {
-    $id = bcdMonitored($db, 'ready');
-    (new BehaviorCollector($db, DbtFakeLogs::traffic(bcdSurge())))->tick([bcdDevice()], bcdNets(), bcdNow());
-    $alerts = dbtAll($db, 'SELECT * FROM ioc_behavior_alerts ORDER BY id');
-    assertSame(['after_hours_surge', 'new_external_pattern'], array_column($alerts, 'detector'));
-    assertSame(['preview', 'preview'], array_column($alerts, 'status'));
-    assertSame(['medium', 'medium'], array_column($alerts, 'severity'));
-    assertSame([73, 70], array_map('intval', array_column($alerts, 'score')));
-    assertSame(1, (int) $alerts[0]['baseline_version']);
-    assertSame(250000000, json_decode($alerts[0]['metrics_json'], true)['bytes']);
-    assertSame(0, (int) dbtVal($db, 'SELECT COUNT(*) FROM ioc_cases'));
-    assertSame(0, (int) dbtVal($db, 'SELECT COUNT(*) FROM ioc_behavior_deliveries'));
-    assertSame(29, (int) dbtVal($db, 'SELECT COUNT(*) FROM ioc_behavior_known WHERE asset_id=?', [$id]), '評估之後才學習：25 個目的地＋4 個埠');
-});
-
 dbtest('監控中：警示（open）自動建事件案並排入通知；同一小時重複只累計次數，下一小時另開新的（已知限制：不會合併成同一件）', static function (PDO $db): void {
     $id = bcdMonitored($db, 'monitoring');
     $tick = static fn (string $now, array $traffic) => (new BehaviorCollector($db, DbtFakeLogs::traffic($traffic)))->tick([bcdDevice()], bcdNets(), bcdNow($now));
@@ -338,70 +323,6 @@ dbtest('repairOpenCases：補建沒有事件案的未處置警示（一次最多
     assertSame(7, (int) dbtVal($db, 'SELECT COUNT(*) FROM ioc_cases'), '都補完了，不重複建立');
     assertSame(2, (int) dbtVal($db, "SELECT COUNT(*) FROM ioc_behavior_alerts WHERE case_id IS NULL"), '模擬與已處置的警示不補案');
     assertSame('172.16.1.10', dbtVal($db, 'SELECT subject_ip FROM ioc_cases ORDER BY id LIMIT 1'));
-});
-
-// ---- 基線訓練 ----
-
-/** 讓設備 $deviceId 進入「學習滿 28 天、有 $count 個完整區間」的狀態。 */
-function bcdTrainable(PDO $db, int $deviceId, int $count = 6048, bool $schedule = true, int $learningDays = 29): int
-{
-    $id = (new BehaviorService($db))->syncDevice($deviceId, 'fw-' . $deviceId, '172.16.1.' . (10 + $deviceId), '台南');
-    $db->prepare('UPDATE ioc_behavior_assets SET learning_started_at=? WHERE id=?')->execute([gmdate('Y-m-d H:i:s', time() - $learningDays * 86400), $id]);
-    bcdBulkWindows($db, $id, $count, intdiv(time() - 27 * 86400, 300) * 300);
-    if ($schedule) {
-        dbtSchedule($db, 'device', (string) $deviceId);
-    }
-    return $id;
-}
-
-/** 讓 tick 跑一個新的區間（內容無關緊要）。 */
-function bcdTickOnce(PDO $db, int $offset = 0): void
-{
-    $traffic = ['172.16.1.11' => ['count' => 10, 'bytes' => 1000, 'dest' => ['203.0.113.1' => 10], 'port' => ['443' => 10]]];
-    $devices = [bcdDevice(1, '172.16.1.11'), bcdDevice(2, '172.16.1.12')];
-    (new BehaviorCollector($db, DbtFakeLogs::traffic($traffic)))->tick($devices, bcdNets(), time() + $offset);
-}
-
-dbtest('訓練：學習滿 28 天、區間夠多、有排程 → 建第 1 版基線、進入 ready、留歷史；一次 tick 只訓練一台', static function (PDO $db): void {
-    $a = bcdTrainable($db, 1);
-    $b = bcdTrainable($db, 2);
-    bcdTickOnce($db);
-    $state = static fn (int $id) => dbtRow($db, 'SELECT mode,baseline_version,quality_status,training_checked_at FROM ioc_behavior_assets WHERE id=?', [$id]);
-    assertSame(['ready', 1, 'ready'], [$state($a)['mode'], (int) $state($a)['baseline_version'], $state($a)['quality_status']]);
-    assertTrue($state($a)['training_checked_at'] !== null);
-    assertSame(['learning', 0], [$state($b)['mode'], (int) $state($b)['baseline_version']], '一個 tick 只訓練一台：另一台下一輪');
-    assertSame(48, (int) dbtVal($db, 'SELECT COUNT(*) FROM ioc_behavior_baselines WHERE asset_id=?', [$a]), '平日／週末 × 24 小時');
-    $bl = dbtRow($db, "SELECT * FROM ioc_behavior_baselines WHERE asset_id=? AND day_kind='weekday' AND hour_of_day=12", [$a]);
-    assertSame([1000.0, 1000.0, 0.0, 10.0, 1], [(double) $bl['median_bytes'], (double) $bl['p95_bytes'], (double) $bl['mad_bytes'], (double) $bl['median_connections'], (int) ($bl['sample_count'] > 100)]);
-    assertTrue(in_array('baseline_ready', dbtHistory($db, $a), true));
-    assertSame('system', dbtVal($db, "SELECT actor FROM ioc_behavior_history WHERE asset_id=? AND action='baseline_ready'", [$a]));
-
-    bcdTickOnce($db, 300);
-    assertSame(['ready', 1], [$state($b)['mode'], (int) $state($b)['baseline_version']], '下一輪輪到另一台');
-    assertSame(48, (int) dbtVal($db, 'SELECT COUNT(*) FROM ioc_behavior_baselines WHERE asset_id=?', [$a]), '第一台不會被重複訓練');
-});
-
-dbtest('訓練：不夠格就不訓練（區間差一格、學習未滿 28 天）；被挑中檢查過的會記下檢查時間；沒有任何時段設定時用預設時段照樣訓練', static function (PDO $db): void {
-    $young = bcdTrainable($db, 1, 6048, true, 10);      // id 最小：若學習天數的條件失效，第一個 tick 就會挑中它
-    $few = bcdTrainable($db, 2, 6047);                  // 差一格（這台沒有流量，tick 不會替它多寫完整區間）
-    $noSchedule = bcdTrainable($db, 3, 6048, false);    // 沒有任何時段設定：用內建預設
-    $state = static fn (int $id) => dbtRow($db, 'SELECT mode,baseline_version,training_checked_at FROM ioc_behavior_assets WHERE id=?', [$id]);
-    for ($i = 0; $i < 2; $i++) {                        // 兩個 tick：各檢查一台
-        bcdTickOnce($db, $i * 300);
-    }
-    assertSame(['learning', 0], [$state($few)['mode'], (int) $state($few)['baseline_version']]);
-    assertTrue($state($few)['training_checked_at'] !== null, '被檢查過、沒通過');
-    assertSame(['learning', 0, null], [$state($young)['mode'], (int) $state($young)['baseline_version'], $state($young)['training_checked_at']], '學習未滿 28 天：根本不會被挑來檢查');
-    assertSame(['ready', 1], [$state($noSchedule)['mode'], (int) $state($noSchedule)['baseline_version']], '沒有排程也能訓練：用預設時段（台北、週一到五 09:00–18:00）');
-    assertSame(48, (int) dbtVal($db, 'SELECT COUNT(*) FROM ioc_behavior_baselines'), '只有那一台有基線');
-});
-
-dbtest('已知限制：ready／monitoring 的資產不會重新訓練（基線只在學習模式建一次）', static function (PDO $db): void {
-    $id = bcdTrainable($db, 1);
-    $db->prepare("UPDATE ioc_behavior_assets SET mode='monitoring',baseline_version=1,quality_status='ready' WHERE id=?")->execute([$id]);
-    bcdTickOnce($db);
-    assertSame(1, (int) dbtVal($db, 'SELECT baseline_version FROM ioc_behavior_assets WHERE id=?', [$id]));
-    assertSame(0, (int) dbtVal($db, 'SELECT COUNT(*) FROM ioc_behavior_baselines'), '沒有新的基線，也沒有舊的被換掉');
 });
 
 // ---- Webhook 通知 ----

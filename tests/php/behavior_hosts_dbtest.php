@@ -68,20 +68,12 @@ dbtest('confirmHosts：確認後保留區間與學習起點；名稱可自訂、
     assertSame(['asset:' . $a, 'asset:' . $b], array_column(dbtAll($db, "SELECT subject FROM ioc_behavior_audit WHERE action='host_confirmed' ORDER BY id"), 'subject'),
         '不論呼叫端給的順序，一律依識別碼由小到大處理（兩位管理者交叉確認時列鎖的順序才一致，不會死結）');
     assertThrows(ValidationError::class, fn () => $svc->confirmHosts([['id' => $a]], '再確認一次', 'admin', DBT_H), '尚未確認');
-    $byId = array_column((new BehaviorService($db))->state(DBT_H)['assets'], null, 'id');
+    $byId = array_column((new BehaviorService($db))->listAssets('confirmed', 1, 10, 'name', 'asc', DBT_H)['rows'], null, 'id');
+    $listed = array_keys($byId);
+    sort($listed);
+    assertSame([$a, $b], $listed, '兩台都在「已確認主機」清單');
     assertTrue($byId[$a]['confirmed_at'] !== null && $byId[$b]['confirmed_at'] !== null, '工作台看得到兩台都是已確認的');
-});
-
-dbtest('linkAsset：已確認的主機也能關聯 LibreNMS 設備（M2b 會把歷史合併過去，細節見 behavior_merge_dbtest.php）', static function (PDO $db): void {
-    $svc = new BehaviorService($db);
-    $dev = $svc->syncDevice(30, 'fw-3', '172.16.3.1', null);
-    $confirmed = bhdObserved($db, '172.16.9.1');
-    $plain = bhdObserved($db, '172.16.9.2');
-    $svc->confirmHosts([['id' => $confirmed]], '核對過', 'admin', DBT_H);
-    $svc->linkAsset($confirmed, 30, '核對過 DHCP', 'admin', DBT_H);
-    $svc->linkAsset($plain, 30, '核對過 DHCP', 'admin', DBT_H);
-    assertSame(['retired', 'retired'], [dbtVal($db, 'SELECT mode FROM ioc_behavior_assets WHERE id=?', [$confirmed]), dbtVal($db, 'SELECT mode FROM ioc_behavior_assets WHERE id=?', [$plain])]);
-    assertSame(2, (int) dbtVal($db, 'SELECT COUNT(*) FROM ioc_behavior_links WHERE target_asset_id=?', [$dev]));
+    assertSame(0, (new BehaviorService($db))->listAssets('lifecycle', 1, 10, 'name', 'asc', DBT_H)['total'], '確認後從「裝置與待確認」清單消失');
 });
 
 // ---- 位址比對與站點歸屬 ----
@@ -119,10 +111,10 @@ dbtest('observeSite：首次歸屬不重新學習；站點變了才重新學習�
     assertSame(['台南', $started], [dbtVal($db, 'SELECT site_name FROM ioc_behavior_assets WHERE id=?', [$t]), dbtVal($db, 'SELECT learning_started_at FROM ioc_behavior_assets WHERE id=?', [$t])]);
     assertSame([], array_values(array_diff(dbtHistory($db, $t), ['address_seen'])), '還沒有站點到有站點：不算變更');
 
-    $db->prepare("UPDATE ioc_behavior_assets SET mode='ready',baseline_version=1,quality_status='ready',training_checked_at=UTC_TIMESTAMP() WHERE id=?")->execute([$t]);
+    $db->prepare("UPDATE ioc_behavior_assets SET mode='monitoring',baseline_version=1,quality_status='ready',training_checked_at=UTC_TIMESTAMP() WHERE id=?")->execute([$t]);
     $db->prepare("INSERT INTO ioc_behavior_known (asset_id,source_key,kind,value_key,first_seen_at,last_seen_at) VALUES (?,'fortigate_graylog','port','443',UTC_TIMESTAMP(),UTC_TIMESTAMP())")->execute([$t]);
     $svc->observeSite($t, '台南');
-    assertSame('ready', dbtVal($db, 'SELECT mode FROM ioc_behavior_assets WHERE id=?', [$t]), '站點沒變：什麼都不做');
+    assertSame('monitoring', dbtVal($db, 'SELECT mode FROM ioc_behavior_assets WHERE id=?', [$t]), '站點沒變：什麼都不做');
     $svc->observeSite($t, '台中');
     $row = dbtRow($db, 'SELECT site_name,mode,quality_status,training_checked_at FROM ioc_behavior_assets WHERE id=?', [$t]);
     assertSame(['台中', 'learning', 'learning', null], [$row['site_name'], $row['mode'], $row['quality_status'], $row['training_checked_at']]);
@@ -143,7 +135,7 @@ dbtest('observeUnknown 帶 siteOf：新建與沿用都會填站點；站點沒�
     assertSame('台南', dbtVal($db, 'SELECT site_name FROM ioc_behavior_assets WHERE id=?', [$id]), '新建的暫時資產一開始就帶站點');
     assertSame($id, $svc->observeUnknown('172.16.9.9', static fn (string $ip): ?string => '台南'));
     assertSame(['address_seen'], dbtHistory($db, $id), '站點沒變：沒有多餘的歷史');
-    $db->prepare("UPDATE ioc_behavior_assets SET mode='ready',baseline_version=1 WHERE id=?")->execute([$id]);
+    $db->prepare("UPDATE ioc_behavior_assets SET mode='monitoring',baseline_version=1 WHERE id=?")->execute([$id]);
     assertSame($id, $svc->observeUnknown('172.16.9.9', static fn (string $ip): ?string => '台中'));
     assertSame(['台中', 'learning'], [dbtVal($db, 'SELECT site_name FROM ioc_behavior_assets WHERE id=?', [$id]), dbtVal($db, 'SELECT mode FROM ioc_behavior_assets WHERE id=?', [$id])]);
     assertTrue(in_array('site_changed', dbtHistory($db, $id), true));
@@ -191,48 +183,46 @@ dbtest('detail：附上這個資產實際套用的時段與來源（管理員才
     assertThrows(AccessDenied::class, fn () => $svc->detail($id, DBT_V));
 });
 
-dbtest('saveSchedule 預設範圍：只收 default／default；有變動才讓「用預設」的資產重新學習；沒變動什麼都不做', static function (PDO $db): void {
+dbtest('saveSchedule 預設範圍：只收 default／default；有變動才讓「用預設」而且在監控中的資產改回學習中；沒變動什麼都不做', static function (PDO $db): void {
     $svc = new BehaviorService($db);
     assertThrows(ValidationError::class, fn () => $svc->saveSchedule('default', 'x', 'Asia/Taipei', '1,2,3,4,5', '09:00', '18:00', 'admin', DBT_H));
     assertThrows(ValidationError::class, fn () => $svc->saveSchedule('default', '', 'Asia/Taipei', '1,2,3,4,5', '09:00', '18:00', 'admin', DBT_H));
     assertThrows(AccessDenied::class, fn () => $svc->saveSchedule('default', 'default', 'Asia/Taipei', '1,2,3,4,5', '09:00', '18:00', 'v', DBT_V));
 
-    $usesDefault = dbtReadyAsset($db, ['device_id' => 1]);
-    $host = dbtReadyAsset($db, ['device_id' => null, 'identity_key' => 'observed:172.16.9.9:x', 'name' => '主機']);
-    $withDevice = dbtReadyAsset($db, ['device_id' => 2]);
-    $withSite = dbtReadyAsset($db, ['device_id' => 3, 'site_name' => '台南']);
-    $gone = dbtReadyAsset($db, ['device_id' => 4, 'mode' => 'retired']);
-    $monitoring = dbtReadyAsset($db, ['device_id' => 5, 'mode' => 'monitoring']);
+    $usesDefault = dbtBaselineAsset($db, ['device_id' => 1]);
+    $host = dbtBaselineAsset($db, ['device_id' => null, 'identity_key' => 'observed:172.16.9.9:x', 'name' => '主機']);
+    $withDevice = dbtBaselineAsset($db, ['device_id' => 2]);
+    $withSite = dbtBaselineAsset($db, ['device_id' => 3, 'site_name' => '台南']);
+    $gone = dbtBaselineAsset($db, ['device_id' => 4, 'mode' => 'retired']);
     $learning = dbtAsset($db, ['device_id' => 6, 'name' => '學習中', 'learning_started_at' => gmdate('Y-m-d H:i:s', time() - 20 * 86400)]);
     $learningStart = dbtVal($db, 'SELECT learning_started_at FROM ioc_behavior_assets WHERE id=?', [$learning]);
     dbtSchedule($db, 'device', '2');
     dbtSchedule($db, 'site', '台南');
     $mode = static fn (int $id) => dbtVal($db, 'SELECT mode FROM ioc_behavior_assets WHERE id=?', [$id]);
 
-    assertSame(['changed' => false, 'ready' => 0, 'monitoring' => 0], $svc->previewScheduleImpact('default', 'default', 'Asia/Taipei', '1,2,3,4,5', '09:00', '18:00', DBT_H), '與內建預設相同：沒有影響');
+    assertSame(['changed' => false, 'monitoring' => 0], $svc->previewScheduleImpact('default', 'default', 'Asia/Taipei', '1,2,3,4,5', '09:00', '18:00', DBT_H), '與內建預設相同：沒有影響');
     $svc->saveSchedule('default', 'default', 'Asia/Taipei', '1,2,3,4,5', '09:00', '18:00', 'admin', DBT_H);     // 與內建預設相同
-    assertSame(['ready', 'ready'], [$mode($usesDefault), $mode($host)], '存的值和內建預設相同：不算變動');
+    assertSame(['monitoring', 'monitoring'], [$mode($usesDefault), $mode($host)], '存的值和內建預設相同：不算變動');
     assertSame(0, (int) dbtVal($db, "SELECT COUNT(*) FROM ioc_behavior_audit WHERE action='schedule_saved'"));
     assertSame(1, (int) dbtVal($db, "SELECT COUNT(*) FROM ioc_behavior_schedules WHERE scope='default' AND scope_key='default'"), '仍然存下來（之後改內建也不受影響）');
 
     assertThrows(AccessDenied::class, fn () => $svc->previewScheduleImpact('default', 'default', 'Asia/Taipei', '1,2,3,4,5', '08:00', '17:00', DBT_V));
     assertThrows(ValidationError::class, fn () => $svc->previewScheduleImpact('default', 'x', 'Asia/Taipei', '1,2,3,4,5', '08:00', '17:00', DBT_H));
-    assertSame(['changed' => true, 'ready' => 2, 'monitoring' => 1], $svc->previewScheduleImpact('default', 'default', 'Asia/Taipei', '1,2,3,4,5', '08:00', '17:00', DBT_H),
-        '預覽：套用預設、已有基線的資產（就緒 2 台＋監控中 1 台）會重新學習；學習中、有自己時段、已退役的不算');
-    assertSame('ready', $mode($usesDefault), '預覽不改任何資料');
+    assertSame(['changed' => true, 'monitoring' => 2], $svc->previewScheduleImpact('default', 'default', 'Asia/Taipei', '1,2,3,4,5', '08:00', '17:00', DBT_H),
+        '預覽：套用預設、監控中的資產（含沒有設備的主機）會改回學習中；學習中、有自己時段、已退役的不算');
+    assertSame('monitoring', $mode($usesDefault), '預覽不改任何資料');
 
     $svc->saveSchedule('default', 'default', 'Asia/Taipei', '1,2,3,4,5', '08:00', '17:00', 'admin', DBT_H);
-    assertSame(['learning', 'learning', 'learning'], [$mode($usesDefault), $mode($host), $mode($monitoring)], '已有基線、用預設時段的資產（含沒有設備的主機）重新學習，監控中的暫停');
-    assertSame(['ready', 'ready', 'retired'], [$mode($withDevice), $mode($withSite), $mode($gone)], '有自己時段的、已退役的不動');
-    assertSame($learningStart, dbtVal($db, 'SELECT learning_started_at FROM ioc_behavior_assets WHERE id=?', [$learning]),
-        '本來就在學習中的不重設起算時間：訓練時才讀時段，學習中的資產沒有任何東西依賴舊時段，重設只會白白損失已累積的天數');
+    assertSame(['learning', 'learning'], [$mode($usesDefault), $mode($host)], '用預設時段、監控中的資產改回學習中（要重新按「啟用監控」）');
+    assertSame(['monitoring', 'monitoring', 'retired'], [$mode($withDevice), $mode($withSite), $mode($gone)], '有自己時段的、已退役的不動');
+    assertSame($learningStart, dbtVal($db, 'SELECT learning_started_at FROM ioc_behavior_assets WHERE id=?', [$learning]), '本來就在學習中的不重設起算時間');
     assertSame('default:default', dbtVal($db, "SELECT subject FROM ioc_behavior_audit WHERE action='schedule_saved'"));
     assertTrue(in_array('schedule_changed', dbtHistory($db, $host), true));
 
-    $db->exec("UPDATE ioc_behavior_assets SET mode='ready' WHERE id IN ($usesDefault,$host)");
+    $db->exec("UPDATE ioc_behavior_assets SET mode='monitoring' WHERE id IN ($usesDefault,$host)");
     $svc->saveSchedule('default', 'default', 'Asia/Taipei', '1,2,3,4,5', '08:00', '17:00', 'admin', DBT_H);
-    assertSame(['ready', 'ready'], [$mode($usesDefault), $mode($host)], '再存一次同樣的值：不動');
-    assertSame(['changed' => false, 'ready' => 0, 'monitoring' => 0], $svc->previewScheduleImpact('default', 'default', 'Asia/Taipei', '1,2,3,4,5', '08:00', '17:00', DBT_H));
+    assertSame(['monitoring', 'monitoring'], [$mode($usesDefault), $mode($host)], '再存一次同樣的值：不動');
+    assertSame(['changed' => false, 'monitoring' => 0], $svc->previewScheduleImpact('default', 'default', 'Asia/Taipei', '1,2,3,4,5', '08:00', '17:00', DBT_H));
 
     $state = $svc->state(DBT_H);
     assertSame(['Asia/Taipei', '08:00', '17:00', true], [$state['default_schedule']['timezone'], substr($state['default_schedule']['start_time'], 0, 5), substr($state['default_schedule']['end_time'], 0, 5), $state['default_schedule']['custom']]);
@@ -247,17 +237,14 @@ dbtest('state：沒存過預設時段時，工作台看到內建預設並標示�
 
 dbtest('setMode：已確認主機也能啟用監控；未確認的不行；沒有任何時段設定也能啟用（有預設）', static function (PDO $db): void {
     $svc = new BehaviorService($db);
-    $host = dbtReadyAsset($db, ['device_id' => null, 'identity_key' => 'observed:172.16.9.9:x', 'name' => '待確認設備 172.16.9.9']);
+    $host = dbtAsset($db, ['device_id' => null, 'identity_key' => 'observed:172.16.9.9:x', 'name' => '待確認設備 172.16.9.9', 'learning_started_at' => gmdate('Y-m-d H:i:s', time() - 3 * 86400)]);
+    bcdBulkWindows($db, $host, 200, intdiv(time() - 20 * 3600, 300) * 300);
     dbtSource($db, 'ready');
-    assertThrows(ValidationError::class, fn () => $svc->setMode($host, 'monitoring', 'admin', DBT_H), '待確認設備');
+    assertThrows(ValidationError::class, fn () => $svc->setMode($host, 'monitoring', 'admin', DBT_H), '確認為受管主機');
     $svc->confirmHosts([['id' => $host, 'name' => '財務部 PC-01']], '核對過', 'admin', DBT_H);
     assertSame(0, (int) dbtVal($db, 'SELECT COUNT(*) FROM ioc_behavior_schedules'), '沒有任何時段設定');
     $svc->setMode($host, 'monitoring', 'admin', DBT_H);
-    assertSame('monitoring', dbtVal($db, 'SELECT mode FROM ioc_behavior_assets WHERE id=?', [$host]));
-
-    $young = dbtReadyAsset($db, ['device_id' => null, 'identity_key' => 'observed:172.16.9.8:x', 'learning_started_at' => gmdate('Y-m-d H:i:s', time() - 5 * 86400)]);
-    $svc->confirmHosts([['id' => $young]], '核對過', 'admin', DBT_H);
-    assertThrows(ValidationError::class, fn () => $svc->setMode($young, 'monitoring', 'admin', DBT_H), '28 天', '確認過的主機也要學習滿 28 天');
+    assertSame(['monitoring', 1], [dbtVal($db, 'SELECT mode FROM ioc_behavior_assets WHERE id=?', [$host]), (int) dbtVal($db, 'SELECT baseline_version FROM ioc_behavior_assets WHERE id=?', [$host])]);
 });
 
 // ---- 採集器 ----
@@ -270,7 +257,7 @@ dbtest('tick：以 siteOf 幫觀測主機填站點（沒有對到網段就維持
     assertSame(['台南', null], [$site('172.16.9.9'), $site('172.16.9.8')]);
 
     $id = (int) dbtVal($db, "SELECT asset_id FROM ioc_behavior_addresses WHERE address='172.16.9.9'");
-    $db->prepare("UPDATE ioc_behavior_assets SET mode='ready',baseline_version=1 WHERE id=?")->execute([$id]);
+    $db->prepare("UPDATE ioc_behavior_assets SET mode='monitoring',baseline_version=1 WHERE id=?")->execute([$id]);
     (new BehaviorCollector($db, DbtFakeLogs::traffic($traffic)))->tick([], bcdNets(), bcdNow('2026-10-26 12:12:30'), static fn (string $ip): ?string => '台中');
     assertSame(['台中', 'learning'], [$site('172.16.9.9'), dbtVal($db, 'SELECT mode FROM ioc_behavior_assets WHERE id=?', [$id])], '站點變了：重新學習');
     // 沒有傳 siteOf（舊的呼叫方式）：不動站點
@@ -291,23 +278,6 @@ dbtest('tick：已確認主機隔了很久再出現，流量仍算在同一個�
     assertSame(3, (int) dbtVal($db, 'SELECT COUNT(*) FROM ioc_behavior_assets'));
 });
 
-dbtest('訓練：已確認的主機（沒有 LibreNMS 設備、沒有任何時段設定）用預設時段照樣訓練；未確認的不訓練', static function (PDO $db): void {
-    $svc = new BehaviorService($db);
-    $plain = $svc->observeUnknown('172.16.9.8');          // id 較小：若「只訓練確認過的」失效，tick 會先挑中它
-    $confirmed = $svc->observeUnknown('172.16.9.9');
-    $svc->confirmHosts([['id' => $confirmed]], '核對過', 'admin', DBT_H);
-    foreach ([$confirmed, $plain] as $id) {
-        $db->prepare('UPDATE ioc_behavior_assets SET learning_started_at=? WHERE id=?')->execute([gmdate('Y-m-d H:i:s', time() - 29 * 86400), $id]);
-        bcdBulkWindows($db, $id, 6048, intdiv(time() - 27 * 86400, 300) * 300);
-    }
-    assertSame(0, (int) dbtVal($db, 'SELECT COUNT(*) FROM ioc_behavior_schedules'));
-    bcdTickOnce($db);
-    $row = static fn (int $id) => dbtRow($db, 'SELECT mode,baseline_version,training_checked_at FROM ioc_behavior_assets WHERE id=?', [$id]);
-    assertSame(['ready', 1], [$row($confirmed)['mode'], (int) $row($confirmed)['baseline_version']]);
-    assertSame(48, (int) dbtVal($db, 'SELECT COUNT(*) FROM ioc_behavior_baselines WHERE asset_id=?', [$confirmed]));
-    assertSame(['learning', 0, null], [$row($plain)['mode'], (int) $row($plain)['baseline_version'], $row($plain)['training_checked_at']], '未確認：不會被挑來訓練（只累積區間，確認之後有歷史可用）');
-});
-
 dbtest('偵測：沒有任何時段設定時用內建預設（台北週一到五 09:00–18:00），離峰的大流量照樣產生警示', static function (PDO $db): void {
     bcdMonitored($db, 'monitoring');
     $db->exec('DELETE FROM ioc_behavior_schedules');
@@ -317,15 +287,12 @@ dbtest('偵測：沒有任何時段設定時用內建預設（台北週一到五
     assertSame(2, (int) dbtVal($db, 'SELECT COUNT(*) FROM ioc_behavior_alerts'), '上班時段不判斷');
 });
 
-dbtest('完整流程：確認主機 → 訓練完成 → 啟用監控 → 離峰暴增 → 開警示、建事件案（案件的主機名稱是確認時填的名稱）', static function (PDO $db): void {
+dbtest('完整流程：確認主機 → 累積資料 → 啟用監控（立即訓練基線）→ 離峰暴增 → 開警示、建事件案（案件的主機名稱是確認時填的名稱）', static function (PDO $db): void {
     $svc = new BehaviorService($db);
     $host = $svc->observeUnknown('172.16.1.10');
     $svc->confirmHosts([['id' => $host, 'name' => '財務部 PC-01']], '核對過 DHCP 租約', 'admin', DBT_H);
-    $db->prepare("UPDATE ioc_behavior_assets SET mode='ready',baseline_version=1,quality_status='ready',learning_started_at=? WHERE id=?")->execute([gmdate('Y-m-d H:i:s', time() - 30 * 86400), $host]);
-    foreach ([20, 21] as $hour) {
-        $db->prepare("INSERT INTO ioc_behavior_baselines (asset_id,version,source_key,day_kind,hour_of_day,median_bytes,p95_bytes,mad_bytes,median_connections,p95_connections,mad_connections,median_destinations,p95_destinations,mad_destinations,sample_count,created_at)
-            VALUES (?,1,'fortigate_graylog','weekday',?,500000,1000000,1,3,5,1,2,3,1,10,UTC_TIMESTAMP())")->execute([$host, $hour]);
-    }
+    $db->prepare('UPDATE ioc_behavior_assets SET learning_started_at=? WHERE id=?')->execute([gmdate('Y-m-d H:i:s', time() - 6 * 86400), $host]);
+    bcdBulkWindows($db, $host, 1440, intdiv(time() - 5 * 86400, 300) * 300);       // 5 天、每個小時都有資料（平日與週末都涵蓋）
     dbtSource($db, 'ready');
     $svc->setMode($host, 'monitoring', 'admin', DBT_H);
     (new BehaviorCollector($db, DbtFakeLogs::traffic(bcdSurge('172.16.1.10'))))->tick([], bcdNets(), bcdNow('2026-10-26 12:07:30'));
