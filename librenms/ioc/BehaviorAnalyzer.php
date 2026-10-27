@@ -7,11 +7,14 @@ namespace Ioc;
 final class BehaviorAnalyzer
 {
     public const CONTRACT_VERSION = 1;
-    /** 訓練基線至少要有的完整區間數：28 天 × 288 格 × 75%；缺資料不得視為正常。 */
-    public const TRAIN_MIN_WINDOWS = 6048;
-    public const TRAIN_MIN_DAYS = 20;
-    public const TRAIN_MIN_ACTIVE_DAYS = 7;
-    public const TRAIN_MIN_ACTIVE_WINDOWS = 100;
+    /**
+     * 啟用監控時訓練基線的最低資料量（提案值，可調）：完整區間 144 格（約 12 小時）、有連線的區間 12 格；
+     * 不足就擋下並說明缺多少。沒有強制的學習天數：資料少只是涵蓋少，沒涵蓋的時段不判斷，不會誤報。
+     */
+    public const BASELINE_MIN_WINDOWS = 144;
+    public const BASELINE_MIN_ACTIVE_WINDOWS = 12;
+    /** 一個時段桶至少要有幾個樣本，偵測才會拿它的基線判斷（樣本太少不判斷）。 */
+    public const BASELINE_MIN_SAMPLES = 6;
 
     /** 沒有該裝置的日誌時，區間的說明（全域有日誌不代表這台沒中斷，不能補成零流量）。 */
     public const MISSING_REASON = '此裝置沒有觀測到日誌，不能判為零流量';
@@ -52,74 +55,6 @@ final class BehaviorAnalyzer
     }
 
     /**
-     * 同一個資產在一個區間裡可能有好幾個位址（LibreNMS 的 IP，加上管理員確認過的位址）：把各位址的流量併成這個資產的一筆。
-     * 連線數、位元組、有欄位的筆數逐項相加，目的地與埠清單取聯集；有流量的位址只有一個時，目的地數與埠數沿用日誌端算好的基數
-     * （和只有一個位址的資產完全一樣），有兩個以上才用聯集的個數。沒有流量的位址不影響結果：只要有一個位址有流量，
-     * 這個區間就以它為準（缺席的位址無從判斷，也不能因此把有資料的區間說成缺資料；這是取捨：沒流量的位址可能只是真的沒流量，
-     * 也可能是它的日誌中斷了，兩者分不出來，關聯預覽會提醒管理員）。top_ip 是連線數最多的位址（警示與事件案用它說明流量從哪來）。
-     *
-     * @param array<int,array{ip?:string,count:int,bytes:int,with_bytes:int,dest_count:int,port_count:int,card_dst:int,card_port:int,dest_list:array,port_list:array,ambiguous:bool}> $parts
-     * @return array{connections:int,bytes:int,destinations:int,ports:int,with_bytes:int,dest_count:int,port_count:int,ambiguous:bool,dest_list:array,port_list:array,top_ip:?string}
-     */
-    public static function combineTraffic(array $parts): array
-    {
-        $out = ['connections' => 0, 'bytes' => 0, 'destinations' => 0, 'ports' => 0, 'with_bytes' => 0,
-            'dest_count' => 0, 'port_count' => 0, 'ambiguous' => false, 'dest_list' => [], 'port_list' => [], 'top_ip' => null];
-        $dest = []; $ports = []; $active = []; $topCount = 0;
-        foreach ($parts as $p) {
-            $out['connections'] += $p['count'];
-            $out['bytes'] += $p['bytes'];
-            $out['with_bytes'] += $p['with_bytes'];
-            $out['dest_count'] += $p['dest_count'];
-            $out['port_count'] += $p['port_count'];
-            $out['ambiguous'] = $out['ambiguous'] || $p['ambiguous'];
-            foreach ($p['dest_list'] as $d) { $dest[$d] = true; }
-            foreach ($p['port_list'] as $port) { $ports[$port] = true; }
-            if ($p['count'] > 0) {
-                $active[] = $p;
-                if ($p['count'] > $topCount) { $topCount = $p['count']; $out['top_ip'] = $p['ip'] ?? null; }
-            }
-        }
-        $out['dest_list'] = array_keys($dest);
-        $out['port_list'] = array_keys($ports);
-        $single = count($active) <= 1;
-        $out['destinations'] = $single ? ($active ? $active[0]['card_dst'] : 0) : count($dest);
-        $out['ports'] = $single ? ($active ? $active[0]['card_port'] : 0) : count($ports);
-        return $out;
-    }
-
-    /**
-     * 關聯設備時，同一個區間兩邊（設備、暫時資產）都有流量：併成一列。連線數與位元組相加，目的地與埠取聯集；
-     * 兩邊都是 complete 才是 complete，有一邊不完整就是 partial（不進基線），原因合併後截到 120 字。
-     * 呼叫端只在兩邊都不是 missing 時才用它。
-     *
-     * @param array{connections:mixed,bytes_total:mixed,destinations_json:string,ports_json:string,quality:string,quality_reason:string,observed_at:string} $device
-     * @param array{connections:mixed,bytes_total:mixed,destinations_json:string,ports_json:string,quality:string,quality_reason:string,observed_at:string} $observed
-     * @return array{connections:int,bytes_total:int,destinations:int,ports:int,destinations_json:string,ports_json:string,quality:string,quality_reason:string,observed_at:string}
-     */
-    public static function mergeWindowRows(array $device, array $observed): array
-    {
-        $union = static function (string $a, string $b): array {
-            $set = [];
-            foreach ([$a, $b] as $json) {
-                foreach ((array) json_decode($json, true) as $v) { $set[$v] = true; }
-            }
-            return array_keys($set);
-        };
-        $dest = $union($device['destinations_json'], $observed['destinations_json']);
-        $ports = $union($device['ports_json'], $observed['ports_json']);
-        $complete = $device['quality'] === 'complete' && $observed['quality'] === 'complete';
-        $reasons = array_values(array_unique(array_filter([$device['quality_reason'], $observed['quality_reason']], static fn (string $r): bool => $r !== '')));
-        return ['connections' => (int) $device['connections'] + (int) $observed['connections'],
-            'bytes_total' => (int) $device['bytes_total'] + (int) $observed['bytes_total'],
-            'destinations' => count($dest), 'ports' => count($ports),
-            'destinations_json' => json_encode($dest, JSON_THROW_ON_ERROR), 'ports_json' => json_encode($ports, JSON_THROW_ON_ERROR),
-            'quality' => $complete ? 'complete' : 'partial',
-            'quality_reason' => $complete ? '' : mb_substr('合併了兩個位址的區間：' . implode('；', $reasons), 0, 120),
-            'observed_at' => max($device['observed_at'], $observed['observed_at'])];
-    }
-
-    /**
      * 區間起點（UTC）換成排程時區後的分桶與是否在上班時段。上班＝本地星期在工作日內且時間落在 [開始, 結束)。
      * 基線分桶固定把週一到週五算 weekday、週六日算 weekend，與設定的工作日無關。
      *
@@ -144,30 +79,60 @@ final class BehaviorAnalyzer
     }
 
     /**
-     * 訓練基線前的門檻檢查與分桶。完整區間不足 TRAIN_MIN_WINDOWS、涵蓋的本地日期不足 TRAIN_MIN_DAYS、
-     * 有連線的日期不足 TRAIN_MIN_ACTIVE_DAYS、有連線的區間不足 TRAIN_MIN_ACTIVE_WINDOWS 都回傳 null（不訓練）。
-     * 達標時依本地「平日／週末:小時」分桶，鍵像 'weekday:9'。
+     * 依本地「平日／週末:小時」分桶，鍵像 'weekday:9'。不做任何門檻（門檻見 baselineCheck）。
      *
      * @param array<int,array{window_start:string,connections:mixed}> $rows 完整區間，window_start 是 UTC
-     * @return array<string,array<int,array<string,mixed>>>|null
+     * @return array<string,array<int,array<string,mixed>>>
      */
-    public static function trainingGroups(array $rows, string $timezone): ?array
+    public static function baselineBuckets(array $rows, string $timezone): array
     {
-        if (count($rows) < self::TRAIN_MIN_WINDOWS) { return null; }
         $zone = new \DateTimeZone($timezone);
-        $days = []; $activeDays = []; $activeWindows = 0; $groups = [];
+        $groups = [];
         foreach ($rows as $row) {
             $local = self::localTime($row['window_start'], $zone);
-            $days[$local->format('Y-m-d')] = true;
-            if ((int) $row['connections'] > 0) {
-                $activeDays[$local->format('Y-m-d')] = true;
-                $activeWindows++;
-            }
             $groups[((int) $local->format('N') <= 5 ? 'weekday' : 'weekend') . ':' . $local->format('G')][] = $row;
         }
-        if (count($days) < self::TRAIN_MIN_DAYS || count($activeDays) < self::TRAIN_MIN_ACTIVE_DAYS
-            || $activeWindows < self::TRAIN_MIN_ACTIVE_WINDOWS) { return null; }
         return $groups;
+    }
+
+    /**
+     * 啟用監控前的資料量檢查與涵蓋度（預覽與訓練共用）。完整區間不足 BASELINE_MIN_WINDOWS、或有連線的區間不足
+     * BASELINE_MIN_ACTIVE_WINDOWS 就不達標，原因說出現有幾格、至少需要幾格。涵蓋度：涵蓋幾個本地日期、有幾個離峰時段桶
+     * 的樣本夠用（偵測只在離峰時段判斷，所以只算離峰）；一個離峰桶都沒有時警告：啟用後不會判斷離峰異常。
+     *
+     * @param array<int,array{window_start:string,connections:mixed}> $rows 完整區間，window_start 是 UTC
+     * @param array{timezone:string,workdays:string,start_time:string,end_time:string} $schedule
+     * @return array{windows:int,active_windows:int,days:int,offhours_buckets:int,min_windows:int,min_active_windows:int,ok:bool,reasons:string[],warnings:string[]}
+     */
+    public static function baselineCheck(array $rows, array $schedule): array
+    {
+        $zone = new \DateTimeZone($schedule['timezone']);
+        $days = []; $active = 0; $off = [];
+        foreach ($rows as $row) {
+            $days[self::localTime($row['window_start'], $zone)->format('Y-m-d')] = true;
+            if ((int) $row['connections'] > 0) { $active++; }
+            $b = self::localBucket($row['window_start'], $schedule);
+            if (!$b['on_duty']) {
+                $key = $b['day_kind'] . ':' . $b['hour'];
+                $off[$key] = ($off[$key] ?? 0) + 1;
+            }
+        }
+        $windows = count($rows);
+        $reasons = [];
+        if ($windows < self::BASELINE_MIN_WINDOWS) {
+            $reasons[] = sprintf('完整區間只有 %d 格，至少需要 %d 格（約 12 小時）', $windows, self::BASELINE_MIN_WINDOWS);
+        }
+        if ($active < self::BASELINE_MIN_ACTIVE_WINDOWS) {
+            $reasons[] = sprintf('有連線的區間只有 %d 格，至少需要 %d 格', $active, self::BASELINE_MIN_ACTIVE_WINDOWS);
+        }
+        $buckets = count(array_filter($off, static fn (int $n): bool => $n >= self::BASELINE_MIN_SAMPLES));
+        $warnings = [];
+        if ($reasons === [] && $buckets === 0) {
+            $warnings[] = '還沒有任何離峰時段的資料：啟用後不會判斷離峰異常（偵測只看離峰時段）；資料累積到離峰之後可以重新學習再啟用';
+        }
+        return ['windows' => $windows, 'active_windows' => $active, 'days' => count($days), 'offhours_buckets' => $buckets,
+            'min_windows' => self::BASELINE_MIN_WINDOWS, 'min_active_windows' => self::BASELINE_MIN_ACTIVE_WINDOWS,
+            'ok' => $reasons === [], 'reasons' => $reasons, 'warnings' => $warnings];
     }
 
     private static function localTime(string $utc, \DateTimeZone $zone): \DateTimeImmutable
@@ -193,7 +158,7 @@ final class BehaviorAnalyzer
     /** @param array<string,mixed> $window @param array<string,mixed> $baseline */
     public static function evaluate(array $window, array $baseline, bool $afterHours, array $newDestinations, array $newPorts): array
     {
-        if (($window['quality'] ?? '') !== 'complete' || !$afterHours || (int) ($baseline['sample_count'] ?? 0) < 6) { return []; }
+        if (($window['quality'] ?? '') !== 'complete' || !$afterHours || (int) ($baseline['sample_count'] ?? 0) < self::BASELINE_MIN_SAMPLES) { return []; }
         $bytes = (int) $window['bytes_total'];
         $connections = (int) $window['connections'];
         $destinations = (int) $window['destinations'];

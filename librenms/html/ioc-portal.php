@@ -157,6 +157,15 @@ label{display:block;font-size:12px;color:var(--muted);margin:10px 0 3px}
 .sumrow>div{padding:8px 10px;border:1px solid var(--line);border-radius:10px;background:#0a1728;min-width:0}
 .sumrow .k{display:block;font-size:11px;color:var(--muted)}
 .sumrow .v{display:block;font-size:13px;word-break:break-word}
+.sumrow.c4{grid-template-columns:repeat(4,minmax(0,1fr))}
+.pager{display:flex;gap:10px;flex-wrap:wrap;align-items:center;justify-content:space-between;margin-top:10px;font-size:12px;color:var(--muted)}
+.pager .pages{display:flex;gap:4px;flex-wrap:wrap;align-items:center}
+.pager .gap{padding:0 4px}
+.pager .per{display:flex;align-items:center;gap:4px;margin:0;font-size:12px}
+th .sort{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:pointer;text-align:left}
+th .sort:hover{color:#fff}
+th .sort .dim{opacity:.4}
+th .sort:focus-visible{outline:2px solid var(--blue);outline-offset:1px}
 .sec-h{margin:18px 0 6px;font-size:13px;padding-top:10px;border-top:1px solid var(--line)}
 .pill{display:inline-block;margin:2px 6px 2px 0;padding:1px 9px;border:1px solid #2a4060;border-radius:999px;font-size:11px;color:#c8d6e7}
 .steps{margin:4px 0 0;padding-left:20px;font-size:13px}
@@ -199,7 +208,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
 @media(max-width:1280px){.kpis6,.kpis5{grid-template-columns:repeat(3,minmax(0,1fr))}.kpis4{grid-template-columns:repeat(2,minmax(0,1fr))}.three{grid-template-columns:1fr}}
 @media(max-width:1180px){.two,.even,.split{grid-template-columns:1fr}}
 @media(max-width:900px){.app{flex-direction:column}.side{position:static;width:auto;height:auto;padding:10px}.nav{flex-direction:row;overflow-x:auto}.nav button{white-space:nowrap;width:auto}.nav .sep{display:none}.main{padding:10px}}
-@media(max-width:720px){.kpis6,.kpis5,.kpis4,.kpis2{grid-template-columns:repeat(2,minmax(0,1fr))}.sumrow{grid-template-columns:repeat(2,minmax(0,1fr))}.site-row{grid-template-columns:1fr}}
+@media(max-width:720px){.kpis6,.kpis5,.kpis4,.kpis2{grid-template-columns:repeat(2,minmax(0,1fr))}.sumrow,.sumrow.c4{grid-template-columns:repeat(2,minmax(0,1fr))}.site-row{grid-template-columns:1fr}}
 </style>
 </head>
 <body>

@@ -203,43 +203,74 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
         collector = (ROOT / "librenms" / "ioc" / "BehaviorCollector.php").read_text(encoding="utf-8")
         self.assertIn("->scheduleFor(", collector)
         self.assertNotIn("FROM ioc_behavior_schedules", collector, "採集器不能自己查時段，偵測與訓練都要走 BehaviorService::scheduleFor")
-        self.assertRegex(collector, r"device_id IS NOT NULL OR confirmed_at IS NOT NULL", "只訓練身分確認過的資產")
-
-    def test_linking_merges_history_and_is_wired_end_to_end(self):
-        """M2b：關聯要先預覽、合併歷史，採集器要依「管理員確認過的位址」對應流量並把多個位址併成一筆；漏接任何一段都是假功能。"""
-        endpoint = (ROOT / "librenms" / "html" / "ioc-behavior.php").read_text(encoding="utf-8")
-        for action, call in (("preview_link", "->previewLink("), ("link_asset", "->linkAsset("), ("unlink_address", "->unlinkAddress(")):
-            self.assertIn("case '%s':" % action, endpoint)
-            self.assertIn(call, endpoint)
-        ui = (ROOT / "librenms" / "html" / "js" / "ioc-behavior.js").read_text(encoding="utf-8")
-        for token in ("preview_link", "link_asset", "unlink_address", "link_suggestions"):
-            self.assertIn(token, ui)
-        self.assertIn("linkable(a)", ui, "已確認的主機也要能關聯")
-        self.assertIn("data.devices", ui, "關聯的設備選單要用伺服器給齊的 devices，資產清單只有最新 300 筆")
-        self.assertNotRegex(ui, r"canHandle && confirmable\(a\) \? h\('div', \{ class: 'toolbar' \}, linkId",
-                            "關聯不能只開給未確認的主機（已確認的也要能合併進設備）")
-        self.assertRegex(ui, r"preview_link[\s\S]{0,1200}window\.confirm", "關聯前要先顯示預覽並請管理員確認")
-        self.assertRegex(endpoint, r"->linkAsset\([^;]*\$str\('plan_token'\)", "執行關聯一定要帶預覽的 token，管理員同意的是預覽看到的那一份")
-        self.assertIn("plan_token: plan.token", ui)
-        self.assertIn("mode_names", ui, "模式名稱由伺服器給，畫面不再自己寫一份")
-        self.assertNotRegex(ui, r"modeName\s*=\s*\{[^}]*learning", "模式名稱只能有一份（BehaviorService::MODE_NAMES）")
-        collector = (ROOT / "librenms" / "ioc" / "BehaviorCollector.php").read_text(encoding="utf-8")
-        self.assertRegex(collector, r"->linkedAddresses\(\$knownDeviceIds \?\? array_column\(\$devices, 'id'\)\)", "採集器只認 LibreNMS 裡還在的設備的已確認位址（含停用、忽略的）")
-        self.assertIn("->observeLinked(", collector)
-        self.assertIn("BehaviorAnalyzer::combineTraffic(", collector, "一個資產的多個位址要先併成一筆，不然同一區間的唯一鍵會讓後寫的蓋掉先寫的")
-        self.assertIn("->acquireTickLock(", collector, "寫區間要和關聯互斥，不然關聯合併時採集器還在寫暫時資產")
-        self.assertIn("->releaseTickLock()", collector)
         service = (ROOT / "librenms" / "ioc" / "BehaviorService.php").read_text(encoding="utf-8")
-        self.assertIn("GET_LOCK(", service)
-        self.assertEqual(service.count("$this->exclusively("), 2, "關聯與解除位址都要走 exclusively：取鎖、交易、放鎖的順序只有一份")
-        self.assertEqual(service.count("takeTickLock();"), 1, "取鎖只在 exclusively 裡")
-        self.assertRegex(service, r"GET_LOCK\(\?,\?\)[\s\S]{0,200}\$this->lockName\(\)", "鎖名稱要帶資料庫名稱的雜湊（GET_LOCK 的名稱是整台伺服器共用的）")
+        self.assertRegex(service, r"\$asset\['device_id'\] === null && \$asset\['confirmed_at'\] === null", "啟用監控的身分條件：有 LibreNMS 設備，或已確認")
+
+    def test_manual_linking_is_removed_everywhere(self):
+        """2026-10-27：主機不需要跟 LibreNMS 設備做人工關聯（M2b 的關聯被用錯、撤銷代價高）。端點、畫面、服務與採集器都不能留下殘件。"""
+        endpoint = (ROOT / "librenms" / "html" / "ioc-behavior.php").read_text(encoding="utf-8")
+        for action in ("preview_link", "link_asset", "unlink_address"):
+            self.assertNotIn(action, endpoint)
+        ui = (ROOT / "librenms" / "html" / "js" / "ioc-behavior.js").read_text(encoding="utf-8")
+        for token in ("preview_link", "link_asset", "unlink_address", "link_suggestions", "plan_token", "source_ip", "linkFlow", "deviceOptions"):
+            self.assertNotIn(token, ui)
+        service = (ROOT / "librenms" / "ioc" / "BehaviorService.php").read_text(encoding="utf-8")
+        for token in ("previewLink", "linkAsset", "unlinkAddress", "linkedAddresses", "linkSuggestions", "GET_LOCK(", "exclusively(", "admin_confirmed"):
+            self.assertNotIn(token, service)
+        collector = (ROOT / "librenms" / "ioc" / "BehaviorCollector.php").read_text(encoding="utf-8")
+        for token in ("observeLinked", "combineTraffic", "TickLock", "knownDeviceIds", "source_ip"):
+            self.assertNotIn(token, collector)
         tick = (ROOT / "system" / "ioc-behavior-tick.php").read_text(encoding="utf-8")
-        self.assertRegex(tick, r"->tick\([^;]*\$knownDeviceIds\)", "停用、忽略的設備也要算「還在 LibreNMS」，不然維修停用會放掉它的已確認位址")
-        self.assertIn("m.source_ip", ui, "警示列要顯示流量來源位址")
-        self.assertIn("evidence_kind='admin_confirmed'", service)
-        self.assertNotRegex(service, r"SELECT id,address FROM ioc_behavior_addresses WHERE asset_id=\? ORDER BY id DESC LIMIT 1",
-                            "位址要依（資產，位址）比對，不能只看最新一列，不然多個位址輪流出現會每一輪都新增一列")
+        self.assertNotIn("knownDeviceIds", tick)
+        self.assertRegex(service, r"SELECT id FROM ioc_behavior_addresses WHERE asset_id=\? AND address=\? ORDER BY id DESC LIMIT 1",
+                         "位址要依（資產，位址）比對，不能只看最新一列，不然多個位址輪流出現會每一輪都新增一列")
+
+    def test_baseline_is_trained_when_monitoring_is_enabled_and_never_automatically(self):
+        """2026-10-27：取消強制 28 天。啟用監控才用現有資料訓練基線；畫面要先預覽資料量與涵蓋度並請管理員確認。"""
+        endpoint = (ROOT / "librenms" / "html" / "ioc-behavior.php").read_text(encoding="utf-8")
+        self.assertIn("case 'preview_baseline':", endpoint)
+        self.assertIn("->previewBaseline(", endpoint)
+        ui = (ROOT / "librenms" / "html" / "js" / "ioc-behavior.js").read_text(encoding="utf-8")
+        self.assertRegex(ui, r"preview_baseline[\s\S]{0,1500}window\.confirm", "啟用監控前要先預覽資料量與涵蓋度，請管理員確認")
+        self.assertNotIn("28 天", ui, "畫面不再有強制學習 28 天的說法")
+        self.assertNotIn("停用追蹤", ui, "詳情頁只留「重新學習」「啟用監控」；停用改成已確認主機頁的「移除」")
+        service = (ROOT / "librenms" / "ioc" / "BehaviorService.php").read_text(encoding="utf-8")
+        self.assertRegex(service, r"MODE_NAMES = \['learning' => '[^']+', 'monitoring' => '[^']+', 'retired' => '[^']+'\]", "沒有 ready 模式")
+        self.assertRegex(service, r"\$mode === 'monitoring' \? \$this->trainBaseline\(\$asset\)", "啟用監控時才訓練，而且在交易裡")
+        collector = (ROOT / "librenms" / "ioc" / "BehaviorCollector.php").read_text(encoding="utf-8")
+        for token in ("trainPending", "TRAIN_MIN", "LEARNING_DAYS"):
+            self.assertNotIn(token, collector, "採集器不再自動訓練基線")
+        schema = (ROOT / "librenms" / "ioc" / "Schema.php").read_text(encoding="utf-8")
+        self.assertIn("SET mode='learning',quality_status='learning' WHERE mode='ready'", schema, "舊的 ready 資產要遷回學習中（冪等）")
+
+    def test_asset_list_is_paged_and_sorted_on_the_server(self):
+        """裝置生命週期與已確認主機：兩個分頁籤各自分頁、可排序；排序欄位與每頁筆數走白名單，state 不再帶整份資產。"""
+        endpoint = (ROOT / "librenms" / "html" / "ioc-behavior.php").read_text(encoding="utf-8")
+        self.assertIn("case 'list_assets':", endpoint)
+        self.assertRegex(endpoint, r"->listAssets\(\$str\('view'\), \$int\('page'\), \$int\('per_page'\), \$str\('sort'\), \$str\('dir'\), \$level\)")
+        service = (ROOT / "librenms" / "ioc" / "BehaviorService.php").read_text(encoding="utf-8")
+        state = service[service.index("public function state("):service.index("public function listAssets(")]
+        self.assertNotIn("'assets' =>", state, "state 不再帶整份資產（沒有 300 筆上限，改由 listAssets 分頁取得）")
+        body = service[service.index("public function listAssets("):service.index("private static function castRows(")]
+        self.assertLess(body.index("Access::requireHandler("), body.index("self::LIST_FILTERS[$view]"), "先檢查權限才讀資料")
+        self.assertIn("isset(self::LIST_SORTS[$sort])", body)
+        self.assertIn("isset(self::LIST_FILTERS[$view])", body)
+        self.assertIn("in_array($perPage, self::PAGE_SIZES, true)", body)
+        for user_value in ("$sort", "$view", "$dir", "$page", "$perPage"):
+            # 使用者給的值只能拿來查白名單或當整數；SQL 裡出現的是白名單查到的固定表達式（$page 與 $perPage 是 int 型別）
+            if user_value in ("$sort", "$view", "$dir"):
+                self.assertNotRegex(body, r"\.\s*" + re.escape(user_value) + r"\s*\.", "%s 不能直接拼進 SQL" % user_value)
+        self.assertIn("int $page, int $perPage", body, "頁碼與每頁筆數是 int 型別，拼進 LIMIT 才安全")
+        self.assertRegex(body, r"\(\$dir === 'asc' \? 'ASC' : 'DESC'\)")
+        php_sizes = re.search(r"PAGE_SIZES = \[([0-9, ]+)\]", service).group(1).replace(" ", "")
+        ui = (ROOT / "librenms" / "html" / "js" / "ioc-behavior.js").read_text(encoding="utf-8")
+        js_sizes = re.search(r"PAGE_SIZES = \[([0-9, ]+)\]", ui).group(1).replace(" ", "")
+        self.assertEqual(php_sizes, js_sizes, "每頁筆數的白名單，畫面與伺服器要一致")
+        for token in ("list_assets", "per_page", "'lifecycle'", "'confirmed'", "裝置與待確認", "已確認主機"):
+            self.assertIn(token, ui)
+        self.assertRegex(ui, r"return \[confirmBar, table\(heads, rows\), pager\(res, st, fill\)\]\.filter\(Boolean\)",
+                         "confirmBar 在已確認主機分頁是 null，replaceChildren(null) 會把文字「null」插進畫面")
+        self.assertRegex(ui, r"window\.confirm\([^;]*移除主機[^;]*\)[\s\S]{0,200}mode: 'retired'", "已確認主機的「移除」要先確認，再把它設成已移除")
 
     def test_portal_embeds_config_safely(self):
         src = (ROOT / "librenms" / "html" / "ioc-portal.php").read_text(encoding="utf-8")
@@ -492,10 +523,16 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
         採集器碰資料庫，預設的測試不連資料庫（資料庫層測試要另外跑 tests/run-db-tests.sh），所以用靜態檢查擋住「又把規則內嵌回採集器」。"""
         collector = (ROOT / "librenms" / "ioc" / "BehaviorCollector.php").read_text(encoding="utf-8")
         for call in ("BehaviorAnalyzer::windowQuality(", "BehaviorAnalyzer::windowQualityReason(", "BehaviorAnalyzer::localBucket(",
-                     "BehaviorAnalyzer::dedupKey(", "BehaviorAnalyzer::trainingGroups("):
+                     "BehaviorAnalyzer::dedupKey("):
             self.assertEqual(collector.count(call), 1, "採集器要呼叫 %s" % call)
-        for inlined in ("6048", "hash('sha256'", "new \\DateTimeZone", "'partial' : 'complete'", "分組上限、位址衝突或必要欄位缺值"):
+        for inlined in ("hash('sha256'", "new \\DateTimeZone", "'partial' : 'complete'", "分組上限、位址衝突或必要欄位缺值"):
             self.assertNotIn(inlined, collector, "採集器不該自己內嵌規則：%s" % inlined)
+        # 基線訓練在啟用監控時由服務做（採集器不再自動訓練），門檻與分桶都在 BehaviorAnalyzer
+        service = (ROOT / "librenms" / "ioc" / "BehaviorService.php").read_text(encoding="utf-8")
+        for call in ("BehaviorAnalyzer::baselineCheck(", "BehaviorAnalyzer::baselineBuckets("):
+            self.assertIn(call, service, "服務要呼叫 %s" % call)
+        for inlined in ("144", "BASELINE_MIN_WINDOWS"):
+            self.assertNotIn(inlined, service, "訓練門檻只能寫在 BehaviorAnalyzer：%s" % inlined)
 
     def test_db_test_harness_can_only_touch_its_own_throwaway_schema(self):
         """資料庫層測試會連真的 MariaDB（開發機上跟 LibreNMS 同一台）：腳本只建／刪 ioc_test_* 的 schema 與使用者，

@@ -434,6 +434,7 @@ CREATE TABLE IF NOT EXISTS ioc_behavior_addresses (
   CONSTRAINT fk_ioc_behavior_address_asset FOREIGN KEY (asset_id) REFERENCES ioc_behavior_assets (id)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 SQL,
+            // 人工關聯已於 2026-10-27 移除，這張表不再讀寫；保留是為了不做破壞性遷移（舊資料可供稽核）
             <<<'SQL'
 CREATE TABLE IF NOT EXISTS ioc_behavior_links (
   observed_asset_id BIGINT UNSIGNED NOT NULL,
@@ -598,6 +599,8 @@ CREATE TABLE IF NOT EXISTS ioc_behavior_schedules (
   UNIQUE KEY uq_ioc_behavior_schedule (scope, scope_key)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
 SQL,
+            // 取消強制 28 天之後沒有「基線已就緒（ready）」這個狀態：遺留的改回學習中（基線保留；冪等）
+            "UPDATE ioc_behavior_assets SET mode='learning',quality_status='learning' WHERE mode='ready'",
         ];
     }
 }
