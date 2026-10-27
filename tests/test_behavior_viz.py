@@ -10,6 +10,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 PAGE = ROOT / "tools" / "behavior-viz" / "behavior-3d.html"
+THREE_URLS = ["https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js", "https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"]
 EXPORT_LIB = ROOT / "librenms" / "ioc" / "BehaviorVizExport.php"
 EXPORT_CLI = ROOT / "tools" / "export-behavior-viz.php"
 
@@ -33,10 +34,39 @@ class BehaviorVizPageTests(unittest.TestCase):
         for pattern in (r"\bfetch\s*\(", r"XMLHttpRequest", r"WebSocket", r"sendBeacon", r"localStorage", r"sessionStorage", r"indexedDB", r"document\.cookie", r"window\.open\s*\("):
             self.assertIsNone(re.search(pattern, js), "載入的資料不能送出或保存：" + pattern)
 
-    def test_only_one_pinned_cdnjs_script_is_loaded(self):
+    def test_only_the_two_pinned_jsdelivr_scripts_are_loaded(self):
         src = text(PAGE)
         urls = re.findall(r"""(?:src|href)\s*=\s*["'](https?://[^"']+)["']""", src)
-        self.assertEqual(urls, ["https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"], "只能有一個外部資源：釘版本的 three.js（Artifact 的 CSP 只放行 cdnjs 等幾個來源）")
+        self.assertEqual(urls, THREE_URLS, "只能有兩個外部資源：釘在 0.128.0 的 three.js 與 OrbitControls（r128 的 OrbitControls 在 cdnjs 沒有；Artifact 的 CSP 放行 cdn.jsdelivr.net/npm/）")
+
+    def test_orbit_controls_replace_the_hand_written_orbit(self):
+        js = script(text(PAGE))
+        self.assertIn("new THREE.OrbitControls(camera, canvas)", js)
+        for setting in ("enableDamping = true", "dampingFactor", "enablePan = false", "minDistance", "maxDistance", "minPolarAngle", "maxPolarAngle"):
+            self.assertIn("controls." + setting, js, "OrbitControls 的設定：" + setting)
+        self.assertIsNone(re.search(r"addEventListener\('wheel'|tRadius|orbit\.yaw|orbit\.pitch|ptrs\b", js), "自寫的軌道控制（wheel／pointer／平滑）要整個刪掉，交給 OrbitControls")
+        self.assertIn("THREE.OrbitControls", js.split("function initGL()")[1].split("buildGlobe();")[0], "initGL 要檢查 OrbitControls 是否載入，沒有就退成文字版")
+        self.assertRegex(js, r"controls\.update\(\)", "每幀要呼叫 controls.update()（阻尼）")
+        self.assertRegex(js, r"dragPx|>\s*5\b", "點選要和拖曳分開（移動超過 5px 不算點選）")
+
+    def test_embed_mode_trusts_only_the_same_origin_parent_and_validates_the_data(self):
+        js = script(text(PAGE))
+        self.assertIn("'viz-ready'", js)
+        self.assertIn("'viz-data'", js)
+        handler = js[js.index("addEventListener('message'"):]
+        handler = handler[:handler.index("});") + 3]
+        self.assertIn("e.origin !== location.origin", handler, "只接受同源的訊息")
+        self.assertIn("e.source !== window.parent", handler, "只接受父視窗送來的訊息")
+        self.assertIn("validate(", handler, "收到的資料一樣要逐欄驗證")
+        self.assertRegex(js, r"postMessage\(\{ type: 'viz-ready' \}, location\.origin\)", "回報就緒的 targetOrigin 要是 location.origin，不能是 '*'")
+        self.assertNotIn("postMessage(", js.replace("postMessage({ type: 'viz-ready' }, location.origin)", ""), "頁面只能送一種訊息")
+        self.assertRegex(js, r"EMBED\s*=\s*.*embed.*window\.parent\s*!==\s*window", "內嵌模式要同時看網址參數與是否在 iframe 裡")
+
+    def test_viewer_controls_cluster_and_mobile_sheet(self):
+        src = text(PAGE)
+        for ident in ("btnHome", "btnRotate", "btnZoomIn", "btnZoomOut", "sheet"):
+            self.assertIn('id="' + ident + '"', src, "借自參考檔的操作元件：" + ident)
+        self.assertIn("controls.autoRotate", script(src))
         self.assertIsNone(re.search(r"@import|<link\b", src), "樣式不能引用外部檔案")
         # 例外：SVG 命名空間（createElementNS 用，不是網路位址）
         self.assertIsNone(re.search(r"""['"`]https?://(?!www\.w3\.org/2000/svg)""", script(src)), "腳本裡不能寫死任何外部網址")
@@ -111,12 +141,82 @@ class BehaviorVizExportTests(unittest.TestCase):
         self.assertIn("PHP_SAPI !== 'cli'", cli, "只能從終端機執行，不能被網頁請求到")
         self.assertIn("'mask' => !isset($args['no-mask'])", cli, "預設要遮罩")
         self.assertIn("Ioc\\Access::HANDLER", cli)
-        for name in ("install.sh", "update.sh", "uninstall.sh"):
+        for name in ("install.sh", "update.sh", "uninstall.sh", "system/install-behavior.sh"):
             p = ROOT / name
             if p.exists():
                 self.assertNotIn("export-behavior-viz", text(p), name + " 不能部署匯出腳本（只給管理員手動執行）")
-                self.assertNotIn("behavior-viz", text(p), name + " 不能部署 3D 頁面（它引用外部 CDN）")
         self.assertIn("'BehaviorVizExport'", text(ROOT / "librenms" / "ioc" / "bootstrap.php"))
+
+
+VENDOR = ROOT / "librenms" / "html" / "vendor" / "three"
+MAKE_LOCAL = ROOT / "tools" / "behavior-viz" / "make-local-page.py"
+# three r128（npm three@0.128.0）；OrbitControls 在 jsdelivr 與 unpkg 的 SHA-256 相同
+VENDOR_SHA256 = {"three.min.js": "9274bbcec8d96168626c732b5d31c775aa8cfb7eaa0599bec0c175908a2c1ce2",
+                 "OrbitControls.js": "02bb4ade710f3e607329e37a21f098bc3ac70eb6e33daf8a65e79f4db785e7b2"}
+
+
+def load_make_local():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("make_local_page", MAKE_LOCAL)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+class BehaviorVizLocalCopyTests(unittest.TestCase):
+    """入口內嵌播放：VM 上不能引用外部 CDN，所以部署的是同一份頁面原始碼轉換出來的本機副本＋repo 內釘死雜湊的 three.js。"""
+
+    def test_vendored_three_files_are_exactly_the_pinned_release(self):
+        import hashlib
+        for name, digest in VENDOR_SHA256.items():
+            self.assertEqual(hashlib.sha256((VENDOR / name).read_bytes()).hexdigest(), digest, name + " 的內容和釘住的版本不同（換行被改掉？被手動改過？）")
+        self.assertIn("MIT License", text(VENDOR / "LICENSE"))
+        self.assertIn("librenms/html/vendor/** -text", text(ROOT / ".gitattributes"), "第三方檔案不能被換行轉換")
+
+    def test_local_page_replaces_only_the_two_script_urls_and_has_no_external_url(self):
+        mod = load_make_local()
+        src = text(PAGE)
+        full = mod.make_local(src, "aaaaaaaaaaaa", "bbbbbbbbbbbb")
+        # Artifact 檢視器會替頁面加上文件外框；本機副本自己要有，不然 iframe 會用怪異模式（quirks）渲染
+        self.assertTrue(full.startswith("<!doctype html>") and full.rstrip().endswith("</html>"), "要有 doctype 與 html，才是標準模式")
+        self.assertIn('<meta charset="utf-8">', full[:300])
+        self.assertTrue(full.startswith(mod.WRAP_HEAD) and full.endswith(mod.WRAP_TAIL))
+        out = full[len(mod.WRAP_HEAD):len(full) - len(mod.WRAP_TAIL)]
+        self.assertIn('<script src="vendor/three/three.min.js?v=aaaaaaaaaaaa"></script>', out)
+        self.assertIn('<script src="vendor/three/OrbitControls.js?v=bbbbbbbbbbbb"></script>', out)
+        self.assertIsNone(re.search(r"https?://(?!www\.w3\.org/2000/svg)", out), "本機副本不能有任何外部網址")
+        back = out.replace("vendor/three/three.min.js?v=aaaaaaaaaaaa", THREE_URLS[0]).replace("vendor/three/OrbitControls.js?v=bbbbbbbbbbbb", THREE_URLS[1])
+        self.assertEqual(back, src.rstrip("\n"), "轉換只能換這兩個網址，其他一個字都不能動（單一來源；只有檔尾的換行會被外框接手）")
+        self.assertEqual(re.findall(r"""<script src="([^"]+)">""", out), ["vendor/three/three.min.js?v=aaaaaaaaaaaa", "vendor/three/OrbitControls.js?v=bbbbbbbbbbbb"])
+
+    def test_transform_refuses_a_page_it_does_not_understand(self):
+        mod = load_make_local()
+        src = text(PAGE)
+        for broken in (src.replace(THREE_URLS[0], "https://example.com/x.js"), src.replace('<script src="' + THREE_URLS[1] + '"></script>', ""),
+                       src + '<script src="https://evil.example/x.js"></script>', src.replace(THREE_URLS[0], THREE_URLS[0] + "?x=1"),
+                       src + '<script src="//evil.example/x.js"></script>', src + '<script src="local.js"></script>', src + "<script  src='/x.js'></script>"):
+            with self.assertRaises(ValueError):
+                mod.make_local(broken, "a" * 12, "b" * 12)
+        with self.assertRaises(ValueError):
+            mod.make_local(src, "../etc/passwd", "bbbbbbbbbbbb")      # 版本戳記只收雜湊
+
+    def test_install_script_deploys_vendor_files_and_the_local_page_and_uninstall_removes_them(self):
+        inst = text(ROOT / "system" / "install-behavior.sh")
+        self.assertIn("for f in three.min.js OrbitControls.js LICENSE; do", inst, "三個檔都要部署")
+        self.assertIn("../librenms/html/vendor/three/$f", inst)
+        self.assertIn('html/vendor/three', inst)
+        self.assertIn('html/ioc-behavior-viz.html', inst)
+        self.assertIn("make-local-page.py", inst)
+        self.assertIn("command -v python3", inst, "沒有 python3 就略過播放器，不能讓整個安裝失敗")
+        # 轉換結果不能由 root 直接寫進 librenms 可寫的網站目錄（可預測的檔名＋會跟隨符號連結）：先寫進 mktemp 目錄，再用 install 放過去
+        self.assertIn('viz_tmp="$(mktemp -d)"', inst)
+        self.assertIn('"$viz_tmp/ioc-behavior-viz.html" --vendor-dir', inst)
+        self.assertRegex(inst, r'install -m 644 -o "\$LIBRENMS_USER" -g "\$LIBRENMS_USER" "\$viz_tmp/ioc-behavior-viz\.html" "\$LIBRENMS_DIR/html/ioc-behavior-viz\.html"')
+        self.assertNotRegex(inst, r'make-local-page\.py[^\n]*"\$LIBRENMS_DIR/html/ioc-behavior-viz\.html"', "轉換腳本的輸出不能直接指向網站目錄")
+        self.assertNotRegex(inst, r'chown "\$LIBRENMS_USER":"\$LIBRENMS_USER" "\$LIBRENMS_DIR/html/ioc-behavior-viz', "不用會跟隨符號連結的 chown")
+        uninst = text(ROOT / "uninstall.sh")
+        self.assertIn("html/ioc-behavior-viz.html", uninst)
+        self.assertIn("html/vendor/three", uninst)
 
 
 if __name__ == "__main__":

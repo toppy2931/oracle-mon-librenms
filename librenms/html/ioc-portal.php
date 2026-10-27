@@ -40,6 +40,9 @@ $audit_js = __DIR__ . '/js/ioc-audit.js';
 $audit_js_version = is_readable($audit_js) ? substr(hash_file('sha256', $audit_js), 0, 16) : 'missing';
 $behavior_js = __DIR__ . '/js/ioc-behavior.js';
 $behavior_js_version = is_readable($behavior_js) ? substr(hash_file('sha256', $behavior_js), 0, 16) : 'missing';
+// 「連線動態」的 3D 播放器：同源靜態頁（由 system/install-behavior.sh 部署）。網址帶內容雜湊，更新後不會吃到舊快取；沒部署就是空字串，畫面會明講。
+$viz_page = __DIR__ . '/ioc-behavior-viz.html';
+$viz_url = is_readable($viz_page) ? '/ioc-behavior-viz.html?embed=1&v=' . substr(hash_file('sha256', $viz_page), 0, 16) : '';
 
 $config = json_encode([
     'level'  => $level,
@@ -47,6 +50,7 @@ $config = json_encode([
     'csrf'   => csrf_token(),
     'demo'   => $demo,
     'networkRanges' => Ioc\NetworkVisibilityService::RANGE_LABELS,
+    'vizUrl' => $viz_url,
     'labels' => [
         'caseStatus'   => Ioc\Labels::CASE_STATUS,
         'caseSeverity' => Ioc\Labels::CASE_SEVERITY,
@@ -166,6 +170,12 @@ th .sort{font:inherit;color:inherit;background:none;border:0;padding:0;cursor:po
 th .sort:hover{color:#fff}
 th .sort .dim{opacity:.4}
 th .sort:focus-visible{outline:2px solid var(--blue);outline-offset:1px}
+.rowacts{display:flex;gap:6px;flex-wrap:wrap}
+.viz-overlay{position:fixed;inset:0;z-index:8;display:flex;flex-direction:column;background:var(--bg)}
+.viz-bar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;padding:10px 16px;border-bottom:1px solid var(--line);background:#0a1626}
+.viz-bar .note{flex:1 1 240px;margin:0}
+.viz-status{margin:0;padding:16px}
+.viz-frame{flex:1 1 auto;min-height:0;width:100%;border:0;background:#050b14}
 .sec-h{margin:18px 0 6px;font-size:13px;padding-top:10px;border-top:1px solid var(--line)}
 .pill{display:inline-block;margin:2px 6px 2px 0;padding:1px 9px;border:1px solid #2a4060;border-radius:999px;font-size:11px;color:#c8d6e7}
 .steps{margin:4px 0 0;padding-left:20px;font-size:13px}
@@ -960,7 +970,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     ? window.IocAudit({ h, api, root: $('#view-audit'), toast, canHandle: CAN_HANDLE, csrf: CFG.csrf })
     : { load: () => $('#view-audit').replaceChildren(unavailable('稽核與證據介面尚未載入，請重新整理')) };
   const behaviorUi = typeof window.IocBehavior === 'function'
-    ? window.IocBehavior({ h, section, table, api, root: $('#view-behavior'), toast, canHandle: CAN_HANDLE, unavailable,
+    ? window.IocBehavior({ h, section, table, api, root: $('#view-behavior'), toast, canHandle: CAN_HANDLE, unavailable, vizUrl: CFG.vizUrl,
       openCases: (id) => { state.filter = ''; state.selected = Number(id); state.form = null; setTab('cases', true); } })
     : { load: () => $('#view-behavior').replaceChildren(unavailable('裝置行為分析介面尚未載入，請重新整理')) };
   let backupBox = null;

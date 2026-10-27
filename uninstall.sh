@@ -36,7 +36,10 @@ rm -f "$LIBRENMS_DIR"/html/ioc-portal.php \
       "$LIBRENMS_DIR"/html/ioc-audit-download.php \
       "$LIBRENMS_DIR"/html/js/ioc-config-backup.js \
       "$LIBRENMS_DIR"/html/js/ioc-audit.js \
-      "$LIBRENMS_DIR"/html/js/ioc-behavior.js
+      "$LIBRENMS_DIR"/html/js/ioc-behavior.js \
+      "$LIBRENMS_DIR"/html/ioc-behavior-viz.html
+rm -rf "$LIBRENMS_DIR"/html/vendor/three      # 3D 連線動態播放器用的 three.js 副本（只刪我們自己建的這個目錄）
+rmdir "$LIBRENMS_DIR"/html/vendor 2>/dev/null || true
 rm -rf "$LIBRENMS_DIR"/includes/ioc      # IOC 入口函式庫（事件案與設定的資料表 ioc_* 與讀取用的 Graylog 帳號會保留，見文末）
 rm -f "$LIBRENMS_DIR"/includes/html/graphs/application/oracle-l1hweb_*.inc.php
 rm -f "$LIBRENMS_DIR"/includes/polling/applications/oracle-l1hweb.inc.php

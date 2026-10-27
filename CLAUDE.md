@@ -428,9 +428,10 @@ FortiGate CEF 格式的 `key=value` 內容用 **6 個獨立 Grok pattern Extract
 - **只開放這一個目錄**，不要放寬成 `/opt/librenms` 或整個 `storage`；前綴 `-` 不能省：目錄不存在時沒有它，systemd 建不起沙箱（`status=226/NAMESPACE`），整個服務每次啟動都失敗。`tests/test_behavior_unit.py` 會擋。
 - 目前只有 `system/ioc-behavior.service` 補了。`ioc-audit.service`、`ioc-audit-cases.service` 的 tick 也會啟動 LibreNMS，同樣設了 `ProtectSystem=strict` 卻還沒開放這個目錄；它們的 timer 預設不啟用，**啟用稽核排程之前要照樣補上**（連同測試）。
 
-## 3D 連線視圖（Artifact，不部署）
+## 3D 連線視圖（同一份原始碼：Artifact 用 CDN、入口用本機副本）
 
-- `tools/behavior-viz/behavior-3d.html` 是發布成 **Artifact** 的 three.js 單檔頁面（引用 cdnjs），**不能被 `install.sh`／`update.sh` 部署到 VM**（入口不得引用外部 CDN；`tests/test_behavior_viz.py` 會擋）。Artifact 存在 claude.ai：**只放合成的範例資料，絕不把真實的內網 IP、主機名、目的 IP 放進去發布**；真實資料由使用者用頁首「載入 JSON」在瀏覽器本機讀入（不上傳、不存起來）。
+- `tools/behavior-viz/behavior-3d.html` 是**單一來源**的 three.js 單檔頁面（**r128＋OrbitControls，從 jsdelivr `three@0.128.0` 載入**；r128 的 OrbitControls 在 cdnjs 沒有），發布成 **Artifact**（**一律更新同一個 Artifact 網址、用小改不重寫**）。Artifact 存在 claude.ai：**只放合成的範例資料，絕不把真實的內網 IP、主機名、目的 IP 放進去發布**；真實資料由使用者用頁首「載入 JSON」在瀏覽器本機讀入（不上傳、不存起來）。
+- **入口的「已確認主機」操作欄有「▶ 連線動態」按鈕**：開入口內的全螢幕層，裡面是同源 iframe（`/ioc-behavior-viz.html?embed=1`），**資料經 `postMessage` 送進去**（端點 `viz_data`、僅管理員、不遮罩、成功才寫稽核 `viz_viewed`；父子雙方都只收同源訊息，iframe 還要 `e.source === window.parent`）。VM 上的入口不能引用外部 CDN，所以 `system/install-behavior.sh`（`update.sh` 每次重跑）部署 **repo 內釘死雜湊的 three.js 與 OrbitControls**（`librenms/html/vendor/three/`，`.gitattributes` 設 `-text` 避免換行被改，測試比對 SHA-256）和**由同一份原始碼轉換出的本機副本**（`tools/behavior-viz/make-local-page.py` 只換兩個 script 網址並補文件外框；不要手改 `ioc-behavior-viz.html`，改 `behavior-3d.html` 再重跑 update.sh）。`uninstall.sh` 會清這些檔。**匯出腳本 `tools/export-behavior-viz.php` 仍然不部署**（`tests/test_behavior_viz.py` 會擋）。
 - 資料由 `tools/export-behavior-viz.php`（VM 上手動執行、`librenms` 身分、唯讀）產生，邏輯在 `librenms/ioc/BehaviorVizExport.php`：**預設遮罩**（`--no-mask` 才輸出真實名稱與位址）、整個匯出包在 `READ ONLY` 交易、不是網頁端點。改匯出格式（`ioc-behavior-viz/1`）要同步改頁面的 `validate()` 與 `docs/ioc/behavior-analysis.md`「3D 連線視圖與匯出」。
 - 頁面的規則同入口：缺資料顯示「無法取得」不畫成零；文字一律 `textContent`／`h()`，**`replaceChildren(null)` 會插入文字「null」**，可能是 null 的子節點要包進 `h()` 或先過濾。原始碼裡不要放看不見的字元（雙向控制碼、零寬字元）：用 `\uXXXX` 跳脫寫出來（Write 工具會把部分跳脫還原成真字元，寫完要檢查；測試會擋）。
 - 本機看頁面：用 `python -m http.server` 開一個把頁面包上 `<!doctype>` 的測試頁；Browser 窗格在背景時 `requestAnimationFrame` 不會跑，測試頁加一個 `setTimeout` 版的 rAF 墊片才看得到動畫。

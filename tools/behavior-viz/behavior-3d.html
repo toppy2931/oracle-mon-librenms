@@ -1,7 +1,8 @@
 <title>設備連線行為</title>
 <meta name="claude:viewport-fit-sides" content="cover">
 <!--
-  Artifact 用的單檔頁面（引用 cdnjs 的 three.js，不由 install.sh 部署到 VM）。內嵌的只有合成的範例資料；
+  單一來源的單檔頁面：發布成 Artifact（three.js r128＋OrbitControls 從 jsdelivr 載入），也由 system/install-behavior.sh 轉成入口內嵌播放用的
+  本機副本（make-local-page.py 只換兩個 script 網址）。Artifact 內嵌的只有合成的範例資料；
   真實資料用頁首「載入 JSON」在瀏覽器本機讀入（tools/export-behavior-viz.php 產生），不上傳、不存起來。
   資料格式與遮罩規則見 docs/ioc/behavior-analysis.md「3D 連線視圖與匯出」。陸地點陣用 build-land-mask.py 產生。
 -->
@@ -106,13 +107,28 @@ th { color: var(--muted); font-weight: 500; white-space: nowrap; }
 select { padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; background: #0c1a2b; }
 .sr { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 
+.dock { position: absolute; right: calc(max(16px, env(safe-area-inset-right, 0px)) + 256px); bottom: 14px; display: flex; flex-direction: column;
+  border: 1px solid var(--line); border-radius: 12px; background: var(--card); backdrop-filter: blur(3px); overflow: hidden; }
+.gbtn { width: 36px; height: 34px; border: 0; background: transparent; cursor: pointer; font-size: 17px; line-height: 1; }
+.gbtn + .gbtn { border-top: 1px solid var(--line); }
+.gbtn:hover { background: #17304f; }
+.gbtn[aria-pressed="true"] { background: #17304f; color: var(--blue); }
+.sheet { position: absolute; left: 0; right: 0; bottom: 0; z-index: 5; max-height: 58%; overflow: auto; border-top: 1px solid var(--line); border-radius: 16px 16px 0 0;
+  padding: 14px max(16px, env(safe-area-inset-right, 0px)) 16px max(16px, env(safe-area-inset-left, 0px)); background: rgba(9, 19, 33, .96);
+  transform: translateY(110%); transition: transform .35s cubic-bezier(.2, .8, .2, 1); }
+.sheet.open { transform: none; }
+.sheet .close { position: absolute; right: 14px; top: 8px; z-index: 1; width: 30px; height: 30px; border: 0; border-radius: 50%; background: #17304f; font-size: 20px; line-height: 1; cursor: pointer; }
+.embed .chips, .embed #btnLoad { display: none; }       /* 入口內嵌：只有一台主機、資料由入口送來，不載入檔案 */
+
+@media (min-width: 761px) { .sheet { display: none; } }
 @media (max-width: 760px) {
+  .dock { right: max(16px, env(safe-area-inset-right, 0px)); bottom: 48px; }
   .cards.right, .cards.left, .legend { display: none; }      /* 手機：場景＋狀態列＋時間軸，細節看「連線摘要」 */
   .tag3d { font-size: 10px; padding: 0 4px; }
   .timeline .now { font-size: 11px; }
   h1 { font-size: 15px; }
 }
-@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto; } }
+@media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto; } .sheet { transition: none; } }
 </style>
 
 <div class="app">
@@ -137,6 +153,13 @@ select { padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; ba
     <div class="cards right" id="cardsDst"></div>
     <div class="notice" id="notice" role="status" hidden></div>
     <div class="status" id="status" role="status"></div>
+    <div class="dock" id="dock" role="group" aria-label="視角操作">
+      <button class="gbtn" id="btnHome" type="button" aria-label="回到預設視角" title="回到預設視角">⌂</button>
+      <button class="gbtn" id="btnRotate" type="button" aria-pressed="false" aria-label="自動旋轉" title="自動旋轉">⟳</button>
+      <button class="gbtn" id="btnZoomIn" type="button" aria-label="放大" title="放大">＋</button>
+      <button class="gbtn" id="btnZoomOut" type="button" aria-label="縮小" title="縮小">－</button>
+    </div>
+    <div class="sheet" id="sheet" role="dialog" aria-label="詳情" aria-hidden="true"></div>
     <section class="summary" id="summary" hidden aria-label="連線摘要"></section>
   </main>
   <footer class="timeline">
@@ -150,7 +173,8 @@ select { padding: 3px 6px; border: 1px solid var(--line); border-radius: 6px; ba
   </footer>
 </div>
 
-<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
 <script>
 (() => {
 'use strict';
@@ -265,7 +289,9 @@ function validate(raw) {
 }
 
 /* ------------------------------------------------------------------ 狀態與衍生值 */
-const S = { data: null, asset: null, i: 0, playing: false, rate: 12, pinned: -1, hover: -1, webgl: false, summary: false };
+const S = { data: null, asset: null, i: 0, playing: false, rate: 12, pinned: -1, hover: -1, webgl: false, summary: false, touched: false, fly: null, start: null };
+// 入口內嵌（iframe）：不用範例資料，等父視窗（入口）用 postMessage 送來該主機的資料
+const EMBED = new URLSearchParams(location.search).get('embed') === '1' && window.parent !== window;
 const locFmt = {};
 function locInfo(a, i) {
   a._loc = a._loc || [];
@@ -320,7 +346,8 @@ const canvas = $('gl'), stage = $('stage');
 let renderer, scene, camera, globe, globeQ = new THREE.Quaternion(), srcGroup, srcMesh, srcEdges, srcHalo, srcRing, atmos;
 const flows = [], panels = [], pickables = [], tmp = new THREE.Vector3(), tmp2 = new THREE.Vector3();
 const GLOBE = { c: new THREE.Vector3(-15, -9.5, -19), r: 13 };
-const orbit = { yaw: 0.02, pitch: 0.06, radius: 36, tYaw: 0.02, tPitch: 0.06, tRadius: 36, target: new THREE.Vector3(1.5, -0.8, -3) };
+const orbit = { target: new THREE.Vector3(1.5, -0.8, -3), dist: 36 };       // 預設視角：看向 target、距離 dist（resize 依長寬比決定）
+let controls;
 const PAL = [[0.38, 0.66, 1.0], [0.96, 0.77, 0.32], [0.71, 0.55, 1.0], [0.91, 0.94, 0.98]];
 
 const VERT = `uniform float uTime; uniform float uDensity; uniform float uSize; uniform float uPx; uniform float uDim; uniform float uTintMix;
@@ -350,6 +377,7 @@ void main(){ float d=length(gl_PointCoord-0.5); float a=smoothstep(0.5,0.0,d); a
 function initGL() {
   try {
     if (typeof THREE === 'undefined') throw new Error('three.js 沒有載入');
+    if (typeof THREE.OrbitControls !== 'function') throw new Error('OrbitControls 沒有載入');
     renderer = new THREE.WebGLRenderer({ canvas, antialias: true, powerPreference: 'high-performance' });
     if (!renderer.getContext()) throw new Error('WebGL 無法使用');
   } catch (e) { return false; }
@@ -357,6 +385,14 @@ function initGL() {
   renderer.setClearColor(0x050b14, 1);
   scene = new THREE.Scene();
   camera = new THREE.PerspectiveCamera(32, 1, 0.5, 400);
+  controls = new THREE.OrbitControls(camera, canvas);
+  controls.enableDamping = true; controls.dampingFactor = reduced ? 1 : 0.09;        // 減少動態：不要慣性
+  controls.enablePan = false;                                                       // 版面靠螢幕空間的卡片與固定錨點，不平移
+  controls.rotateSpeed = 0.6; controls.zoomSpeed = 0.8;
+  controls.minDistance = 20; controls.maxDistance = 60;
+  controls.minPolarAngle = Math.PI / 2 - 0.55; controls.maxPolarAngle = Math.PI / 2 + 0.3;
+  controls.minAzimuthAngle = -0.7; controls.maxAzimuthAngle = 0.7;
+  controls.addEventListener('start', () => { S.touched = true; S.fly = null; });
   scene.add(new THREE.AmbientLight(0xffffff, 0.62));
   const dl = new THREE.DirectionalLight(0xffffff, 0.85); dl.position.set(-6, 14, 12); scene.add(dl);
   buildGlobe();
@@ -534,6 +570,7 @@ function updateCards() {
   st.textContent = w.q === 'missing' ? a.label + '：這一格來源缺資料，無法取得（不是零流量）' : (ss === 'alert' ? a.label + '：有警示，連線與位元組明顯高於基線' : a.label + (w.q === 'partial' ? '：這一格資料不完整，不進基線與偵測' : '：' + (loc.off ? '離峰' : '上班時段') + '，連線 ' + fmt(w.conn)));
   $('scrub').value = String(i);
   if (S.summary) renderSummary();
+  syncSheet();
 }
 function renderSummary() {
   const a = S.asset, i = Math.round(S.i), w = a.windows[i], loc = locInfo(a, i);
@@ -568,7 +605,7 @@ function selectAsset(a) {
   $('scrub').max = String(a.windows.length - 1);
   // 一開始停在最值得看的格子：範例資料用指定的；真實資料停在最近一次警示，沒有警示就是最新一格
   const lastAlert = a.alerts.length ? a.windows.findIndex((w) => w.t === a.alerts[a.alerts.length - 1].t) : -1;
-  const def = S.data.default_index >= 0 && S.data.assets[0] === a ? S.data.default_index : (lastAlert >= 0 ? lastAlert : a.windows.length - 1);
+  const def = S.start != null ? S.start : (S.data.default_index >= 0 && S.data.assets[0] === a ? S.data.default_index : (lastAlert >= 0 ? lastAlert : a.windows.length - 1));
   S.i = clamp(def, 0, a.windows.length - 1);
   renderChips(); shownI = -1;
   if (S.webgl) { buildAsset(a); updateCards.force = true; updateCards(); } else textView();
@@ -607,19 +644,30 @@ $('file').addEventListener('change', (e) => {
   };
   r.readAsText(f);
 });
-let dragMoved = false; const ptrs = new Map(); let lastPinch = 0;
-canvas.addEventListener('pointerdown', (e) => { try { canvas.setPointerCapture(e.pointerId); } catch (_) { /* 合成事件或不支援時略過 */ } ptrs.set(e.pointerId, { x: e.clientX, y: e.clientY }); dragMoved = false; lastPinch = 0; });
-canvas.addEventListener('pointermove', (e) => {
-  const p = ptrs.get(e.pointerId);
-  if (!p) { hoverPick(e); return; }
-  if (ptrs.size === 2) { const [a, b] = [...ptrs.values()]; const d0 = Math.hypot(a.x - b.x, a.y - b.y); p.x = e.clientX; p.y = e.clientY; const [c, d] = [...ptrs.values()]; const d1 = Math.hypot(c.x - d.x, c.y - d.y); if (d0 > 0) orbit.tRadius = clamp(orbit.tRadius * d0 / d1, 20, 54); dragMoved = true; return; }
-  const dx = e.clientX - p.x, dy = e.clientY - p.y; p.x = e.clientX; p.y = e.clientY;
-  if (Math.abs(dx) + Math.abs(dy) > 1) dragMoved = true;
-  orbit.tYaw = clamp(orbit.tYaw - dx * 0.004, -0.7, 0.7); orbit.tPitch = clamp(orbit.tPitch + dy * 0.003, -0.4, 0.55);
-});
-const endPtr = (e) => { if (ptrs.has(e.pointerId) && ptrs.size === 1 && !dragMoved) pick(e); ptrs.delete(e.pointerId); };
-canvas.addEventListener('pointerup', endPtr); canvas.addEventListener('pointercancel', (e) => ptrs.delete(e.pointerId));
-canvas.addEventListener('wheel', (e) => { e.preventDefault(); orbit.tRadius = clamp(orbit.tRadius * Math.exp(e.deltaY * 0.0012), 20, 54); }, { passive: false });
+// 旋轉與縮放交給 OrbitControls；這裡只做「點選」與「懸停」。按下到放開移動不超過 5px 且不超過 500ms 才算點選（同參考檔），拖曳不會誤選面板
+const dragPx = 5; let down = null;
+canvas.addEventListener('pointerdown', (e) => { down = { x: e.clientX, y: e.clientY, t: performance.now() }; });
+canvas.addEventListener('pointerup', (e) => { if (down && Math.hypot(e.clientX - down.x, e.clientY - down.y) <= dragPx && performance.now() - down.t < 500) pick(e); down = null; });
+canvas.addEventListener('pointercancel', () => { down = null; });
+canvas.addEventListener('pointermove', (e) => { if (!down) hoverPick(e); });
+function homePos() { const d = orbit.dist; return new THREE.Vector3(orbit.target.x + d * Math.sin(0.02) * Math.cos(0.06), orbit.target.y + d * Math.sin(0.06), orbit.target.z + d * Math.cos(0.02) * Math.cos(0.06)); }
+/** 回到預設視角：animate 時用 0.9 秒的平滑過渡（同參考檔的 fly-to）；減少動態時直接跳過去。 */
+function goHome(animate) {
+  const to = homePos();
+  if (animate && !reduced) S.fly = { t0: performance.now(), from: camera.position.clone(), to, tFrom: controls.target.clone() };
+  else { S.fly = null; camera.position.copy(to); controls.target.copy(orbit.target); }
+}
+function zoomBy(f) { S.fly = null; const v = camera.position.clone().sub(controls.target); camera.position.copy(controls.target).add(v.setLength(clamp(v.length() * f, controls.minDistance, controls.maxDistance))); }
+function stepCamera(now) {
+  if (S.fly) {
+    const t = clamp((now - S.fly.t0) / 900, 0, 1), k = t * t * (3 - 2 * t);
+    camera.position.lerpVectors(S.fly.from, S.fly.to, k); controls.target.lerpVectors(S.fly.tFrom, orbit.target, k);
+    if (t >= 1) S.fly = null;
+  } else if (controls.autoRotate && Math.abs(controls.getAzimuthalAngle()) > 0.68) {
+    controls.autoRotateSpeed = -Math.sign(controls.getAzimuthalAngle()) * Math.abs(controls.autoRotateSpeed);       // 轉到方位角的限制就往回轉
+  }
+  controls.update(); camera.updateMatrixWorld();
+}
 let raycaster, ndc;
 function pickAt(e) {
   const r = canvas.getBoundingClientRect(); ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
@@ -628,7 +676,18 @@ function pickAt(e) {
   const hit = raycaster.intersectObjects(pickables, false).find((x) => x.object.visible && (!x.object.parent || x.object.parent.visible));
   return hit ? hit.object.userData.k : -1;
 }
-function pick(e) { const k = pickAt(e); S.pinned = k >= 0 ? (S.pinned === k ? -1 : k) : -1; updateCards.force = true; }
+function pick(e) { const k = pickAt(e); S.pinned = k !== -1 ? (S.pinned === k ? -1 : k) : -1; updateCards.force = true; syncSheet(); }
+/** 手機寬度（卡片收起）：點面板或來源節點，從底部滑出詳情抽屜。 */
+const narrow = () => stageRect.w < 760;
+function syncSheet() {
+  const sh = $('sheet'), a = S.asset; let card = null;
+  if (narrow() && a && S.pinned !== -1) {
+    const i = Math.round(S.i), p = panels[S.pinned];
+    card = S.pinned === -2 ? srcCard(a, i) : (p && p.f ? dstCard(a, i, p, p.f, true) : null);
+  }
+  sh.classList.toggle('open', !!card); sh.setAttribute('aria-hidden', card ? 'false' : 'true');
+  sh.replaceChildren(...(card ? [h('button', { class: 'close', type: 'button', 'aria-label': '關閉', onclick: () => { S.pinned = -1; updateCards.force = true; syncSheet(); } }, '×'), card] : []));
+}
 function hoverPick(e) { const k = pickAt(e); if (k !== S.hover) { S.hover = k; canvas.style.cursor = k !== -1 ? 'pointer' : ''; } }
 
 /* ------------------------------------------------------------------ 每幀 */
@@ -639,8 +698,10 @@ function resize() {
   renderer.setSize(stageRect.w, stageRect.h, false); camera.aspect = asp;
   // 場景左右約需 40 個單位的寬度：直式螢幕加大視角（廣角）而不是把相機拉到看不清楚
   camera.fov = clamp(2 * Math.atan(Math.tan(16 * Math.PI / 180) * Math.max(1, 1.55 / asp)) * 180 / Math.PI, 32, 82); camera.updateProjectionMatrix();
-  orbit.tRadius = asp >= 1.2 ? clamp(36 * (16 / 9) / Math.max(1.05, asp), 30, 54) : 40; orbit.radius = orbit.tRadius;
-  orbit.target.x = asp >= 1.2 ? 1.5 : 3; layout.v = asp >= 1.2 ? 1 : 1.9; relayout(); drawSpark();
+  orbit.dist = asp >= 1.2 ? clamp(36 * (16 / 9) / Math.max(1.05, asp), 30, 54) : 40;
+  orbit.target.x = asp >= 1.2 ? 1.5 : 3; layout.v = asp >= 1.2 ? 1 : 1.9; relayout();
+  controls.maxDistance = Math.max(54, orbit.dist * 1.35); if (!S.touched) goHome(false);
+  drawSpark(); if (S.asset) syncSheet();
 }
 function project(v) { tmp2.copy(v).project(camera); return [(tmp2.x * 0.5 + 0.5) * stageRect.w, (-tmp2.y * 0.5 + 0.5) * stageRect.h, tmp2.z < 1]; }
 let last = performance.now(), clock = 0, leaderEls = [];
@@ -650,11 +711,7 @@ function frame(now) {
   const dt = Math.min(0.05, (now - last) / 1000); last = now; clock += dt * (reduced ? 0.25 : 1);
   if (S.playing) { S.i += dt * S.rate; if (S.i >= S.asset.windows.length - 1) { S.i = S.asset.windows.length - 1; S.playing = false; setPlay(); } }
   const i = Math.round(S.i); if (i !== shownI || updateCards.force) { updateCards(); drawSpark(); }
-  const k = 1 - Math.exp(-dt * 6);
-  if (!reduced && !ptrs.size) orbit.tYaw += Math.sin(clock * 0.15) * 0.00035;
-  orbit.yaw += (orbit.tYaw - orbit.yaw) * k; orbit.pitch += (orbit.tPitch - orbit.pitch) * k; orbit.radius += (orbit.tRadius - orbit.radius) * k;
-  camera.position.set(orbit.target.x + orbit.radius * Math.sin(orbit.yaw) * Math.cos(orbit.pitch), orbit.target.y + orbit.radius * Math.sin(orbit.pitch), orbit.target.z + orbit.radius * Math.cos(orbit.yaw) * Math.cos(orbit.pitch));
-  camera.lookAt(orbit.target);
+  stepCamera(now);
   globe.quaternion.slerp(globeQ, 1 - Math.exp(-dt * 3.5)); globe.updateMatrixWorld(true);
   srcGroup.getWorldPosition(tmp); const S0 = tmp.clone();
   const a = S.asset, ss = srcState(a, i), fs = panels.map((p) => p.f || { st: 'known', density: 0 });
@@ -700,18 +757,33 @@ function boot() {
   $('legend').replaceChildren(...legend());
   S.webgl = initGL();
   if (S.webgl) { raycaster = new THREE.Raycaster(); ndc = new THREE.Vector2(); }
-  const demo = makeDemo();
+  const demo = EMBED ? null : makeDemo();
+  if (EMBED) { document.body.classList.add('embed'); $('status').textContent = '等待主機資料…'; $('srcBadge').textContent = '連線中…'; }
   if (!S.webgl) {
     $('gl').hidden = true; $('legend').hidden = true; $('cardSrc').hidden = true; $('cardsDst').hidden = true; $('tags3d').hidden = true; $('leaders').hidden = true;
+    $('dock').hidden = true; $('sheet').hidden = true;
     S.summary = true; $('summary').hidden = false; $('btnSummary').setAttribute('aria-pressed', 'true');
-    $('status').hidden = true; loadData(demo, '範例資料');
+    $('status').hidden = true; if (demo) loadData(demo, '範例資料');
     $('scrub').addEventListener('input', () => { textView(); drawSpark(); });
     window.addEventListener('resize', drawSpark);
-    setNotice('這個環境無法使用 WebGL，改顯示文字版的連線摘要。'); return;
+    setNotice('這個環境無法使用 WebGL（或 OrbitControls 沒有載入），改顯示文字版的連線摘要。'); return;
   }
+  $('btnHome').addEventListener('click', () => goHome(true));
+  $('btnRotate').addEventListener('click', (e) => { controls.autoRotate = !controls.autoRotate; controls.autoRotateSpeed = 0.55; e.currentTarget.setAttribute('aria-pressed', String(controls.autoRotate)); });
+  $('btnZoomIn').addEventListener('click', () => zoomBy(0.8)); $('btnZoomOut').addEventListener('click', () => zoomBy(1.25));
   new ResizeObserver(resize).observe(stage); window.addEventListener('resize', resize);
-  loadData(demo, '範例資料'); resize(); requestAnimationFrame(frame);
+  if (demo) loadData(demo, '範例資料'); resize(); requestAnimationFrame(frame);
 }
 boot();
+if (EMBED) {
+  window.addEventListener('message', (e) => {
+    if (e.origin !== location.origin || e.source !== window.parent) return;      // 只信任同源的父視窗（入口）
+    const m = e.data;
+    if (!m || m.type !== 'viz-data') return;
+    try { const d = validate(m.data); S.start = 0; loadData(d, '即時資料'); $('srcBadge').className = 'badge real'; document.querySelector('h1').textContent = d.assets[0].label + ' · 連線動態'; S.playing = true; setPlay(); setNotice(''); }
+    catch (err) { setNotice('資料格式不正確：' + (err && err.message ? err.message : '無法讀取')); }
+  });
+  window.parent.postMessage({ type: 'viz-ready' }, location.origin);
+}
 })();
 </script>

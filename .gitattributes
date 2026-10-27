@@ -7,3 +7,6 @@
 
 # 二進位驅動不做任何換行轉換
 *.jar  binary
+
+# 第三方函式庫原封不動（部署的是釘死雜湊的檔案，換行被改掉雜湊就對不上；tests/test_behavior_viz.py 會比對 SHA-256）
+librenms/html/vendor/** -text
