@@ -506,7 +506,7 @@ function clearFlows() {
   }
   flows.length = 0; panels.length = 0; pickables.length = 1; $('tags3d').replaceChildren();
 }
-const layout = { v: 1, s: 1 };       // 直式螢幕：v 把雲在垂直方向拉開，s 把雲放大（場景被拉遠後圖示會比置中的標籤還小）
+const layout = { v: 1, s: 0.7 };       // v：直式螢幕把雲在垂直方向拉開；s：雲的整體大小（桌面 0.7，免得比來源主機大太多；直式螢幕場景被拉遠、圖示會比置中的標籤還小，所以放大）
 function panelPos(k, n, cluster) {
   const u = n > 1 ? k / (n - 1) : 0.5;
   return new THREE.Vector3(3.6 + 5.2 * Math.sin(u * Math.PI) + 1.2 * u, (7.2 - 15.6 * u - (cluster ? 1.0 : 0)) * layout.v, -3.6 + 4.2 * Math.sin(u * Math.PI * 2 - 0.6));      // 「其他」是一團雲，比單朵大，再往下挪一點才不會壓到上一朵
@@ -749,7 +749,7 @@ function resize() {
   // 場景左右約需 40 個單位的寬度：直式螢幕加大視角（廣角）而不是把相機拉到看不清楚
   camera.fov = clamp(2 * Math.atan(Math.tan(16 * Math.PI / 180) * Math.max(1, 1.55 / asp)) * 180 / Math.PI, 32, 82); camera.updateProjectionMatrix();
   orbit.dist = asp >= 1.2 ? clamp(36 * (16 / 9) / Math.max(1.05, asp), 30, 54) : 40;
-  orbit.target.x = asp >= 1.2 ? 1.5 : 3; layout.v = asp >= 1.2 ? 1 : 1.9; layout.s = asp >= 1.2 ? 1 : 2; relayout();
+  orbit.target.x = asp >= 1.2 ? 1.5 : 3; layout.v = asp >= 1.2 ? 1 : 1.9; layout.s = asp >= 1.2 ? 0.7 : 1.6; relayout();
   controls.maxDistance = Math.max(54, orbit.dist * 1.35); if (!S.touched) goHome(false);
   drawSpark(); if (S.asset) syncSheet();
 }

@@ -116,7 +116,7 @@ class BehaviorVizPageTests(unittest.TestCase):
         for state in ("known", "new", "idle", "partial", "missing", "hidden"):
             self.assertRegex(js, state + r": \{[^}]*led: 0x", "每種狀態都要有指示燈顏色：" + state)
         # 直式螢幕把伺服器放大，窄螢幕的標籤只寫 IP，否則標籤比圖示還寬會把它蓋住
-        self.assertRegex(js, r"layout\.s = asp >= 1\.2 \? 1 : 2")
+        self.assertRegex(js, r"layout\.s = asp >= 1\.2 \? 0\.7 : 1\.6", "雲的整體大小：桌面 0.7（比來源主機大太多會搶畫面）、直式螢幕 1.6（場景被拉遠，太小會被標籤蓋住）")
         self.assertIn("p.others || narrow() ? p.d.ip", js)
 
     def test_artifact_page_contract(self):
