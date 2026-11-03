@@ -25,6 +25,15 @@ final class SettingsService
     public const REVIEW_PERIOD = 'review.period_days';
     public const REVIEW_PERIOD_DEFAULT = 90;
     public const NET_INTERNAL  = 'net.internal_cidrs';
+    /** 服務水準（規格附表 A：F-20 可用率目標、F-25 服務時段，都是「由機關填列」，沒有預設值）與核心設備清單（LibreNMS device_id，逗號分隔）。 */
+    public const SLA_TARGET    = 'sla.target';
+    public const SLA_WINDOW    = 'sla.window';
+    public const SLA_CORE      = 'sla.core_devices';
+    /** 服務時段只有兩種：7×24（LibreNMS 的可用率就是全天算的，可以直接算 SLA）與其他（無法依服務時段計算，畫面要說明）。 */
+    public const SLA_WINDOWS   = ['24x7' => '7×24（全天）', 'custom' => '其他時段'];
+    /** 核心設備最多幾台。清單存成逗號分隔的編號字串，欄位（ioc_settings.svalue 與異動紀錄的 old/new_value）是 VARCHAR(255)，所以同時限制字元數 */
+    public const SLA_MAX_CORE  = 40;
+    public const SLA_CORE_MAX_CHARS = 255;
     public const KEY_LABEL     = [
         self::RISK_LOW      => '低風險門檻',
         self::RISK_MEDIUM   => '中等風險門檻',
@@ -32,6 +41,9 @@ final class SettingsService
         self::REVIEW_OWNER  => '帳號盤點負責人',
         self::REVIEW_PERIOD => '帳號盤點週期（天）',
         self::NET_INTERNAL  => '內部網段',
+        self::SLA_TARGET    => 'SLA 可用率目標（F-20）',
+        self::SLA_WINDOW    => 'SLA 服務時段（F-25）',
+        self::SLA_CORE      => '核心設備清單',
     ];
     public const HISTORY_LIMIT = 10;
     /** 沒設定過時各個設定名稱的預設值（風險門檻的來源是 RiskScore::DEFAULT_THRESHOLDS，這裡只是依設定名稱重排）。 */
@@ -219,6 +231,68 @@ final class SettingsService
     }
 
     /**
+     * 設定頁「服務水準」要的資料：目標（%）、服務時段、核心設備（LibreNMS device_id）、是否壞掉、最後修改、最近的異動紀錄（時間已轉成台北時間）。檢視者可看。
+     * 沒設定過的欄位是 null／空陣列（「尚未設定」）：規格書沒有預設值，不能替機關填一個。
+     *
+     * @return array<string,mixed>
+     */
+    public function serviceLevelSettings(?string $level): array
+    {
+        $this->requireView($level);
+        $s = $this->readServiceLevel($this->repo->all());
+        $history = [];
+        foreach ($this->repo->recentHistory(self::HISTORY_LIMIT, [self::SLA_TARGET, self::SLA_WINDOW, self::SLA_CORE]) as $h) {
+            $history[] = [
+                'time'  => Time::toTaipei($h['ts']),
+                'actor' => (string) $h['actor'],
+                'label' => self::KEY_LABEL[$h['skey']] ?? (string) $h['skey'],
+                'from'  => (string) $h['old_value'],
+                'to'    => (string) $h['new_value'],
+            ];
+        }
+        return [
+            'target'     => $s['target'],
+            'window'     => $s['window'],
+            'core'       => $s['core'],
+            'custom'     => $s['custom'],
+            'invalid'    => $s['invalid'],
+            'updated_by' => $s['updated_by'],
+            'updated_at' => $s['updated_at'] === null ? null : Time::toTaipei($s['updated_at']),
+            'windows'    => self::SLA_WINDOWS,
+            'limits'     => ['max_core' => self::SLA_MAX_CORE],
+            'history'    => $history,
+        ];
+    }
+
+    /**
+     * 儲存服務水準（僅 admin）。目標、服務時段、核心設備三個欄位一起驗證、一起回報所有錯誤；空字串＝尚未設定。
+     * 整理後沒有變動就什麼都不寫（也不留紀錄）；資料表裡的值壞了（invalid）時，無論填什麼都會寫入，管理者重新儲存就能修復。
+     *
+     * @param array<string,mixed> $in target（%，字串）、window（空字串、24x7 或 custom）、core（逗號分隔的 device_id）
+     * @return array<string,mixed> 儲存後的 serviceLevelSettings()
+     */
+    public function saveServiceLevel(array $in, string $actor, ?string $level): array
+    {
+        $this->requireHandler($level);
+        $new = $this->validateServiceLevel($in);
+        $now = ($this->now)();
+
+        $this->repo->transaction(function () use ($new, $actor, $now): void {
+            $rows = $this->repo->allForUpdate();       // 鎖定讀取：兩位管理者同時儲存會排隊，異動紀錄的原值才不會是過時的快照
+            $cur  = $this->readServiceLevel($rows);
+            if (!$cur['invalid'] && $cur['target'] === $new['target'] && $cur['window'] === $new['window'] && $cur['core'] === $new['core']) {
+                return;
+            }
+            $this->persist([
+                self::SLA_TARGET => $new['target'] === null ? '' : self::targetText($new['target']),
+                self::SLA_WINDOW => $new['window'] ?? '',
+                self::SLA_CORE   => implode(',', $new['core']),
+            ], $rows, $actor, $now);
+        });
+        return $this->serviceLevelSettings($level);
+    }
+
+    /**
      * 目前生效的站點（給總覽把設備依 IP 歸站點用）。沒設定過站點是空的 Sites（不是錯誤：站點就是 LibreNMS 的位置，與沒有這個功能時一樣）；
      * 資料表裡有壞掉的列（有人手動改過）時丟例外：呼叫端要標明原因，不能默默少算站點。
      *
@@ -238,21 +312,24 @@ final class SettingsService
      * 讀進來之後的解析只會丟 IocError，其他例外（型別錯誤之類）是程式的 bug，一律往上拋，不歸類成「讀不到」。
      * 權限不夠是 AccessDenied，直接丟出，不算「讀不到」。
      *
-     * @return array{sites:?Sites,thresholds:?array{low:int,medium:int},nets:?array<int,string>,errors:array<string,\Throwable>}
+     * 第四組 sla（服務水準：目標、服務時段、核心設備）同理：沒設定過是「尚未設定」（null／空陣列），不是錯誤；壞掉是 null＋原因。
+     *
+     * @return array{sites:?Sites,thresholds:?array{low:int,medium:int},nets:?array<int,string>,sla:?array{target:?float,window:?string,core:int[]},errors:array<string,\Throwable>}
      */
     public function overviewSettings(?string $level): array
     {
         $this->requireView($level);
-        $out = ['sites' => null, 'thresholds' => null, 'nets' => null, 'errors' => []];
+        $out = ['sites' => null, 'thresholds' => null, 'nets' => null, 'sla' => null, 'errors' => []];
         try {
             $rows = $this->repo->all();
         } catch (\Throwable $e) {
-            return ['errors' => ['sites' => $e, 'thresholds' => $e, 'nets' => $e]] + $out;
+            return ['errors' => ['sites' => $e, 'thresholds' => $e, 'nets' => $e, 'sla' => $e]] + $out;
         }
         $readers = [
             'sites'      => fn (): Sites => $this->sitesFrom($rows),
             'thresholds' => fn (): array => $this->thresholdsFrom($rows),
             'nets'       => fn (): array => $this->netsFrom($rows),
+            'sla'        => fn (): array => $this->slaFrom($rows),
         ];
         foreach ($readers as $part => $read) {
             try {
@@ -641,6 +718,140 @@ final class SettingsService
             throw new IocError('站點的設定值不合法（資料表被手動改過？），請管理者到「設定」頁重新儲存');
         }
         return new Sites($s['list']);
+    }
+
+    /**
+     * 資料列 → 生效的服務水準（壞掉就丟例外，不套任何預設）。overviewSettings() 用，不檢查權限。
+     *
+     * @param array<string,array{value:string,updated_by:string,updated_at:string}> $rows
+     * @return array{target:?float,window:?string,core:int[]}
+     * @throws IocError
+     */
+    private function slaFrom(array $rows): array
+    {
+        $s = $this->readServiceLevel($rows);
+        if ($s['invalid']) {
+            throw new IocError('服務水準的設定值不合法（資料表被手動改過？），請管理者到「設定」頁重新儲存');
+        }
+        return ['target' => $s['target'], 'window' => $s['window'], 'core' => $s['core']];
+    }
+
+    /**
+     * 目標（%）：半形數字、最多三位小數、大於 0 且不超過 100；空字串＝尚未設定。
+     *
+     * @return array{ok:bool,value:?float}
+     */
+    private static function parseTarget($v): array
+    {
+        if (!is_scalar($v)) {
+            return ['ok' => false, 'value' => null];
+        }
+        $s = trim((string) $v);
+        if ($s === '') {
+            return ['ok' => true, 'value' => null];
+        }
+        if (!preg_match('/^\d{1,3}(\.\d{1,3})?$/', $s) || (float) $s <= 0 || (float) $s > 100) {
+            return ['ok' => false, 'value' => null];
+        }
+        return ['ok' => true, 'value' => (float) $s];
+    }
+
+    /** 目標存成（也顯示成）正規化字串：最多三位小數、去掉尾端的 0 與小數點（99.50 → 99.5、100.000 → 100）。 */
+    public static function targetText(float $v): string
+    {
+        return rtrim(rtrim(number_format($v, 3, '.', ''), '0'), '.');
+    }
+
+    /**
+     * 核心設備清單：逗號分隔的 LibreNMS device_id（正整數）；空字串＝沒有。整理成不重複、由小到大；超過上限或有任何不合法就是失敗。
+     *
+     * @return array{ok:bool,value:int[]}
+     */
+    private static function parseCore($v): array
+    {
+        if (!is_scalar($v) || strlen((string) $v) > 2048) {
+            return ['ok' => false, 'value' => []];
+        }
+        $s = trim((string) $v);
+        if ($s === '') {
+            return ['ok' => true, 'value' => []];
+        }
+        $ids = [];
+        foreach (explode(',', $s) as $part) {
+            $part = trim($part);
+            if (!preg_match('/^\d{1,10}$/', $part) || (int) $part < 1 || (int) $part > 2147483647) {
+                return ['ok' => false, 'value' => []];
+            }
+            $ids[(int) $part] = true;
+        }
+        $ids = array_keys($ids);
+        sort($ids);
+        // 台數與字元數都要擋：超過欄位寬度，嚴格模式存不進去，非嚴格模式會被截在中間，清單就變成別的設備編號
+        if (count($ids) > self::SLA_MAX_CORE || strlen(implode(',', $ids)) > self::SLA_CORE_MAX_CHARS) {
+            return ['ok' => false, 'value' => []];
+        }
+        return ['ok' => true, 'value' => $ids];
+    }
+
+    /**
+     * @param array<string,mixed> $in
+     * @return array{target:?float,window:?string,core:int[]}
+     */
+    private function validateServiceLevel(array $in): array
+    {
+        // 三個欄位都要送、都是字串（空字串＝尚未設定）：缺欄位或傳了陣列不能默默當成「清空」寫進去，不然漏帶 core 就把核心清單清掉
+        foreach (['target', 'window', 'core'] as $field) {
+            if (!array_key_exists($field, $in) || !is_string($in[$field])) {
+                throw new ValidationError(['欄位「' . $field . '」沒有送或格式不正確（三個欄位都要送，空字串表示尚未設定）']);
+            }
+        }
+        $errors = [];
+        $t = self::parseTarget($in['target'] ?? '');
+        if (!$t['ok']) {
+            $errors[] = '「可用率目標」要填大於 0、不超過 100、最多三位小數的數字（例如 99.5），不填就是尚未設定';
+        }
+        $w = $in['window'] ?? '';
+        if (!is_string($w) || ($w !== '' && !isset(self::SLA_WINDOWS[$w]))) {
+            $errors[] = '「服務時段」只能選 7×24 或其他時段，不選就是尚未設定';
+        }
+        $c = self::parseCore($in['core'] ?? '');
+        if (!$c['ok']) {
+            $errors[] = sprintf('「核心設備」要是設備編號（正整數）的清單，最多 %d 台，設備編號合計不超過 %d 個字元', self::SLA_MAX_CORE, self::SLA_CORE_MAX_CHARS);
+        }
+        if ($errors !== []) {
+            throw new ValidationError($errors);
+        }
+        return ['target' => $t['value'], 'window' => $w === '' ? null : $w, 'core' => $c['value']];
+    }
+
+    /**
+     * 資料表裡的三個服務水準值 → 目標、服務時段、核心設備。一個都沒有＝尚未設定；任何一個讀不懂（手動改過）＝整組壞掉，
+     * 不能只用讀得懂的那幾個。
+     *
+     * @param array<string,array{value:string,updated_by:string,updated_at:string}> $rows
+     * @return array{target:?float,window:?string,core:int[],custom:bool,invalid:bool,updated_by:?string,updated_at:?string}
+     */
+    private function readServiceLevel(array $rows): array
+    {
+        $none = ['target' => null, 'window' => null, 'core' => [], 'custom' => false, 'invalid' => false, 'updated_by' => null, 'updated_at' => null];
+        $present = array_intersect_key($rows, array_flip([self::SLA_TARGET, self::SLA_WINDOW, self::SLA_CORE]));
+        if ($present === []) {
+            return $none;
+        }
+        $t = self::parseTarget($rows[self::SLA_TARGET]['value'] ?? '');
+        $c = self::parseCore($rows[self::SLA_CORE]['value'] ?? '');
+        $w = (string) ($rows[self::SLA_WINDOW]['value'] ?? '');
+        if (!$t['ok'] || !$c['ok'] || ($w !== '' && !isset(self::SLA_WINDOWS[$w]))) {
+            return ['invalid' => true] + $none;
+        }
+        $last = null;
+        foreach ($present as $r) {
+            if ($last === null || strcmp($r['updated_at'], $last['updated_at']) > 0) {
+                $last = $r;
+            }
+        }
+        return ['target' => $t['value'], 'window' => $w === '' ? null : $w, 'core' => $c['value'], 'custom' => true, 'invalid' => false,
+                'updated_by' => $last['updated_by'], 'updated_at' => $last['updated_at']];
     }
 
     private function isRealDate(string $s): bool

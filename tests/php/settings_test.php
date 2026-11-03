@@ -254,14 +254,14 @@ test('總覽設定：三組各自成敗——壞掉的那組是 null 並附原�
     assertSame(['nets', 'sites', 'thresholds'], $parts, '三組都壞就三個原因');
 });
 
-test('總覽設定：整張表讀不到（資料表還沒建立）——三組都是 null、原因是同一個例外，不往外丟', function () use ($stV) {
+test('總覽設定：整張表讀不到（資料表還沒建立）——每一組都是 null、原因是同一個例外，不往外丟', function () use ($stV) {
     $svc = stMake($repo);
     $repo->failOnRead = true;
     $c = $svc->overviewSettings($stV);
-    assertSame([null, null, null], [$c['sites'], $c['thresholds'], $c['nets']]);
+    assertSame([null, null, null, null], [$c['sites'], $c['thresholds'], $c['nets'], $c['sla']]);
     $parts = array_keys($c['errors']);
     sort($parts);
-    assertSame(['nets', 'sites', 'thresholds'], $parts);
+    assertSame(['nets', 'sites', 'sla', 'thresholds'], $parts);
     assertTrue($c['errors']['sites'] instanceof RuntimeException && $c['errors']['sites'] === $c['errors']['nets'], '同一個讀取失敗');
     assertSame(1, $repo->reads, '失敗了也不重試三次');
 });
@@ -300,4 +300,108 @@ test('總覽設定：沒有角色是 AccessDenied（不算讀不到，也不碰�
     assertSame(0, $repo->reads, '權限不夠就不能去讀資料表');
     $repo->failOnRead = false;
     assertSame([], $svc->overviewSettings($stV)['errors']);
+});
+
+// ── 服務水準（SLA）：規格附表 A 的 F-20（可用率目標）、F-25（服務時段）都是「由機關填列」，沒有預設值；核心設備清單由管理者選 ──
+
+test('服務水準：沒設定過就是「尚未設定」（目標、服務時段是 null、核心設備是空的），不是自訂，沒有任何預設值', function () use ($stV) {
+    $svc = stMake($repo);
+    $s = $svc->serviceLevelSettings($stV);
+    assertSame([null, null, [], false, false, null, null, []], [$s['target'], $s['window'], $s['core'], $s['custom'], $s['invalid'], $s['updated_by'], $s['updated_at'], $s['history']]);
+    $c = $svc->overviewSettings($stV);
+    assertSame(['target' => null, 'window' => null, 'core' => []], $c['sla']);
+    assertSame([], $c['errors']);
+});
+
+test('服務水準：儲存後立刻生效；核心設備整理成不重複、由小到大的整數；存的是正規化字串，標示最後修改', function () use ($stH, $stV) {
+    $svc = stMake($repo);
+    $s = $svc->saveServiceLevel(['target' => ' 99.50 ', 'window' => '24x7', 'core' => '5, 3 ,5,12'], 'alice', $stH);
+    assertSame([99.5, '24x7', [3, 5, 12], true, false, 'alice', '2026-10-20 16:00:00'], [$s['target'], $s['window'], $s['core'], $s['custom'], $s['invalid'], $s['updated_by'], $s['updated_at']]);
+    assertSame('99.5', $repo->rows[SettingsService::SLA_TARGET]['value'], '尾端的 0 不存');
+    assertSame('24x7', $repo->rows[SettingsService::SLA_WINDOW]['value']);
+    assertSame('3,5,12', $repo->rows[SettingsService::SLA_CORE]['value']);
+    assertSame(['target' => 99.5, 'window' => '24x7', 'core' => [3, 5, 12]], $svc->overviewSettings($stV)['sla']);
+    $svc->saveServiceLevel(['target' => '100', 'window' => 'custom', 'core' => ''], 'alice', $stH);
+    assertSame(['target' => 100.0, 'window' => 'custom', 'core' => []], $svc->overviewSettings($stV)['sla']);
+    $svc->saveServiceLevel(['target' => '', 'window' => '', 'core' => ''], 'alice', $stH);
+    assertSame(['target' => null, 'window' => null, 'core' => []], $svc->overviewSettings($stV)['sla'], '清空＝回到尚未設定');
+});
+
+test('服務水準：驗證——目標要是 0 到 100 之間最多三位小數、服務時段只有兩種、核心設備要是正整數且不超過上限；錯誤一次回報', function () use ($stH) {
+    $svc = stMake($repo);
+    $bad = [
+        ['target' => 'abc'], ['target' => '0'], ['target' => '-1'], ['target' => '100.1'], ['target' => '99.9999'], ['target' => '99,5'], ['target' => ['99']],
+        ['window' => '7x24'], ['window' => 'CUSTOM'], ['window' => ['24x7']],
+        ['core' => 'a'], ['core' => '0'], ['core' => '1;2'], ['core' => '-3'], ['core' => '99999999999'], ['core' => implode(',', range(10, 10 + SettingsService::SLA_MAX_CORE))], ['core' => implode(',', array_map(fn ($i) => (string) (100000000 + $i), range(1, 26)))], ['core' => str_repeat('1', 3000)], ['core' => [1, 2]],
+    ];
+    foreach ($bad as $in) {
+        assertThrows(ValidationError::class, fn () => $svc->saveServiceLevel($in + ['target' => '', 'window' => '', 'core' => ''], 'admin', $stH));
+    }
+    assertSame([], $repo->rows, '驗證失敗什麼都沒寫');
+    $e = assertThrows(ValidationError::class, fn () => $svc->saveServiceLevel(['target' => 'x', 'window' => 'y', 'core' => 'z'], 'admin', $stH));
+    assertSame(3, count($e->errors()), '三個欄位的錯誤一次回報');
+    $ok = $svc->saveServiceLevel(['target' => '99.999', 'window' => '24x7', 'core' => implode(',', range(10, 9 + SettingsService::SLA_MAX_CORE))], 'admin', $stH);
+    assertSame([99.999, SettingsService::SLA_MAX_CORE], [$ok['target'], count($ok['core'])], '剛好是台數上限');
+    $nine = implode(',', array_map(fn ($i) => (string) (100000000 + $i), range(1, 25)));
+    assertSame(249, strlen($nine));
+    assertSame(25, count($svc->saveServiceLevel(['target' => '99', 'window' => '24x7', 'core' => $nine], 'admin', $stH)['core']), '25 個九位數編號＝249 個字元，放得進欄位（VARCHAR(255)）');
+});
+
+test('服務水準：三個欄位都要送、都是字串；缺欄位或傳陣列不能默默當成「清空」寫進去', function () use ($stH) {
+    $svc = stMake($repo);
+    $svc->saveServiceLevel(['target' => '99.5', 'window' => '24x7', 'core' => '1,2'], 'admin', $stH);
+    $before = $repo->rows;
+    foreach ([['target' => '99', 'window' => '24x7'], ['window' => '24x7', 'core' => '1'], ['target' => '99', 'core' => '1'], [], ['target' => '99', 'window' => '24x7', 'core' => [1, 2]],
+              ['target' => 99, 'window' => '24x7', 'core' => '1'], ['target' => null, 'window' => '24x7', 'core' => '1']] as $bad) {
+        assertThrows(ValidationError::class, fn () => $svc->saveServiceLevel($bad, 'admin', $stH), '沒有送或格式不正確');
+    }
+    assertSame($before, $repo->rows, '被拒絕的儲存不能改到資料（漏帶 core 不能把核心清單清掉）');
+});
+
+test('服務水準：整理後沒有變動就什麼都不寫、不留紀錄；有變動的欄位各留一筆異動紀錄（只列服務水準自己的）', function () use ($stH, $stV) {
+    $svc = stMake($repo, $clock);
+    $svc->saveServiceLevel(['target' => '99.5', 'window' => '24x7', 'core' => '1,2'], 'alice', $stH);
+    assertSame(3, count($repo->history));
+    $puts = $repo->puts;
+    $clock['now'] = ST_T2;
+    $svc->saveServiceLevel(['target' => '99.50', 'window' => '24x7', 'core' => '2, 1'], 'bob', $stH);
+    assertSame([$puts, 3], [$repo->puts, count($repo->history)], '整理後相同：不寫、不留紀錄');
+    $svc->saveServiceLevel(['target' => '99.9', 'window' => '24x7', 'core' => '1,2'], 'bob', $stH);
+    assertSame(4, count($repo->history), '只有目標變了：多一筆');
+    $svc->saveRisk(['risk_low' => '90', 'risk_medium' => '70'], 'bob', $stH);
+    $h = $svc->serviceLevelSettings($stV)['history'];
+    assertSame(4, count($h), '風險門檻的異動不混進來');
+    assertSame(['bob', 'SLA 可用率目標（F-20）', '99.5', '99.9'], [$h[0]['actor'], $h[0]['label'], $h[0]['from'], $h[0]['to']], '最新的在前');
+    foreach ([SettingsService::SLA_TARGET, SettingsService::SLA_WINDOW, SettingsService::SLA_CORE] as $key) {
+        assertTrue(isset(SettingsService::KEY_LABEL[$key]), $key);
+    }
+});
+
+test('服務水準：只有 admin 能存；檢視者可以讀；沒有角色什麼都不能做，也不碰資料表', function () use ($stV) {
+    $svc = stMake($repo);
+    assertThrows(AccessDenied::class, fn () => $svc->saveServiceLevel(['target' => '99', 'window' => '24x7', 'core' => ''], 'v', $stV));
+    assertThrows(AccessDenied::class, fn () => $svc->saveServiceLevel(['target' => '99', 'window' => '24x7', 'core' => ''], 'v', null));
+    assertSame([0, []], [$repo->puts, $repo->rows], '被拒絕就沒有任何寫入');
+    assertThrows(AccessDenied::class, fn () => $svc->serviceLevelSettings(null));
+    assertSame(false, $svc->serviceLevelSettings($stV)['custom']);
+});
+
+test('服務水準：資料表裡的值壞了（手動改過）——設定頁標壞掉、總覽的 sla 是 null 並附原因，不影響其他設定，也不套任何預設', function () use ($stH, $stV) {
+    $bads = [
+        [SettingsService::SLA_TARGET => stRow('abc')], [SettingsService::SLA_TARGET => stRow('101')], [SettingsService::SLA_WINDOW => stRow('weird')],
+        [SettingsService::SLA_CORE => stRow('1,x')], [SettingsService::SLA_CORE => stRow('0')],
+    ];
+    foreach ($bads as $rows) {
+        $svc = stMake($repo);
+        $repo->rows = $rows;
+        $s = $svc->serviceLevelSettings($stV);
+        assertSame([true, null, null, []], [$s['invalid'], $s['target'], $s['window'], $s['core']], json_encode($rows) . '：壞掉就是壞掉，不能只用能讀的那幾個');
+        $c = $svc->overviewSettings($stV);
+        assertSame(['sla'], array_keys($c['errors']), '只有 sla 有錯誤');
+        assertTrue($c['errors']['sla'] instanceof IocError && mb_strpos($c['errors']['sla']->getMessage(), '服務水準') !== false, $c['errors']['sla']->getMessage());
+        assertSame(null, $c['sla']);
+        assertTrue($c['thresholds'] !== null && $c['nets'] !== null && $c['sites'] !== null, '不拖累其他組');
+        $fixed = $svc->saveServiceLevel(['target' => '99', 'window' => '24x7', 'core' => '4'], 'admin', $stH);
+        assertSame([false, 99.0], [$fixed['invalid'], $fixed['target']], '重新儲存就修復');
+    }
 });

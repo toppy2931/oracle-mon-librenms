@@ -164,6 +164,100 @@ final class BehaviorService
         return $data;
     }
 
+    public const DETECTOR_LABELS = [
+        'after_hours_surge'    => '非上班時段流量或目的地數暴增',
+        'new_external_pattern' => '非上班時段出現新目的地或埠',
+    ];
+
+    /** 警示的指標欄位 → [畫面標籤, 格式]。白名單：不認得的鍵、不是數字的值一律不顯示（指標是 JSON，不能整包丟到畫面）。 */
+    private const METRIC_FIELDS = [
+        'bytes'                     => ['實際位元組數', 'bytes'],
+        'connections'               => ['實際連線數', 'int'],
+        'destinations'              => ['實際不同目的地數', 'int'],
+        'baseline_p95_bytes'        => ['基線 P95 位元組數', 'bytes'],
+        'baseline_p95_connections'  => ['基線 P95 連線數', 'int'],
+        'baseline_p95_destinations' => ['基線 P95 目的地數', 'int'],
+        'byte_limit'                => ['位元組門檻', 'bytes'],
+        'destination_limit'         => ['目的地數門檻', 'int'],
+        'new_destination_count'     => ['新出現的目的地數', 'int'],
+        'new_port_count'            => ['新出現的目的埠數', 'int'],
+    ];
+    private const CASE_DESTINATIONS_MAX = 20;
+    /** 同一個管理者在這段時間內重複打開同一件事件案只留一筆稽核：行為頁的稽核清單只顯示最近 30 筆，每開一次就寫會把設定異動、主機確認等紀錄擠出視窗 */
+    private const CASE_VIEW_AUDIT_SECONDS = 600;
+
+    /**
+     * 事件詳情的「裝置行為警示」：指向這件事件案的警示（偵測器、區間、嚴重度、分數、實際值對基線與門檻）。
+     * 彙總指標所有人看得到；**目的位址（與目的埠）只給管理者**，而且管理者看了會留稽核（誰、哪一件事件案），
+     * 檢視者看的是彙總、不留。不是行為警示建立的事件案回 null（畫面不顯示這一塊）；
+     * 該時段的區間資料已不在了（被清除）時，管理者看到原因，不是一張空清單。
+     *
+     * @return array<string,mixed>|null
+     */
+    public function caseEvidence(int $caseId, string $actor, ?string $level): ?array
+    {
+        if (!Access::canView($level)) { throw new AccessDenied('沒有檢視權限'); }
+        $q = $this->db->prepare('SELECT a.id,a.asset_id,a.detector,a.window_start,a.severity,a.score,a.summary,a.metrics_json,a.occurrences,a.baseline_version,x.name
+            FROM ioc_behavior_alerts a JOIN ioc_behavior_assets x ON x.id=a.asset_id WHERE a.case_id=? ORDER BY a.id LIMIT 5');
+        $q->execute([$caseId]);
+        $rows = $q->fetchAll(PDO::FETCH_ASSOC);
+        if ($rows === []) { return null; }
+        $handler = Access::canHandle($level);
+        $alerts = [];
+        foreach ($rows as $r) {
+            $metrics = [];
+            $raw = json_decode((string) $r['metrics_json'], true);
+            foreach (self::METRIC_FIELDS as $key => [$label, $format]) {
+                if (is_array($raw) && isset($raw[$key]) && (is_int($raw[$key]) || is_float($raw[$key]))) {
+                    $metrics[] = ['label' => $label, 'text' => $format === 'bytes' ? self::formatBytes((float) $raw[$key]) : (string) (int) round((float) $raw[$key])];
+                }
+            }
+            $alerts[] = [
+                'detector'         => (string) $r['detector'],
+                'detector_label'   => self::DETECTOR_LABELS[$r['detector']] ?? (string) $r['detector'],
+                'asset'            => (string) $r['name'],
+                'window'           => Time::toTaipei((string) $r['window_start'], 'Y-m-d H:i'),
+                'severity'         => (string) $r['severity'],
+                'severity_label'   => Labels::severity((string) $r['severity']),
+                'score'            => (int) $r['score'],
+                'summary'          => (string) $r['summary'],
+                'occurrences'      => (int) $r['occurrences'],
+                'baseline_version' => (int) $r['baseline_version'],
+                'metrics'          => $metrics,
+                'destinations'     => $handler ? $this->alertDestinations((int) $r['asset_id'], (string) $r['window_start']) : null,
+            ];
+        }
+        if ($handler) { $this->auditOnce('case_destinations_viewed', 'case:' . $caseId, $actor, self::CASE_VIEW_AUDIT_SECONDS); }
+        return ['ok' => true, 'destinations_hidden' => !$handler, 'alerts' => $alerts];
+    }
+
+    /** @return array<string,mixed> 管理者專用：警示區間的目的位址（附首次出現時間）與目的埠；區間資料不在了回 ok=false 與原因 */
+    private function alertDestinations(int $assetId, string $windowStart): array
+    {
+        $q = $this->db->prepare('SELECT destinations_json,ports_json FROM ioc_behavior_windows WHERE asset_id=? AND source_key=? AND window_start=?');
+        $q->execute([$assetId, self::SOURCE, $windowStart]);
+        $w = $q->fetch(PDO::FETCH_ASSOC);
+        if (!$w) { return ['ok' => false, 'error' => '這個時段的區間資料已不存在（可能已被清除），查不到目的位址']; }
+        $ips = array_slice(array_values(array_filter((array) json_decode((string) $w['destinations_json'], true), 'is_string')), 0, self::CASE_DESTINATIONS_MAX);
+        $ports = array_slice(array_values(array_filter((array) json_decode((string) $w['ports_json'], true), 'is_int')), 0, self::CASE_DESTINATIONS_MAX);
+        $first = [];
+        if ($ips !== []) {
+            $marks = implode(',', array_fill(0, count($ips), '?'));
+            $q = $this->db->prepare("SELECT value_key,first_seen_at FROM ioc_behavior_known WHERE asset_id=? AND source_key=? AND kind='destination' AND value_key IN ($marks)");
+            $q->execute(array_merge([$assetId, self::SOURCE], $ips));
+            foreach ($q->fetchAll(PDO::FETCH_ASSOC) as $k) { $first[(string) $k['value_key']] = Time::toTaipei((string) $k['first_seen_at'], 'Y-m-d H:i'); }
+        }
+        return ['ok' => true, 'items' => array_map(static fn (string $ip): array => ['ip' => $ip, 'first_seen' => $first[$ip] ?? null], $ips), 'ports' => $ports];
+    }
+
+    private static function formatBytes(float $b): string
+    {
+        foreach (['GiB' => 1073741824.0, 'MiB' => 1048576.0, 'KiB' => 1024.0] as $unit => $size) {
+            if ($b >= $size) { return sprintf('%.1f %s', $b / $size, $unit); }
+        }
+        return sprintf('%d B', (int) $b);
+    }
+
     public function detail(int $id, ?string $level): array
     {
         Access::requireHandler($level, '只有管理者可以檢視裝置行為詳情');
@@ -610,6 +704,14 @@ final class BehaviorService
     {
         $q = $this->db->prepare('INSERT INTO ioc_behavior_audit (actor,action,subject,occurred_at) VALUES (?,?,?,UTC_TIMESTAMP())');
         $q->execute([mb_substr($actor, 0, 255), $action, mb_substr($subject, 0, 100)]);
+    }
+
+    /** 同一個人、同一個動作、同一個對象，在 $seconds 秒內已經有紀錄就不再寫（誰看了什麼仍然留得下來，只是不逐次記）。 */
+    private function auditOnce(string $action, string $subject, string $actor, int $seconds): void
+    {
+        $q = $this->db->prepare('SELECT 1 FROM ioc_behavior_audit WHERE actor=? AND action=? AND subject=? AND occurred_at > DATE_SUB(UTC_TIMESTAMP(), INTERVAL ? SECOND) LIMIT 1');
+        $q->execute([mb_substr($actor, 0, 255), $action, mb_substr($subject, 0, 100), $seconds]);
+        if ($q->fetchColumn() === false) { $this->audit($action, $subject, $actor); }
     }
 
     private function webhookStatus(): array

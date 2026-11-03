@@ -18,6 +18,8 @@ namespace Ioc;
 final class CaseCatalog
 {
     public const OTHER = 'other';
+    /** 裝置行為分析建立的事件案（BehaviorCollector::ensureCase）；證據裡的目的位址只給管理者（EvidenceService、BehaviorService::caseEvidence）。 */
+    public const BEHAVIOR = 'behavior_anomaly';
 
     public const CATEGORIES = [
         'suspicious_login' => [
@@ -108,6 +110,18 @@ final class CaseCatalog
                 '檢查同一個帳號的登入來源與時間是否正常。',
                 '不合理的提權：收回 sudo 權限、重設密碼，並檢查該主機有沒有被改動。',
                 '在處理歷程留下備註。',
+            ],
+        ],
+        // 裝置行為分析自動建立的事件案。刻意沒有攻擊技術：偵測器只看「離峰時段流量明顯高於基線」與「新的目的地或埠」，
+        // 這些行為本身不足以指向某個 ATT&CK 技術（可能是備份、更新或換了用途），宣稱外洩（T1041、T1048）是過度解讀。
+        self::BEHAVIOR => [
+            'label'  => '裝置行為異常',
+            'attack' => null,
+            'steps'  => [
+                '先確認這台設備的用途與負責人，問清楚那個時段是不是有排程工作（備份、更新、同步、資料匯出）。',
+                '看「裝置行為警示」裡的實際值與基線、門檻差多少；管理者可再看目的位址與首次出現的時間，判斷是新的服務還是不明的對外連線。',
+                '不是已知用途的話，用證據時間軸看防火牆日誌，必要時請設備管理者暫時隔離並檢查是否中毒或帳號被盜用。',
+                '確認是預期行為就在處理歷程留下原因再結案；仍在監控期的設備，之後可調整上班時段或重新學習基線。',
             ],
         ],
         self::OTHER => [

@@ -3,6 +3,7 @@ declare(strict_types=1);
 
 use Ioc\Access;
 use Ioc\AccessDenied;
+use Ioc\CaseRepo;
 use Ioc\CaseService;
 use Ioc\Fleet;
 use Ioc\LandscapeService;
@@ -41,6 +42,31 @@ test('Fleet：資產數、正常數、依類型的數量', function () {
     assertSame(4, $f->total());
     assertSame(3, $f->up());
     assertSame(['server' => 2, 'network' => 1, 'other' => 1], $f->byGroup());
+});
+
+test('Fleet：某一類設備的平均可用率只算那一類、只算有資料的設備；沒有資料是 null，不是 0%', function () {
+    $f = new Fleet([dev('sw1', 'network', 1, null, ['avail_7d' => 99.0]), dev('fw', 'firewall', 1, null, ['avail_7d' => 97.0]),
+                    dev('sw2', 'network', 1), dev('srv', 'server', 1, null, ['avail_7d' => 50.0])]);
+    assertSame(['value' => 98.0, 'n' => 2, 'devices' => 3], $f->groupAvailability('network'), '網路設備 3 台（sw2 沒資料不計入平均）');
+    assertSame(['value' => 50.0, 'n' => 1, 'devices' => 1], $f->groupAvailability('server'));
+    assertSame(['value' => null, 'n' => 0, 'devices' => 0], (new Fleet([dev('srv', 'server')]))->groupAvailability('network'), '沒有網路設備：無資料');
+    assertSame(['value' => null, 'n' => 0, 'devices' => 1], (new Fleet([dev('sw', 'network')]))->groupAvailability('network'), '有設備但沒有可用率：null，不是 0');
+    $d30 = new Fleet([dev('a', 'network', 1, null, ['avail_30d' => 99.5]), dev('b', 'network', 1, null, ['avail_30d' => 98.5])]);
+    assertSame(99.0, $d30->groupAvailability('network', 'avail_30d')['value'], '可以指定 30 日');
+    assertThrows(InvalidArgumentException::class, fn () => $f->groupAvailability('network', 'avail_x'));       // 欄位走白名單
+});
+
+test('Fleet：核心設備清單的現況（以 LibreNMS device_id 對應；不在 LibreNMS 的另外數，30 日可用率只算有資料的）', function () {
+    $f = new Fleet([dev('a', 'server', 1, null, ['id' => 1, 'avail_30d' => 99.9]), dev('b', 'server', 0, null, ['id' => 2, 'avail_30d' => 90.0]),
+                    dev('c', 'network', 1, null, ['id' => 3]), dev('d', 'server', 1, null, ['id' => 4, 'avail_30d' => 100.0])]);
+    assertSame(['listed' => 4, 'found' => 3, 'missing' => 1, 'up' => 2, 'down' => 1, 'down_names' => ['b'], 'avail30' => 94.95, 'avail30_exact' => 94.95, 'n30' => 2],
+        $f->core([1, 2, 3, 99]), '99 不在 LibreNMS（被刪除或停用）：missing');
+    assertSame(['listed' => 1, 'found' => 1, 'missing' => 0, 'up' => 1, 'down' => 0, 'down_names' => [], 'avail30' => null, 'avail30_exact' => null, 'n30' => 0],
+        $f->core([3]), '核心設備沒有 30 日可用率：null，不是 0%');
+    assertSame(['listed' => 0, 'found' => 0, 'missing' => 0, 'up' => 0, 'down' => 0, 'down_names' => [], 'avail30' => null, 'avail30_exact' => null, 'n30' => 0], $f->core([]));
+    assertSame(2, $f->core([1, 1, 1, 2])['listed'], '重複的 id 只算一次');
+    $many = new Fleet(array_map(static fn (int $i) => dev('h' . $i, 'server', 0, null, ['id' => $i]), range(1, 9)));
+    assertSame(['h1', 'h2', 'h3', 'h4', 'h5'], $many->core(range(1, 9))['down_names'], '離線名單最多列 5 台');
 });
 
 test('Fleet：站點異常等級的門檻（<25% 輕微、<50% 中度、≥50% 嚴重）', function () {
@@ -307,6 +333,154 @@ test('總覽：六張 KPI 的順序與內容（站點、資產、待處理事件
     assertSame(null, $k['sites']['na'] ?? null);
 });
 
+/** 帶服務水準設定與今日／昨日件數的總覽（具名參數，免得位置參數弄錯）。 */
+function lsSla(?Fleet $fleet, ?array $sla, ?string $slaWarning = null, ?array $dayCounts = null, ?array $summary = null, ?array $open = null): array
+{
+    return (new LandscapeService(LS_NOW))->build($fleet, $summary, $open, [], [], lsCoverage(), RiskScore::DEFAULT_THRESHOLDS, null, $sla, $slaWarning, $dayCounts);
+}
+
+function lsCard(array $o, string $list, string $key): array
+{
+    return array_column($o[$list], null, 'key')[$key];
+}
+
+test('總覽：核心業務服務——沒設定是「尚未定義」；設定後算核心設備目前正常幾台，離線與不在 LibreNMS 的各自交代', function () {
+    $fleet = new Fleet([dev('a', 'server', 1, null, ['id' => 1]), dev('b', 'server', 0, null, ['id' => 2]), dev('c', 'network', 1, null, ['id' => 3])]);
+    $core = fn (?array $sla, ?Fleet $f = null, ?string $w = null) => lsCard(lsSla($f ?? $fleet, $sla, $w), 'kpi', 'core_services');
+    $none = ['target' => null, 'window' => null, 'core' => []];
+    $k = $core($none);
+    assertSame([null, 'unknown', '尚未定義'], [$k['value'], $k['state'], $k['na']], '沒有核心設備清單，不能編一個數字');
+    $k = $core(['core' => [1, 3]] + $none);
+    assertSame(['2/2', 'good'], [$k['value'], $k['state']]);
+    $k = $core(['core' => [1, 2, 3]] + $none);
+    assertSame(['2/3', 'bad'], [$k['value'], $k['state']]);
+    assertTrue(mb_strpos($k['sub'], '離線：b') !== false, $k['sub']);
+    $k = $core(['core' => [1, 99]] + $none);
+    assertSame(['1/2', 'warn'], [$k['value'], $k['state']], '不在 LibreNMS 的不能算正常，也不是離線');
+    assertTrue(mb_strpos($k['sub'], '1 台不在 LibreNMS') !== false, $k['sub']);
+    $k = $core(['core' => [98, 99]] + $none);
+    assertSame([null, 'unknown', '設備不在 LibreNMS'], [$k['value'], $k['state'], $k['na']], '清單裡的設備全都找不到：不能顯示 0/2');
+    $k = $core(null, null, '服務水準的設定值不合法');
+    assertSame([null, 'unknown', null], [$k['value'], $k['state'], $k['na']], '設定讀不到：無法取得，不套預設');
+    assertTrue(mb_strpos($k['sub'], '不合法') !== false, $k['sub']);
+    $k = lsCard(lsSla(null, ['core' => [1]] + $none), 'kpi', 'core_services');
+    assertSame([null, 'unknown', null], [$k['value'], $k['state'], $k['na']], 'LibreNMS 設備讀不到：無法取得');
+    $many = new Fleet(array_map(static fn (int $i) => dev('h' . $i, 'server', 0, null, ['id' => $i]), range(1, 8)));
+    assertTrue(mb_strpos(lsCard(lsSla($many, ['core' => range(1, 8)] + $none), 'kpi', 'core_services')['sub'], '等 8 台') !== false, '離線超過 5 台只列前 5 台，後面寫總數');
+});
+
+test('總覽：SLA 達成率——目標、服務時段、核心設備缺一不可，不是 7×24 就說無法計算，資料不夠不編數字', function () {
+    $fleet = new Fleet([dev('a', 'server', 1, null, ['id' => 1, 'avail_30d' => 99.9]), dev('b', 'server', 1, null, ['id' => 2, 'avail_30d' => 99.1]),
+                        dev('c', 'server', 1, null, ['id' => 3])]);
+    $full = ['target' => 99.5, 'window' => '24x7', 'core' => [1, 2]];
+    $sla = fn (array $s, ?Fleet $f = null) => lsCard(lsSla($f ?? $fleet, $s), 'kpi2', 'sla');
+    $k = $sla($full);
+    assertSame(['99.50%', 'good'], [$k['value'], $k['state']], '(99.9+99.1)/2＝99.5，剛好達標');
+    assertTrue(mb_strpos($k['sub'], '目標 99.5%') !== false && mb_strpos($k['sub'], '最近 30 日') !== false && mb_strpos($k['sub'], '未排除計畫性維護') !== false, $k['sub']);
+    $k = $sla(['target' => 99.6] + $full);
+    assertSame(['99.50%', 'bad'], [$k['value'], $k['state']], '低於目標');
+    // 目標最多三位小數：先捨入再比會把 99.9985 當成 100.00 而判達標（五個九這種目標會被灌水）
+    $edge = fn (float $avail, float $target) => $sla(['target' => $target] + $full, new Fleet([dev('a', 'server', 1, null, ['id' => 1, 'avail_30d' => $avail]), dev('b', 'server', 1, null, ['id' => 2, 'avail_30d' => $avail])]));
+    $k = $edge(99.9985, 99.999);
+    assertSame(['99.998%', 'bad'], [$k['value'], $k['state']], '99.9985 < 99.999：未達標，顯示也不能是 100.00%');
+    $k = $edge(99.9994, 99.999);
+    assertSame(['99.999%', 'good'], [$k['value'], $k['state']], '99.9994 ≥ 99.999：達標，顯示的值與目標一致');
+    $k = $edge(99.9894, 99.99);
+    assertSame(['99.989%', 'bad'], [$k['value'], $k['state']], '99.9894 < 99.99：未達標');
+    $k = $sla(['core' => [1, 2, 99]] + $full);
+    assertSame(['99.50%', 'warn'], [$k['value'], $k['state']], '清單裡有設備已不在 LibreNMS：不計入平均，但不能默默顯示達標（綠色）');
+    assertTrue(mb_strpos($k['sub'], '另有 1 台不在 LibreNMS') !== false, $k['sub']);
+    $k = $sla(['core' => [1, 2, 3]] + $full);
+    assertSame('99.50%', $k['value'], '沒有 30 日可用率的設備不計入平均');
+    assertTrue(mb_strpos($k['sub'], '1 台沒有資料') !== false, $k['sub']);
+    foreach ([['target', null, 'F-20'], ['window', null, 'F-25'], ['core', [], '核心設備']] as [$key, $empty, $mention]) {
+        $k = $sla([$key => $empty] + $full);
+        assertSame([null, 'unknown', '尚未設定'], [$k['value'], $k['state'], $k['na']], $key);
+        assertTrue(mb_strpos($k['sub'], $mention) !== false, $key . '：要說缺哪一項：' . $k['sub']);
+    }
+    $k = $sla(['window' => 'custom'] + $full);
+    assertSame([null, 'unknown', '無法計算'], [$k['value'], $k['state'], $k['na']], '不是 7×24：LibreNMS 的可用率是全天算的');
+    $k = $sla($full, new Fleet([dev('a', 'server', 1, null, ['id' => 1]), dev('b', 'server', 1, null, ['id' => 2])]));
+    assertSame([null, 'unknown', '尚無資料'], [$k['value'], $k['state'], $k['na']], '核心設備都還沒有 30 日可用率：不是 0%');
+    $k = $sla(['core' => [98]] + $full);
+    assertSame([null, 'unknown', '設備不在 LibreNMS'], [$k['value'], $k['state'], $k['na']]);
+    $k = lsCard(lsSla($fleet, null, '服務水準的設定值不合法'), 'kpi2', 'sla');
+    assertSame([null, 'unknown', null], [$k['value'], $k['state'], $k['na']], '設定讀不到：無法取得');
+    $k = lsCard(lsSla(null, $full), 'kpi2', 'sla');
+    assertSame([null, 'unknown', null], [$k['value'], $k['state'], $k['na']], '設備讀不到：無法取得');
+    assertSame(['sla', 'network_availability', 'compliance'], array_column(lsSla($fleet, $full)['kpi2'], 'key'));
+});
+
+/** 帶稽核摘要（AuditEvidenceService::summary() 的結果）的總覽。null＝稽核資料讀不到。 */
+function lsAudit(?array $audit): array
+{
+    return (new LandscapeService(LS_NOW))->build(lsFleet(), null, null, [], [], lsCoverage(), RiskScore::DEFAULT_THRESHOLDS, null, LandscapeService::NO_SLA, null, null, $audit);
+}
+
+/** @return array<string,mixed> 一份已建立基準與週期的稽核摘要；$c 覆寫 counts 的欄位 */
+function lsAuditReady(array $c = []): array
+{
+    $counts = $c + ['total' => 40, 'unreviewed' => 10, 'compliant' => 24, 'gap' => 4, 'not_applicable' => 2, 'assessed' => 30,
+                    'remediations' => 4, 'overdue' => 0, 'remediations_done' => 1, 'snapshots' => 3, 'snapshot_bytes' => 1024];
+    return ['ready' => true, 'message' => null, 'catalog' => 'v1', 'cycle' => ['title' => '2026 年度', 'starts_on' => '2026-01-01', 'ends_on' => '2026-12-31'], 'counts' => $counts, 'domains' => []];
+}
+
+test('總覽：合規覆蓋率——已評估的控制項占全部的比例（不是符合率）；還沒建立基準或週期、讀不到各說各的，不是 0%', function () {
+    $card = fn (?array $a) => lsCard(lsAudit($a), 'kpi2', 'compliance');
+    $k = $card(lsAuditReady());
+    assertSame(['compliance', '合規覆蓋率', '75.0%', 'warn'], [$k['key'], $k['label'], $k['value'], $k['state']], '30／40 已評估；有缺口與未評估，不是綠色');
+    foreach (['已評估 30／40', '符合 24', '缺口 4', '不適用 2', '未評估 10', '2026 年度'] as $s) {
+        assertTrue(mb_strpos($k['sub'], $s) !== false, $s . '：' . $k['sub']);
+    }
+    $all = $card(lsAuditReady(['total' => 40, 'unreviewed' => 0, 'compliant' => 38, 'gap' => 0, 'not_applicable' => 2, 'assessed' => 40]));
+    assertSame(['100.0%', 'good'], [$all['value'], $all['state']], '全部評估完、沒有缺口、沒有逾期');
+    $almost = $card(lsAuditReady(['total' => 2000, 'unreviewed' => 1, 'compliant' => 1999, 'gap' => 0, 'not_applicable' => 0, 'assessed' => 1999]));
+    assertSame('99.9%', $almost['value'], '1999／2000＝99.95%，還有一項沒評估：無條件捨去，不能四捨五入成 100%');
+    $late = $card(lsAuditReady(['overdue' => 2, 'gap' => 0, 'unreviewed' => 0, 'assessed' => 40, 'compliant' => 38]));
+    assertSame('bad', $late['state'], '有改善事項逾期');
+    assertTrue(mb_strpos($late['sub'], '改善逾期 2 件') !== false, $late['sub']);
+    $k = $card(['ready' => false, 'message' => '未建立評估基準', 'catalog' => null, 'cycle' => null, 'counts' => null, 'domains' => []]);
+    assertSame([null, 'unknown', '尚未建立'], [$k['value'], $k['state'], $k['na']]);
+    assertTrue(mb_strpos($k['sub'], '未建立評估基準') !== false && mb_strpos($k['sub'], '稽核與證據') !== false, $k['sub']);
+    $k = $card(lsAuditReady(['total' => 0, 'unreviewed' => 0, 'compliant' => 0, 'gap' => 0, 'not_applicable' => 0, 'assessed' => 0]));
+    assertSame([null, 'unknown', '無控制項'], [$k['value'], $k['state'], $k['na']], '基準裡沒有控制項：不能除以零，也不是 0%');
+    $k = $card(null);
+    assertSame([null, 'unknown', null], [$k['value'], $k['state'], $k['na']], '稽核資料讀不到：無法取得');
+});
+
+test('總覽：網路可用性——只算網路類設備最近 7 日的平均；沒有網路設備或沒有資料各說各的，不是 0%', function () {
+    $net = fn (Fleet $f) => lsCard(lsSla($f, LandscapeService::NO_SLA), 'kpi2', 'network_availability');
+    $k = $net(new Fleet([dev('sw', 'network', 1, null, ['avail_7d' => 99.9]), dev('fw', 'firewall', 1, null, ['avail_7d' => 99.5]), dev('srv', 'server', 1, null, ['avail_7d' => 10.0])]));
+    assertSame(['99.70%', 'good'], [$k['value'], $k['state']], '伺服器的 10% 不能混進網路可用性');
+    assertTrue(mb_strpos($k['sub'], '最近 7 日') !== false && mb_strpos($k['sub'], '2 台網路設備') !== false, $k['sub']);
+    assertSame('warn', $net(new Fleet([dev('sw', 'network', 1, null, ['avail_7d' => 96.0])]))['state']);
+    assertSame('bad', $net(new Fleet([dev('sw', 'network', 1, null, ['avail_7d' => 90.0])]))['state']);
+    $k = $net(new Fleet([dev('sw', 'network', 1, null, ['avail_7d' => 99.0]), dev('sw2', 'network', 1)]));
+    assertTrue(mb_strpos($k['sub'], '1 台沒有資料') !== false, $k['sub']);
+    $k = $net(new Fleet([dev('srv', 'server', 1, null, ['avail_7d' => 99.0])]));
+    assertSame([null, 'unknown', '無網路設備'], [$k['value'], $k['state'], $k['na']]);
+    $k = $net(new Fleet([dev('sw', 'network')]));
+    assertSame([null, 'unknown', '尚無資料'], [$k['value'], $k['state'], $k['na']], '有網路設備但沒有可用率：不是 0%');
+    $k = lsCard(lsSla(null, LandscapeService::NO_SLA), 'kpi2', 'network_availability');
+    assertSame([null, 'unknown', null], [$k['value'], $k['state'], $k['na']], '設備讀不到：無法取得');
+});
+
+test('總覽：待處理事件帶「今日新建、昨日新建」（台北時間分日，由事件案資料算，不用快照）；讀不到或超過上限就不寫', function () use ($lsSummary, $lsOpen) {
+    $svc = new LandscapeService(LS_NOW);
+    $ts0 = strtotime(taipeiDay(LS_NOW) . ' 00:00:00 +08:00');
+    $at = fn (int $ts) => gmdate('Y-m-d H:i:s', $ts);
+    $rows = [['created_at' => $at(LS_NOW)], ['created_at' => $at($ts0)], ['created_at' => $at($ts0 - 1)], ['created_at' => $at($ts0 - 86400)],
+             ['created_at' => $at($ts0 - 86401)], ['created_at' => 'garbage']];
+    assertSame(['today' => 2, 'yesterday' => 2], $svc->dayCounts($rows), '昨天 00:00:00～23:59:59 都算昨天；前天與壞時間不算');
+    assertSame(['today' => 0, 'yesterday' => 0], $svc->dayCounts([]), '資料表讀得到而沒有案件：這是真的 0');
+    $capped = array_fill(0, CaseRepo::CREATED_SINCE_LIMIT, ['created_at' => $at(LS_NOW)]);
+    assertSame(null, $svc->dayCounts($capped), '碰到查詢上限：較早的一天可能少算，不能寫一個偏低的數字');
+    $k = lsCard(lsSla(lsFleet(), LandscapeService::NO_SLA, null, ['today' => 2, 'yesterday' => 5], $lsSummary, $lsOpen), 'kpi', 'cases');
+    assertSame('高風險 1 · 中風險 2 · 低風險 0；今日新建 2 件（昨日 5 件）', $k['sub']);
+    $k = lsCard(lsSla(lsFleet(), LandscapeService::NO_SLA, null, null, $lsSummary, $lsOpen), 'kpi', 'cases');
+    assertSame('高風險 1 · 中風險 2 · 低風險 0', $k['sub'], '沒有件數就不寫，也不影響原本的內容');
+});
+
 test('總覽：監控資產數要帶出離線台數（含沒指定位置的設備，站點相關卡片看不到它們）', function () use ($lsSummary, $lsOpen) {
     $assets = function (int $total, int $down, ?string $loc = null) use ($lsSummary, $lsOpen) {
         $rows = [];
@@ -504,6 +678,44 @@ test('總覽：短期間事件趨勢分六格，起迄與邊界不漏算也不�
     assertSame([1, 0, 0, 0, 0, 0], $trend['series']['medium']);
     assertSame([0, 1, 0, 0, 0, 0], $trend['series']['low']);
     assertSame(4, $trend['total']);
+});
+
+/** 趨勢有自己的視窗（24 小時／7 日／30 日），不跟 Graylog 區塊的統計期間綁在一起（簡報是「近 30 日」；正式端點以前一律傳統計期間，30 日分支走不到）。 */
+test('總覽：事件趨勢視窗只有 24 小時、7 日、30 日，預設 30 日，標籤直接寫在資料裡', function () {
+    assertSame([86400 => '24 小時', 604800 => '7 日', 2592000 => '30 日'], LandscapeService::TREND_OPTIONS);
+    assertSame(2592000, LandscapeService::TREND_DEFAULT);
+    $label = fn (?int $w) => (new LandscapeService(LS_NOW, $w))->build(lsFleet(), null, null, [], [], lsCoverage(), RiskScore::DEFAULT_THRESHOLDS)['trend']['data']['label'];
+    assertSame('近 30 日', $label(null), '沒指定視窗＝30 日（簡報的預設）');
+    assertSame('近 30 日', $label(2592000));
+    assertSame('近 7 日', $label(604800));
+    assertSame('最近 24 小時', $label(86400));
+    assertSame('最近 30 分鐘', $label(1800), '舊的短期間（Graylog 區塊用的）仍可當趨勢視窗，行為不變');
+    foreach ([0, 7200, 172800, 86401, 31536000] as $bad) {
+        assertThrows(Ioc\ValidationError::class, fn () => new LandscapeService(LS_NOW, $bad), '不支援的趨勢期間');
+    }
+});
+
+test('總覽：7 日趨勢逐日 7 格（台北時間分日），範圍外、不認得的嚴重性與壞時間不算', function () {
+    $ts0 = strtotime(taipeiDay(LS_NOW) . ' 00:00:00 +08:00');
+    $at = fn (int $ts) => gmdate('Y-m-d H:i:s', $ts);
+    $rows = [
+        ['created_at' => $at(LS_NOW), 'severity' => 'high'],
+        ['created_at' => $at($ts0 - 6 * 86400), 'severity' => 'low'],            // 台北 6 天前 00:00:00＝第一格
+        ['created_at' => $at($ts0 - 6 * 86400 - 1), 'severity' => 'medium'],     // 再早 1 秒＝範圍外
+        ['created_at' => $at(LS_NOW - 20 * 86400), 'severity' => 'high'],        // 範圍外
+        ['created_at' => $at(LS_NOW), 'severity' => 'critical'],                 // 不認得的嚴重性
+        ['created_at' => 'garbage', 'severity' => 'high'],                       // 壞時間
+    ];
+    $t = (new LandscapeService(LS_NOW, 604800))->build(lsFleet(), null, null, [], $rows, lsCoverage(), RiskScore::DEFAULT_THRESHOLDS)['trend']['data'];
+    assertSame(7, count($t['days']));
+    assertSame(taipeiDay(LS_NOW), $t['days'][6]);
+    assertSame(taipeiDay(LS_NOW - 6 * 86400), $t['days'][0]);
+    assertSame([1, 0], [$t['series']['high'][6], $t['series']['high'][0]]);
+    assertSame([0, 1], [$t['series']['low'][6], $t['series']['low'][0]]);
+    assertSame(0, array_sum($t['series']['medium']), '範圍外的 medium 不算');
+    assertSame(2, $t['total']);
+    assertSame('近 7 日', $t['label']);
+    assertSame(false, isset($t['labels']), '逐日的趨勢用 days，不是 labels（畫面靠這個分辨要不要截 MM-DD）');
 });
 
 test('總覽：沒有任何事件案時，趨勢是 30 天的 0（資料表讀得到，這是真的 0）', function () {

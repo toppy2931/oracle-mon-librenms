@@ -54,7 +54,9 @@ try {
         case 'evidence':
             // 證據時間軸與關聯指標：只讀；檢視者也能看（get 會先檢查檢視權限）。demo 只決定查範例資料還是正式資料
             $r = $svc->get((int) ($in['id'] ?? 0), $level);
-            ioc_json(['evidence' => ioc_evidence($r['case'], ($in['demo'] ?? false) === true)]);
+            // 範例資料模式（重播的測試樣本）不顯示裝置行為警示：那是正式的行為資料，不能跟範例資料混在一起（IS-054～056）
+            $demo = ($in['demo'] ?? false) === true;
+            ioc_json(['evidence' => ioc_evidence($r['case'], $demo, $level), 'behavior' => $demo ? null : ioc_behavior_evidence($r['case'], $actor, $level)]);
         case 'create':
             // 欄位白名單；dedup_key 只給自動建立用，不接受瀏覽器傳入
             $fields = ioc_pick($in['case'] ?? null, ['title', 'severity', 'category', 'subject_user', 'subject_ip', 'subject_host', 'target_host', 'related_host', 'impact_scope', 'tags', 'summary', 'evidence_query']);

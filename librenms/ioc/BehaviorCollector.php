@@ -214,15 +214,22 @@ final class BehaviorCollector
 
     private function ensureCase(int $alertId): void
     {
+        // 位址取「警示那個區間正在用的」：DHCP 換位址後，「最近一個位址」可能是別台設備，拿它當證據條件會撈到別人的流量。
+        // 沒有位址涵蓋那個時間（位址表只記觀測到的第一次與最近一次）才退回最近一個
         $q = $this->db->prepare('SELECT a.id,a.asset_id,a.dedup_key,a.summary,a.severity,a.case_id,x.name,
-            (SELECT address FROM ioc_behavior_addresses WHERE asset_id=a.asset_id ORDER BY last_seen_at DESC,id DESC LIMIT 1) address
+            COALESCE(
+              (SELECT address FROM ioc_behavior_addresses WHERE asset_id=a.asset_id AND first_seen_at<=DATE_ADD(a.window_start,INTERVAL 5 MINUTE) AND last_seen_at>=a.window_start ORDER BY last_seen_at DESC,id DESC LIMIT 1),
+              (SELECT address FROM ioc_behavior_addresses WHERE asset_id=a.asset_id ORDER BY last_seen_at DESC,id DESC LIMIT 1)) address
             FROM ioc_behavior_alerts a JOIN ioc_behavior_assets x ON x.id=a.asset_id WHERE a.id=?');
         $q->execute([$alertId]); $alert = $q->fetch(PDO::FETCH_ASSOC);
         if (!$alert || $alert['case_id'] !== null) { return; }
         try {
             $cases = new CaseService(new PdoCaseRepo($this->db));
+            $ip = is_string($alert['address']) && filter_var($alert['address'], FILTER_VALIDATE_IP) !== false ? $alert['address'] : null;
+            // 事件類型刻意沒有攻擊技術（CaseCatalog::BEHAVIOR）；證據條件讓詳情頁的時間軸查得到這個位址的防火牆日誌（目的位址只給管理者，見 EvidenceService）
             $result = $cases->create(['title' => '裝置行為異常：' . $alert['summary'], 'severity' => $alert['severity'],
-                'category' => 'other', 'subject_ip' => $alert['address'], 'subject_host' => mb_substr($alert['name'], 0, 128),
+                'category' => CaseCatalog::BEHAVIOR, 'subject_ip' => $alert['address'], 'subject_host' => mb_substr($alert['name'], 0, 128),
+                'evidence_query' => $ip === null ? null : 'src_ip:"' . $ip . '"',
                 'summary' => $alert['summary'] . '；來源：FortiGate 防火牆日誌，僅涵蓋經過防火牆的流量。',
                 'dedup_key' => 'behavior:' . $alert['dedup_key']], 'automation', Access::HANDLER, 'automation');
             $this->db->prepare('UPDATE ioc_behavior_alerts SET case_id=? WHERE id=? AND case_id IS NULL')

@@ -18,7 +18,7 @@ try {
     }
     $caseSource = static function (int $caseId) use ($level): array {
         $case = ioc_service()->get($caseId, $level)['case'];
-        return ['case' => $case, 'evidence' => ioc_evidence($case, false)];
+        return ['case' => $case, 'evidence' => ioc_evidence($case, false, $level)];
     };
     $backupSource = static function (int $deviceId, int $versionId) use ($level): array {
         $svc = new \Ioc\ConfigBackupService(new \Ioc\ConfigBackupGateway(), ioc_backup_devices($level));

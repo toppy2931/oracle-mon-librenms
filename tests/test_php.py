@@ -346,6 +346,31 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
             self.assertNotRegex(nav, r"key: '%s'[^}]*off: true" % key, key)
             self.assertIn('id="view-%s"' % key, src, key)
 
+    def test_portal_navigation_is_grouped_like_the_proposal_deck(self):
+        """導覽依簡報第 15 張分成 Visibility／Exposure／Governance（排序與分隔，不新增頁面）；總覽仍是第一項
+        （找不到頁面時的預設）；每個頁面都在某個分組之下，分組內的順序固定；頂列有就地更新的麵包屑。"""
+        src = (ROOT / "librenms" / "html" / "ioc-portal.php").read_text(encoding="utf-8")
+        nav = re.search(r"const NAV = \[(.*?)\n  \];", src, re.S).group(1)
+        entries = re.findall(r"\{ (?:sep: '([^']*)'|key: '([^']*)')", nav)
+        order = [sep or key for sep, key in entries]
+        self.assertEqual(order[0], "overview", "NAV[0] 是找不到頁面時的預設")
+        seps = [x for x in order if x not in {k for _, k in entries if k}]
+        self.assertEqual([x.split("　")[0] for x in seps], ["Visibility", "Exposure", "Governance", "系統"])
+        groups = {}
+        current = None
+        for item in order[1:]:
+            if item in seps:
+                current = item.split("　")[0]
+            else:
+                groups.setdefault(current, []).append(item)
+        self.assertEqual(groups["Visibility"], ["cases", "security", "network", "behavior"])
+        self.assertEqual(groups["Exposure"], ["risk"])
+        self.assertEqual(groups["Governance"], ["identity", "config", "audit", "reports"])
+        self.assertEqual(groups["系統"], ["settings"])
+        topbar = re.search(r"function renderTopbar\(\) \{(.*?)\n  \}\n", src, re.S).group(1)
+        self.assertIn("$('#crumb').textContent", topbar, "麵包屑就地更新文字")
+        self.assertIn('id="crumb"', src)
+
     def test_portal_nav_and_topbar_are_updated_in_place(self):
         """頂列每秒更新、導覽每次切頁都更新：整個重建會讓鍵盤焦點掉光，按不到鈴鐺與導覽按鈕。"""
         src = (ROOT / "librenms" / "html" / "ioc-portal.php").read_text(encoding="utf-8")
@@ -377,6 +402,39 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
         self.assertIn("$svc->get(", block)
         self.assertLess(block.index("$svc->get("), block.index("ioc_evidence("), "要先通過 CaseService::get 的權限檢查才能查 Graylog")
         self.assertIn("=== true", block, "demo 旗標只收真正的 true，不收字串")
+
+    def test_behavior_case_evidence_splits_destinations_by_role_on_the_server(self):
+        """裝置行為異常的事件案：目的位址只給管理者，由伺服器端決定（檢視者拿到的資料裡根本沒有），畫面只是講清楚。
+        證據端點要把身分傳下去（ioc_evidence 的 $level 沒有預設值，呼叫端一定要決定）；範例資料模式不顯示行為警示；
+        行為警示與 Graylog 證據各自成敗（只攔資料庫錯誤）；權限拒絕等其他例外往上丟，不能被吞成「讀不到」。"""
+        endpoint = (ROOT / "librenms" / "ioc" / "endpoint.php").read_text(encoding="utf-8")
+        self.assertRegex(endpoint, r"function ioc_evidence\(array \$case, bool \$demo, \?string \$level\): array", "$level 沒有預設值")
+        beh = re.search(r"function ioc_behavior_evidence\(.*?\n\}\n", endpoint, re.S).group(0)
+        self.assertIn("catch (\\PDOException", beh, "只攔資料庫錯誤：其他例外（含權限拒絕）是 bug，往上丟")
+        self.assertNotIn("catch (\\Throwable", beh)
+        self.assertIn("CaseCatalog::BEHAVIOR ? ['ok' => false", beh, "行為警示建立的事件案讀不到要回原因；不相干的案件不多出紅色區塊（回 null）")
+        repo = (ROOT / "librenms" / "ioc" / "PdoCaseRepo.php").read_text(encoding="utf-8")
+        self.assertIn("'SELECT * FROM ioc_cases WHERE id = :id'", repo, "證據端點拿到的事件案列要帶 category（EvidenceService 靠它認得行為異常案件）")
+        audit_cases = (ROOT / "system" / "ioc-audit-cases.php").read_text(encoding="utf-8")
+        self.assertIn("->build($case, Ioc\\Access::HANDLER)", audit_cases, "自動稽核快照與手動快照一致：以管理者身分取證據")
+        cases = (ROOT / "librenms" / "html" / "ioc-cases.php").read_text(encoding="utf-8")
+        block = re.search(r"case 'evidence':(.*?)case 'create':", cases, re.S).group(1)
+        self.assertIn("ioc_evidence($r['case'], $demo, $level)", block)
+        self.assertIn("$demo ? null : ioc_behavior_evidence(", block, "範例資料模式不顯示正式的行為警示（IS-054～056）")
+        self.assertLess(block.index("$svc->get("), block.index("ioc_behavior_evidence("), "要先通過檢視權限")
+        svc = (ROOT / "librenms" / "ioc" / "BehaviorService.php").read_text(encoding="utf-8")
+        body = re.search(r"public function caseEvidence\(.*?\n    \}\n", svc, re.S).group(0)
+        self.assertLess(body.index("canView($level)"), body.index("$this->db->prepare("), "先檢查權限再讀資料")
+        self.assertIn("$handler ? $this->alertDestinations(", body, "目的位址只在管理者的分支才去讀")
+        self.assertLess(body.index("if ($handler) { $this->auditOnce('case_destinations_viewed'"), body.index("return ['ok' => true"))
+        dest = re.search(r"private function alertDestinations\(.*?\n    \}\n", svc, re.S).group(0)
+        self.assertNotIn("destinations_json", svc.replace(dest, ""), "目的位址的來源只有 alertDestinations 一處讀取")
+        portal = (ROOT / "librenms" / "html" / "ioc-portal.php").read_text(encoding="utf-8")
+        self.assertIn("function renderBehavior(b)", portal)
+        self.assertIn("behaviorTitle.hidden = b === null;", portal, "不是行為警示建立的事件案不顯示這一塊")
+        collector = (ROOT / "librenms" / "ioc" / "BehaviorCollector.php").read_text(encoding="utf-8")
+        self.assertIn("'category' => CaseCatalog::BEHAVIOR", collector)
+        self.assertNotIn("'category' => 'other'", collector)
 
     def test_case_create_whitelist_has_every_user_editable_case_column(self):
         """事件案新增的欄位若沒進建立的白名單，畫面送了也會被丟掉（能存但沒入口可填）。"""
@@ -424,6 +482,27 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
         fn = re.search(r"function ioc_network_cache_forget\(\).*?\n\}\n", endpoint, re.S).group(0)
         self.assertIn("IOC_NETWORK_CACHE", fn)
         self.assertIn("NetworkVisibilityService::RANGE_LABELS", fn, "所有統計區間的快取都要清除")
+
+    def test_overview_trend_has_its_own_window_and_cache_key(self):
+        """事件趨勢有自己的視窗（24 小時／7 日／30 日，預設 30 日）：簡報畫的是「近 30 日」；
+        以前正式端點一律把 Graylog 區塊的統計期間傳進去，趨勢只會是「所選期間切 6 格」，30 日分支走不到。
+        趨勢只讀事件案資料表、不打 Graylog，所以不受 24 小時的統計期間限制；快取鍵與清除都要帶它。"""
+        data = (ROOT / "librenms" / "html" / "ioc-data.php").read_text(encoding="utf-8")
+        self.assertIn("trend_seconds", data)
+        self.assertIn("LandscapeService::TREND_OPTIONS", data, "趨勢視窗要用白名單")
+        self.assertIn("IOC_OVERVIEW_CACHE . ($demo ? 'demo' : 'live') . ':' . $range . ':' . $trend", data, "快取要分統計期間與趨勢視窗")
+        endpoint = (ROOT / "librenms" / "ioc" / "endpoint.php").read_text(encoding="utf-8")
+        self.assertIn("const IOC_OVERVIEW_CACHE = 'ioc:overview:v7:'", endpoint, "總覽的形狀變了（趨勢多了 label、快取鍵多了視窗）要升版號")
+        self.assertRegex(endpoint, r"function ioc_overview\(bool \$demo, string \$level, int \$range = OverviewService::RANGE, int \$trend = LandscapeService::TREND_DEFAULT\)")
+        self.assertIn("$trend > 86400 ? $svc->createdWithin(intdiv($trend, 86400), $level) : $svc->createdInLast($trend, $level)", endpoint, "7／30 日走逐日、24 小時走六格")
+        self.assertIn("new LandscapeService($now, $trend)", endpoint, "趨勢視窗要傳給 LandscapeService，不是統計期間")
+        fn = re.search(r"function ioc_overview_cache_forget\(\).*?\n\}\n", endpoint, re.S).group(0)
+        self.assertIn("NetworkVisibilityService::RANGE_LABELS", fn)
+        self.assertIn("LandscapeService::TREND_OPTIONS", fn, "每一組（統計期間 × 趨勢視窗）的快取都要清除")
+        portal = (ROOT / "librenms" / "html" / "ioc-portal.php").read_text(encoding="utf-8")
+        self.assertIn("'trendRanges' => Ioc\\LandscapeService::TREND_OPTIONS", portal, "選單與 API 要共用同一份趨勢視窗白名單")
+        self.assertIn("trend_seconds: String(overviewTrend)", portal, "選定的趨勢視窗要送到 API")
+        self.assertIn("L.trend.data.label", portal, "趨勢標題用伺服器回的 label，畫面不自己從期間推算")
 
     def test_overview_and_network_page_share_one_definition_of_internal(self):
         """資安頁的「防火牆阻擋來源」與內網可視性都要用設定頁的內部網段；不能各寫一套（曾經一邊寫死 RFC1918、另一邊用設定）。"""
@@ -513,6 +592,63 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
         self.assertIn("allForUpdate()", body, "整份取代要用鎖定讀取，兩個管理者同時儲存才不會互相覆蓋")
         self.assertNotIn("->all()", body, "saveSites 裡不能用沒有鎖的 all()")
 
+    def test_saving_service_level_is_admin_only_and_clears_the_overview_cache(self):
+        """SLA 達成率與核心業務服務是算好存在總覽快取裡的：存了卻不清快取，畫面最多 20 秒還是舊的；
+        欄位只收白名單，先檢查權限、驗證通過才開始寫。"""
+        src = (ROOT / "librenms" / "html" / "ioc-settings.php").read_text(encoding="utf-8")
+        block = re.search(r"case 'save_sla':(.*?)(?=case '|default:)", src, re.S).group(1)
+        self.assertIn("ioc_overview_cache_forget()", block)
+        self.assertIn("saveServiceLevel(ioc_pick($in, ['target', 'window', 'core'])", block, "只收白名單內的欄位")
+        self.assertLess(src.index("ioc_begin(true)"), src.index("file_get_contents('php://input'"), "要先登入與驗 CSRF，才讀請求內容")
+        svc = (ROOT / "librenms" / "ioc" / "SettingsService.php").read_text(encoding="utf-8")
+        body = re.search(r"public function saveServiceLevel\(.*?\n    \}\n", svc, re.S).group(0)
+        self.assertIn("allForUpdate()", body, "鎖定讀取：兩位管理者同時儲存，異動紀錄的原值才不會是過時的快照")
+        self.assertNotIn("->all()", body)
+        validate = re.search(r"private function validateServiceLevel\(.*?\n    \}\n", svc, re.S).group(0)
+        self.assertIn("array_key_exists($field, $in)", validate, "缺欄位不能默默當成清空（ioc_pick 會丟掉缺漏與非純量的欄位）")
+        self.assertLess(body.index("requireHandler("), body.index("validateServiceLevel("), "先檢查權限再處理內容")
+        self.assertLess(body.index("validateServiceLevel("), body.index("transaction("), "驗證通過才開始寫")
+
+    def test_core_device_candidates_are_admin_only_and_not_called_by_the_overview(self):
+        """選核心設備用的「全部設備的名稱與類型」候選清單只給管理者，總覽（快取不分角色）不呼叫它。
+        總覽公開的是離線的核心設備名稱（與「需要關注的設備」同一類資訊，檢視者本來就看得到全部設備），不是這份清單。"""
+        endpoint = (ROOT / "librenms" / "ioc" / "endpoint.php").read_text(encoding="utf-8")
+        body = re.search(r"function ioc_core_candidates\(.*?\n\}\n", endpoint, re.S).group(0)
+        self.assertLess(body.index("Access::requireHandler("), body.index("DB::table("), "先檢查權限再讀設備")
+        overview = re.search(r"(?s)function ioc_overview\(.*?\n\}\n", endpoint).group(0)
+        self.assertNotIn("ioc_core_candidates(", overview, "總覽快取不分角色，設備清單不能放進去")
+        settings = (ROOT / "librenms" / "html" / "ioc-settings.php").read_text(encoding="utf-8")
+        self.assertIn("$level === Ioc\\Access::HANDLER ? ioc_core_candidates($level) : false", settings, "檢視者拿到的是 false，不是清單")
+
+    def test_overview_compliance_card_reads_only_the_audit_summary(self):
+        """總覽快取不分角色：合規覆蓋率只能用稽核「摘要」（只有計數）；案件與備份來源、明細都不能經過這條路，
+        權限拒絕要往上丟（不能被吞成「無法取得」），其他失敗記 log 後回 null（卡片標「無法取得」，不是 0）。"""
+        src = (ROOT / "librenms" / "ioc" / "endpoint.php").read_text(encoding="utf-8")
+        body = re.search(r"function ioc_audit_summary\(.*?\n\}\n", src, re.S).group(0)
+        self.assertIn("->summary($level)", body)
+        for forbidden in ("->detail(", "->history(", "->download(", "ioc_service(", "ioc_backup_devices("):
+            self.assertNotIn(forbidden, body, "總覽只讀摘要：" + forbidden)
+        self.assertLess(body.index("catch (\\Ioc\\AccessDenied"), body.index("catch (\\Throwable"), "權限拒絕要先攔下並往上丟")
+        self.assertIn("return null;", body)
+        overview = re.search(r"(?s)function ioc_overview\(.*?\n\}\n", src).group(0)
+        self.assertIn("ioc_audit_summary($level)", overview)
+
+    def test_portal_service_level_card_and_second_kpi_row_are_wired(self):
+        """總覽要畫第二排 KPI（SLA 達成率、網路可用性）；設定頁要有「服務水準」卡片，存檔走 save_sla 並重載總覽。
+        設備清單讀不到時不能把原本的核心清單清空；檢視者沒有 backupBox（null），不能直接傳給 replaceChildren（會插入文字「null」）。"""
+        src = (ROOT / "librenms" / "html" / "ioc-portal.php").read_text(encoding="utf-8")
+        self.assertIn("(L.kpi2 || []).map(kpiCard)", src)
+        self.assertIn(".kpis3{", src, "第二排有三張卡片（SLA 達成率、網路可用性、合規覆蓋率）")
+        card = re.search(r"function renderServiceSettings\(.*?\n  \}\n", src, re.S).group(0)
+        self.assertIn("action: 'save_sla'", card)
+        self.assertIn("loadOverview();", card, "存檔後總覽要用新設定重算")
+        self.assertIn("slaDevices === null ? s.core", card, "設備清單讀不到時要保留原本的核心清單")
+        self.assertIn("slaBox = null", src, "重新載入設定頁時這一塊要用伺服器的最新值")
+        self.assertIn("[netBox, siteBox, slaBox, backupBox].filter(Boolean)", src)
+        self.assertRegex(card, r"find\.addEventListener\('keydown', \(ev\) => \{ if \(ev\.key === 'Enter'\) ev\.preventDefault\(\); \}\)",
+                         "核心設備的篩選框在 <form> 裡，按 Enter 會隱式送出整份表單（把填到一半的設定存進去）")
+        self.assertNotIn(".innerHTML", card)
+
     def test_settings_history_prefix_filter_is_parameterized_and_escaped(self):
         """站點異動紀錄依前綴在資料庫端篩：LIKE 的前綴要走參數、跳脫 % 與 _（站點名稱是 site.<id>，但前綴參數是通用的）。"""
         src = (ROOT / "librenms" / "ioc" / "PdoSettingsRepo.php").read_text(encoding="utf-8")
@@ -526,7 +662,7 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
         endpoint = (ROOT / "librenms" / "ioc" / "endpoint.php").read_text(encoding="utf-8")
         self.assertRegex(endpoint, r"(?s)isset\(\$settings\['errors'\]\['sites'\]\)\) \{.*?\$sitesWarning = ",
                          "站點設定讀不到要帶原因（警告），不能只丟掉")
-        self.assertIn("$thresholds, $sitesWarning)", endpoint)
+        self.assertIn("$thresholds, $sitesWarning,", endpoint, "站點警告要傳進 LandscapeService::build（後面還有服務水準的參數）")
         self.assertIn("Fleet::deviceIp(", endpoint)
         self.assertNotIn("inet_ntop", endpoint, "二進位位址的轉換只在 Fleet::deviceIp（有單元測試）")
 

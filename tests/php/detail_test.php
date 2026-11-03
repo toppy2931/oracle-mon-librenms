@@ -76,8 +76,8 @@ test('事件類型目錄：每個類型都有名稱與至少 3 步建議處置�
         foreach ($c['steps'] as $s) {
             assertTrue(is_string($s) && $s !== '', "{$key} 的建議處置不能有空白項目");
         }
-        if ($key === CaseCatalog::OTHER) {
-            assertSame(null, $c['attack'], '其他（未分類）不能掛一個攻擊技術');
+        if ($key === CaseCatalog::OTHER || $key === CaseCatalog::BEHAVIOR) {
+            assertSame(null, $c['attack'], $key . ' 不能掛攻擊技術：未分類沒有對應；裝置行為異常只是偏離基線，不足以指向某個技術（宣稱外洩是過度解讀）');
         } else {
             assertTrue(preg_match('/^T\d{4}(\.\d{3})?$/', $c['attack']['id']) === 1 && $c['attack']['name'] !== '', "{$key} 的攻擊技術：" . json_encode($c['attack'], JSON_UNESCAPED_UNICODE));
         }
@@ -245,6 +245,23 @@ test('證據：剛建立的事件，查詢結束時間不超過現在', function
     $src = new FakeWindowedSource();
     (new EvidenceService($src, false, DT_NOW))->build(dtCase(600));
     assertSame(dtIso(DT_NOW), $src->calls[0]['to'], '建立 10 分鐘前：建立後 1 小時還沒到，只查到現在');
+});
+
+test('證據：裝置行為異常的事件案，目的位址只給管理者——檢視者（或沒有身分）連欄位都不向 Graylog 要，畫面也不寫「目的」', function () {
+    $case = dtCase(7200, 'src_ip:"10.20.5.23"') + ['category' => CaseCatalog::BEHAVIOR];
+    $row = fn () => [dtMsg(60, ['event_action' => 'fw_allow', 'dst_ip' => '203.0.113.9', 'log_type' => 'firewall'])];
+    foreach ([[Access::HANDLER, true], [Access::VIEWER, false], [null, false]] as [$level, $sees]) {
+        $src = new FakeWindowedSource($row);
+        $r = (new EvidenceService($src, false, DT_NOW))->build($case, $level);
+        assertSame($sees, in_array('dst_ip', $src->calls[0]['fields'], true), '向 Graylog 要的欄位：' . var_export($level, true));
+        assertSame($sees, mb_strpos($r['data']['items'][0]['detail'], '203.0.113.9') !== false, '畫面上的目的位址：' . var_export($level, true));
+        assertSame(!$sees, $r['data']['destinations_hidden'], '要告訴畫面目的位址被隱藏了，不能讓人以為這件事沒有目的');
+    }
+    $src = new FakeWindowedSource($row);
+    $plain = dtCase(7200) + ['category' => 'suspicious_login'];
+    $r = (new EvidenceService($src, false, DT_NOW))->build($plain, Access::VIEWER);
+    assertTrue(in_array('dst_ip', $src->calls[0]['fields'], true), '其他類型的事件案維持原本行為：檢視者也看得到證據裡的目的');
+    assertSame(false, $r['data']['destinations_hidden']);
 });
 
 test('證據：時間軸由舊到新（Graylog 回新到舊），中文動作、需注意程度、帳號／來源／設備；沒分類的日誌明講，不放原始訊息', function () {

@@ -50,6 +50,8 @@ $config = json_encode([
     'csrf'   => csrf_token(),
     'demo'   => $demo,
     'networkRanges' => Ioc\NetworkVisibilityService::RANGE_LABELS,
+    'trendRanges' => Ioc\LandscapeService::TREND_OPTIONS,
+    'trendDefault' => Ioc\LandscapeService::TREND_DEFAULT,
     'vizUrl' => $viz_url,
     'labels' => [
         'caseStatus'   => Ioc\Labels::CASE_STATUS,
@@ -89,6 +91,7 @@ a{color:var(--blue)}
 .main{flex:1;min-width:0;padding:18px;max-width:1700px}
 .topbar{display:flex;gap:16px;align-items:center;justify-content:space-between;flex-wrap:wrap;padding:14px 20px;border:1px solid var(--line);border-radius:16px;background:linear-gradient(180deg,#111f32,#0a1727)}
 .topbar h1{margin:0;font-size:20px;letter-spacing:.3px}
+.crumb{color:var(--muted);font-size:12px;margin-bottom:2px}
 .topbar p{margin:2px 0 0;color:var(--muted);font-size:13px}
 .chips{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .chip{padding:5px 11px;border:1px solid var(--line);border-radius:999px;background:#0a1728;color:#c8d6e7;font-size:12px;white-space:nowrap}
@@ -105,6 +108,7 @@ a{color:var(--blue)}
 .kpis6{grid-template-columns:repeat(6,minmax(0,1fr))}
 .kpis5{grid-template-columns:repeat(5,minmax(0,1fr))}
 .kpis2{grid-template-columns:repeat(2,minmax(0,1fr))}
+.kpis3{grid-template-columns:repeat(3,minmax(0,1fr))}
 .kpis4{grid-template-columns:repeat(4,minmax(0,1fr))}
 .donut-wrap{display:flex;gap:18px;align-items:center;flex-wrap:wrap}
 .donut{width:150px;height:150px;flex:none}
@@ -215,10 +219,13 @@ code{background:#0a1423;border:1px solid var(--line);border-radius:6px;padding:2
 footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
 .site-row{display:grid;grid-template-columns:minmax(140px,1fr) minmax(200px,2fr) auto;gap:8px;align-items:start;margin-bottom:8px}
 .site-row input,.site-row textarea{width:100%;box-sizing:border-box}
+.core-list{max-height:260px;overflow:auto;border:1px solid var(--line);border-radius:8px;padding:4px 10px;margin:6px 0;background:#0a1728}
+.core-list label{display:flex;gap:8px;align-items:center;margin:0;padding:4px 0;font-size:13px;color:var(--text)}
+.core-list input{margin:0}
 @media(max-width:1280px){.kpis6,.kpis5{grid-template-columns:repeat(3,minmax(0,1fr))}.kpis4{grid-template-columns:repeat(2,minmax(0,1fr))}.three{grid-template-columns:1fr}}
 @media(max-width:1180px){.two,.even,.split{grid-template-columns:1fr}}
 @media(max-width:900px){.app{flex-direction:column}.side{position:static;width:auto;height:auto;padding:10px}.nav{flex-direction:row;overflow-x:auto}.nav button{white-space:nowrap;width:auto}.nav .sep{display:none}.main{padding:10px}}
-@media(max-width:720px){.kpis6,.kpis5,.kpis4,.kpis2{grid-template-columns:repeat(2,minmax(0,1fr))}.sumrow,.sumrow.c4{grid-template-columns:repeat(2,minmax(0,1fr))}.site-row{grid-template-columns:1fr}}
+@media(max-width:720px){.kpis6,.kpis5,.kpis4,.kpis3,.kpis2{grid-template-columns:repeat(2,minmax(0,1fr))}.sumrow,.sumrow.c4{grid-template-columns:repeat(2,minmax(0,1fr))}.site-row{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -230,6 +237,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
   <div class="main">
     <header class="topbar">
       <div>
+        <nav class="crumb" id="crumb" aria-label="目前位置"></nav>
         <h1 id="page-title">維運總覽</h1>
         <p id="page-sub"></p>
       </div>
@@ -262,24 +270,32 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
   const REFRESH_MS = 60000;
   const state = { tab: 'overview', filter: 'open', selected: null, form: null, overview: null, loadedAt: 0, overviewError: null, summary: null, refreshSettingsPreview: null };
   let overviewRange = 86400;
+  let overviewTrend = CFG.trendDefault;     // 事件趨勢自己的視窗（預設近 30 日，簡報的畫面）；與 Graylog 區塊的統計期間各自獨立
   let overviewSeq = 0;
 
-  // 左側導覽。off＝簡報有、但目前沒有資料來源的項目：顯示成停用，不能點進去看到空白或假數字
+  // 左側導覽，分組照提案簡報第 15 張的三個問題：Visibility（現在發生什麼事？）、Exposure（哪裡最危險？）、Governance（是否符合要求？如何證明？）。
+  // off＝簡報有、但目前沒有資料來源的項目：顯示成停用，不能點進去看到空白或假數字。NAV[0] 一定是總覽（找不到頁面時的預設）
   const NAV = [
     { key: 'overview', label: '總覽', title: '維運總覽', sub: '站點、資產、事件與資料來源一覽' },
+    { sep: 'Visibility　現在發生什麼事？', group: 'Visibility' },
     { key: 'cases', label: '事件案', title: '事件案管理', sub: '建立、確認、處理與結案，每一步都有紀錄', badge: true },
     { key: 'security', label: '資安', title: '資安事件', sub: '登入、帳號與防火牆阻擋' },
     { key: 'network', label: '內網可視性', title: '內網可視性', sub: '東西向流量、Top Talkers 與異常連線（防火牆日誌）' },
     { key: 'behavior', label: '裝置行為分析', title: '裝置行為分析', sub: '生命週期追蹤、學習基線與異常警示' },
-    { key: 'settings', label: '設定', title: '系統設定', sub: '風險等級門檻、內部網段與設備組態備份' },
+    { sep: 'Exposure　哪裡最危險？', group: 'Exposure' },
+    { key: 'risk', label: '風險與弱點', off: true },
+    { sep: 'Governance　是否符合要求？如何證明？', group: 'Governance' },
     // 身分與稽核只有 admin 看得到（稽核軌跡會列出所有人的登入位址與失敗嘗試）；後端也會擋，這裡只是不顯示入口
     ...(CAN_HANDLE ? [{ key: 'identity', label: '身分與稽核', title: '身分與稽核', sub: '帳號與角色、稽核軌跡、主機的遠端登入' }] : []),
     ...(CAN_HANDLE ? [{ key: 'config', label: '組態備份', title: '組態備份管理', sub: '設備設定備份、執行紀錄與版本差異' }] : []),
     { key: 'audit', label: '稽核與證據', title: '稽核與證據', sub: '控制項評估、來源證據與改善進度' },
-    { sep: '尚未提供' },
-    { key: 'risk', label: '風險與弱點', off: true },
     { key: 'reports', label: '報表', off: true },
+    { sep: '系統' },
+    { key: 'settings', label: '設定', title: '系統設定', sub: '風險等級門檻、內部網段與設備組態備份' },
   ];
+  // 每個頁面屬於它上面最近的一個分組（頂列的麵包屑用）；「系統」沒有分組
+  let navGroup = null;
+  for (const n of NAV) { if (n.sep) navGroup = n.group || null; else n.group = navGroup; }
   const PAGES = NAV.filter((n) => n.key && !n.off).map((n) => n.key);
 
   // ── 小工具：一律用 DOM 與 textContent 建立節點，資料不經過 innerHTML ──
@@ -416,6 +432,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     const page = NAV.find((n) => n.key === state.tab) || NAV[0];
     $('#page-title').textContent = page.title;
     $('#page-sub').textContent = page.sub;
+    $('#crumb').textContent = ['IOC', page.group, page.label].filter(Boolean).join(' › ');
     top.updated.textContent = ov ? ov.meta.generated_at : '—';
     top.age.textContent = state.loadedAt ? '（' + Math.round((Date.now() - state.loadedAt) / 1000) + ' 秒前）' : '';
     const fresh = state.summary ? state.summary.new : 0;
@@ -583,9 +600,10 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     ];
   }
 
-  function renderTrend(sec, rangeLabel) {
+  function renderTrend(sec) {
     if (!sec.ok) return unavailable(sec.error);
     const t = sec.data;
+    const rangeLabel = t.label;       // 伺服器回的視窗標籤（「近 30 日」「最近 24 小時」），畫面不自己從期間推算
     const labels = t.labels || t.days;
     const W = 560, H = 170, L = 30, R = 8, T = 10, B = 22, n = labels.length;
     const max = Math.max(1, ...t.series.high, ...t.series.medium, ...t.series.low);
@@ -669,17 +687,21 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
 
   function overviewToolbar() {
     const ranges = Object.entries(CFG.networkRanges).map(([seconds, label]) => [Number(seconds), label]);
+    const trends = Object.entries(CFG.trendRanges).map(([seconds, label]) => [Number(seconds), label]);
+    const reload = () => {
+      state.overview = null;
+      state.overviewError = null;
+      state.loadedAt = 0;
+      renderOverview(); renderSecurity(); renderTopbar();
+      loadOverview();
+    };
     return h('div', { class: 'toolbar', style: 'margin:0' },
-      h('label', null, '統計區間 ', h('select', { 'aria-label': '維運總覽統計區間', onchange: (ev) => {
-        overviewRange = Number(ev.target.value);
-        state.overview = null;
-        state.overviewError = null;
-        state.loadedAt = 0;
-        renderOverview(); renderSecurity(); renderTopbar();
-        loadOverview();
-      } }, ranges.map(([seconds, label]) => h('option', { value: String(seconds), selected: seconds === overviewRange }, label)))),
+      h('label', null, '統計區間 ', h('select', { 'aria-label': '維運總覽統計區間', onchange: (ev) => { overviewRange = Number(ev.target.value); reload(); } },
+        ranges.map(([seconds, label]) => h('option', { value: String(seconds), selected: seconds === overviewRange }, label)))),
+      h('label', null, '事件趨勢 ', h('select', { 'aria-label': '事件趨勢期間', onchange: (ev) => { overviewTrend = Number(ev.target.value); reload(); } },
+        trends.map(([seconds, label]) => h('option', { value: String(seconds), selected: seconds === overviewTrend }, label)))),
       h('button', { class: 'btn', type: 'button', onclick: loadOverview }, '重新整理'),
-      h('span', { class: 'note', style: 'margin:0' }, '日誌與新建事件案依所選期間統計；站點、設備及待處理事件為目前狀態，可用率固定為最近 24 小時。'));
+      h('span', { class: 'note', style: 'margin:0' }, '日誌依「統計區間」統計（最長 24 小時）；新建事件案趨勢有自己的期間（只讀事件案，預設近 30 日）；站點、設備及待處理事件為目前狀態，可用率固定為最近 24 小時。'));
   }
 
   function renderOverview() {
@@ -697,9 +719,10 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     root.replaceChildren(
       overviewToolbar(),
       h('section', { class: 'grid kpis6' }, L.kpi.map(kpiCard)),
+      h('section', { class: 'grid kpis3' }, (L.kpi2 || []).map(kpiCard)),
       h('section', { class: 'grid three' },
         section('整體風險概況', '分數越高越好', renderRisk(L.risk)),
-        section('新建事件案趨勢', ov.meta.range_label + '，依嚴重性', renderTrend(L.trend, ov.meta.range_label)),
+        section('新建事件案趨勢', (L.trend.ok ? L.trend.data.label + '，' : '') + '依嚴重性', renderTrend(L.trend)),
         section('站點分佈', '以設定頁的站點與網段為準（還沒設定時依 LibreNMS 的位置）', renderSites(L.sites))),
       h('section', { class: 'grid even' },
         section('站點健康度排行', '離線設備比例高的在前', renderRanking(L.ranking)),
@@ -728,7 +751,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
   async function loadOverview() {
     const seq = ++overviewSeq;
     try {
-      const query = new URLSearchParams({ range_seconds: String(overviewRange) });
+      const query = new URLSearchParams({ range_seconds: String(overviewRange), trend_seconds: String(overviewTrend) });
       if (CFG.demo) query.set('demo', '1');
       const overview = await api('/ioc-data.php?' + query.toString());
       if (seq !== overviewSeq) return;
@@ -877,19 +900,56 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
       h('b', { class: i.value === null ? 'na' : null }, i.value === null ? (i.na || '無法取得') : fmt(i.value)), i.label)))];
   }
 
+  /**
+   * 裝置行為警示（裝置行為分析建立的事件案才有）：偵測器、區間、實際值對基線與門檻。
+   * 彙總指標所有人看得到；目的位址只有管理者（伺服器端決定：檢視者拿到的資料裡根本沒有），這裡只負責把話講清楚。
+   * 與 Graylog 證據各自成敗：讀不到就寫原因，不影響上面的證據時間軸。
+   */
+  function renderBehavior(b) {
+    if (!b.ok) return [unavailable(b.error)];
+    const out = [];
+    b.alerts.forEach((a) => {
+      out.push(h('dl', { class: 'kv' },
+        h('dt', null, '偵測器'), h('dd', null, a.detector_label),
+        h('dt', null, '設備'), h('dd', null, a.asset),
+        h('dt', null, '最近一次異常區間'), h('dd', null, a.window + '（台北時間，五分鐘區間）' + (a.occurrences > 1 ? '，同一小時累計 ' + a.occurrences + ' 次' : '')),
+        h('dt', null, '嚴重度／分數'), h('dd', null, a.severity_label + '／' + a.score),
+        h('dt', null, '說明'), h('dd', null, a.summary),
+        h('dt', null, '基線版本'), h('dd', null, 'v' + a.baseline_version)));
+      out.push(a.metrics.length ? table(['指標', '數值'], a.metrics.map((m) => [m.label, m.text])) : h('p', { class: 'note' }, '這個警示沒有可顯示的指標。'));
+      if (a.destinations === null) {
+        out.push(h('p', { class: 'note' }, '目的位址只有管理者看得到（檢視者只看彙總）。'));
+      } else if (!a.destinations.ok) {
+        out.push(h('p', { class: 'note warn' }, a.destinations.error));
+      } else {
+        const d = a.destinations;
+        out.push(h('h4', { class: 'note', style: 'margin:10px 0 4px' }, '最近一次異常區間連到的目的位址（只有管理者看得到，查看會留稽核）'));
+        out.push(d.items.length ? table(['目的位址', '首次出現'], d.items.map((x) => [x.ip, x.first_seen || '—（沒有紀錄）'])) : h('p', { class: 'note' }, '這個區間沒有目的位址。'));
+        if (d.ports.length) out.push(h('p', { class: 'note' }, '目的埠：' + d.ports.join('、')));
+      }
+    });
+    out.push(h('p', { class: 'note' }, '偵測器只比較「非上班時段的流量與目的地」和這台設備自己的基線，只看得到經過防火牆的流量；偏離基線不等於入侵，請先確認那個時段是否有排程工作。'));
+    return out;
+  }
+
   let evidenceSeq = 0;   // 連續點不同案件時，只採用最後一次的回應
-  async function loadEvidence(id, timelineBox, indicatorBox) {
+  async function loadEvidence(id, timelineBox, indicatorBox, behaviorTitle, behaviorBox) {
     const seq = ++evidenceSeq;
     timelineBox.replaceChildren(h('p', { class: 'note' }, '載入證據中…'));
     let r;
+    let b = null;
     try {
-      r = (await api('/ioc-cases.php', { action: 'evidence', id, demo: CFG.demo })).evidence;
+      const resp = await api('/ioc-cases.php', { action: 'evidence', id, demo: CFG.demo });
+      r = resp.evidence;
+      b = resp.behavior || null;           // null＝不是裝置行為分析建立的事件案，不顯示這一塊
     } catch (e) {
       r = { ok: false, reason: 'unavailable', error: e.message };
     }
     if (seq !== evidenceSeq || !document.contains(timelineBox)) return;
     timelineBox.replaceChildren(...renderTimeline(r));
     indicatorBox.replaceChildren(...renderIndicators(r));
+    behaviorTitle.hidden = b === null;
+    behaviorBox.replaceChildren(...(b === null ? [] : renderBehavior(b)));
   }
 
   function renderDetail(d) {
@@ -897,6 +957,9 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     const cell = (k, v) => h('div', null, h('span', { class: 'k' }, k), h('span', { class: 'v' }, v));
     const timelineBox = h('div', null);
     const indicatorBox = h('div', null);
+    const behaviorTitle = secTitle('裝置行為警示');       // 載入證據之後才知道有沒有，沒有就維持隱藏
+    behaviorTitle.hidden = true;
+    const behaviorBox = h('div', null);
     const parts = [
       h('div', { class: 'toolbar', style: 'margin-bottom:4px' }, levelBadge(c.severity_label), statusBadge(c),
         h('span', { class: 'note', style: 'margin:0' }, '事件編號 #' + c.id + '　建立 ' + c.created_at)),
@@ -919,6 +982,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
         c.summary ? [h('dt', null, '說明'), h('dd', null, c.summary)] : null,
         c.evidence_query ? [h('dt', null, '查詢條件'), h('dd', null, h('code', null, c.evidence_query))] : null),
       secTitle('證據時間軸'), timelineBox,
+      behaviorTitle, behaviorBox,
       secTitle('關聯指標'), indicatorBox,
       secTitle('建議處置'),
       h('ol', { class: 'steps' }, c.steps.map((s) => h('li', null, s))),
@@ -926,7 +990,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     ];
     if (CAN_HANDLE) parts.push(renderActions(c, d.transitions));
     // 證據要另外查 Graylog（可能很慢或失敗）：詳情先顯示，證據載入後再填進去；等這一輪畫面掛上去才開始載入
-    queueMicrotask(() => loadEvidence(c.id, timelineBox, indicatorBox));
+    queueMicrotask(() => loadEvidence(c.id, timelineBox, indicatorBox, behaviorTitle, behaviorBox));
     parts.push(h('h3', { class: 'sec-h' }, '處理歷程'),
       h('ul', { class: 'tl' }, d.history.map((x) => h('li', null,
         h('div', { class: 'when' }, x.time + '　' + x.actor),
@@ -979,13 +1043,20 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
   let netBox = null;      // 「內部網段」那一塊。風險門檻存檔會重畫整頁，這一塊要沿用同一個節點，免得填到一半的網段被清掉
   let siteSettings = null; // 站點與網段的設定（伺服器回的 sites）
   let siteBox = null;      // 「站點與網段」那一塊，理由同上
+  let slaSettings = null;  // 服務水準的設定（伺服器回的 sla）
+  let slaDevices = false;  // 選核心設備用的設備清單：陣列＝可選；false＝檢視者（伺服器不給）；null＝管理者但讀不到
+  let slaBox = null;       // 「服務水準」那一塊，理由同上
   async function loadSettings() {
     const seq = ++settingsSeq;
     const root = $('#view-settings');
     root.replaceChildren(h('p', { class: 'note' }, '載入中…'));
     try {
       const r = await api('/ioc-settings.php', { action: 'get' });
-      if (seq === settingsSeq) { netSettings = r.network; siteSettings = r.sites; netBox = null; siteBox = null; backupBox = null; renderSettings(r.risk); }   // 重新載入：各塊都用伺服器的最新值
+      if (seq === settingsSeq) {   // 重新載入：各塊都用伺服器的最新值
+        netSettings = r.network; siteSettings = r.sites; slaSettings = r.sla; slaDevices = r.devices;
+        netBox = null; siteBox = null; slaBox = null; backupBox = null;
+        renderSettings(r.risk);
+      }
     } catch (e) {
       if (seq === settingsSeq) root.replaceChildren(unavailable(e.message));
     }
@@ -1054,10 +1125,11 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
       : h('p', { class: 'note' }, '還沒有人調整過門檻。');
     if (!netBox) { netBox = h('div'); renderNetworkSettings(netBox); }
     if (!siteBox) { siteBox = h('div'); renderSiteSettings(siteBox); }
+    if (!slaBox) { slaBox = h('div'); renderServiceSettings(slaBox); }
     if (!backupBox && CAN_HANDLE) { backupBox = section('組態備份', '設備、排程與版本比較已移至專屬管理頁', h('a', { href: '#config', class: 'btn', onclick: (event) => { event.preventDefault(); setTab('config'); } }, '開啟組態備份管理')); }
     root.replaceChildren(h('section', { class: 'grid even' },
       section('風險等級門檻', '用來把整體風險分數分成低、中、高', form),
-      section('異動紀錄', '最近 10 筆，誰在什麼時候改的', history)), netBox, siteBox, backupBox);
+      section('異動紀錄', '最近 10 筆，誰在什麼時候改的', history)), ...[netBox, siteBox, slaBox, backupBox].filter(Boolean));   // 檢視者沒有 backupBox（null）；直接傳給 replaceChildren 會插入文字「null」
     if (focusSave && CAN_HANDLE) save.focus();
   }
 
@@ -1171,6 +1243,88 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     box.replaceChildren(h('section', { class: 'grid even' },
       section('站點與網段', '設備依 IP 歸到站點，總覽的站點數、分佈與排行用它', form),
       section('站點的異動紀錄', '最近 10 筆，誰在什麼時候改的', history)));
+    if (focusSave && CAN_HANDLE) save.focus();
+  }
+
+  /**
+   * 設定頁的「服務水準」：總覽的 SLA 達成率與核心業務服務用它。規格書的可用率目標（F-20）與服務時段（F-25）由機關填列，
+   * 系統沒有預設值，沒填總覽就寫「尚未設定」。核心設備清單只有管理者拿得到（slaDevices：false＝檢視者、null＝讀不到）。
+   * 存檔只重畫這一塊，不影響上面填到一半的其他設定。
+   */
+  function renderServiceSettings(box, focusSave) {
+    const s = slaSettings;
+    if (!s) { box.replaceChildren(); return; }
+    const target = h('input', { id: 'sla-target', type: 'text', inputmode: 'decimal', maxlength: 7, disabled: !CAN_HANDLE, placeholder: '例如 99.5', style: 'width:8em' });
+    target.value = s.target === null ? '' : String(s.target);       // 用屬性設值，內容不經過 innerHTML
+    const win = h('select', { id: 'sla-window', disabled: !CAN_HANDLE },
+      h('option', { value: '', selected: s.window === null }, '尚未設定'),
+      Object.entries(s.windows).map(([key, label]) => h('option', { value: key, selected: s.window === key }, label)));
+    const msg = h('div', { class: 'note warn', role: 'alert' });
+    const save = h('button', { class: 'btn primary', type: 'submit' }, '儲存');
+
+    // 核心設備：管理者從 LibreNMS 的設備挑；清單裡已不在 LibreNMS 的編號（設備被刪除或停用）儲存時會被移除，這裡先講清楚
+    const picked = new Set(s.core);
+    const count = h('span', { class: 'note', style: 'margin:0' });
+    const updateCount = () => { count.textContent = '已選 ' + picked.size + ' / ' + s.limits.max_core + ' 台'; };
+    let coreBody;
+    if (slaDevices === false) {
+      coreBody = h('p', { class: 'note' }, s.core.length ? '目前選了 ' + s.core.length + ' 台核心設備（設備名稱只有管理者看得到）。' : '還沒有選擇核心設備。');
+    } else if (slaDevices === null) {
+      coreBody = [unavailable('LibreNMS 的設備清單讀不到，無法挑選核心設備'),
+        h('p', { class: 'note' }, s.core.length ? '目前的清單（設備編號）：' + s.core.join('、') + '。儲存時會原樣保留。' : '還沒有選擇核心設備。')];
+      updateCount();
+    } else {
+      const known = new Set(slaDevices.map((d) => d.id));
+      const stale = s.core.filter((id) => !known.has(id));
+      stale.forEach((id) => picked.delete(id));
+      const rows = slaDevices.map((d) => {
+        const cb = h('input', { type: 'checkbox', checked: picked.has(d.id), disabled: !CAN_HANDLE });
+        cb.addEventListener('change', () => { if (cb.checked) picked.add(d.id); else picked.delete(d.id); updateCount(); });
+        return { text: (d.name + ' ' + d.group).toLowerCase(), el: h('label', null, cb, d.name, h('span', { class: 'note', style: 'margin:0' }, d.group)) };
+      });
+      const find = h('input', { type: 'search', placeholder: '依名稱篩選設備', 'aria-label': '依名稱篩選核心設備', style: 'width:14em' });
+      find.addEventListener('keydown', (ev) => { if (ev.key === 'Enter') ev.preventDefault(); });   // 在篩選框按 Enter 不能送出整份表單（會把填到一半的設定存進去）
+      find.addEventListener('input', () => { const q = find.value.trim().toLowerCase(); rows.forEach((r) => { r.el.hidden = q !== '' && !r.text.includes(q); }); });
+      updateCount();
+      coreBody = [
+        h('div', { class: 'toolbar', style: 'margin:0' }, find, count),
+        rows.length ? h('div', { class: 'core-list', role: 'group', 'aria-label': '核心設備' }, rows.map((r) => r.el)) : h('p', { class: 'note' }, 'LibreNMS 沒有可選的設備。'),
+        stale.length ? h('p', { class: 'note warn' }, '原本清單裡的設備編號 ' + stale.join('、') + ' 已不在 LibreNMS（已刪除或停用），儲存後會從清單移除。') : null];
+    }
+
+    const when = s.invalid
+      ? h('p', { class: 'alert' }, '資料庫裡的服務水準設定不合法（可能被手動改過），上面顯示的是未設定。在重新儲存之前，總覽的 SLA 達成率與核心業務服務會標「無法取得」。')
+      : h('p', { class: 'note' }, s.custom ? '最後由 ' + s.updated_by + ' 在 ' + s.updated_at + ' 修改。' : '還沒有人設定過服務水準，總覽的 SLA 達成率會寫「尚未設定」、核心業務服務會寫「尚未定義」。');
+    const form = h('form', { onsubmit: async (ev) => {
+      ev.preventDefault();
+      save.disabled = true; msg.replaceChildren();
+      try {
+        const core = slaDevices === null ? s.core : Array.from(picked).sort((a, b) => a - b);   // 設備清單讀不到時不能把原本的清單清空
+        const r = await api('/ioc-settings.php', { action: 'save_sla', target: target.value, window: win.value, core: core.join(',') });
+        toast('已儲存服務水準');
+        slaSettings = r.sla;
+        renderServiceSettings(box, true);
+        loadOverview();                  // 總覽的 SLA 達成率與核心業務服務要用新設定重算
+      } catch (e) {
+        msg.replaceChildren(...(e.errors && e.errors.length ? e.errors : [e.message]).map((t) => h('div', null, t)));
+        save.disabled = false;
+      }
+    } },
+      h('p', { class: 'note', style: 'margin-top:0' }, '規格書的附表 A 把可用率目標（F-20）與服務時段（F-25）留給機關填列，系統沒有預設值，沒填的項目總覽就顯示「尚未設定」。'
+        + 'SLA 達成率＝核心設備最近 30 日的平均可用率，與目標比較；LibreNMS 的可用率是全天計算的，所以服務時段不是 7×24 時無法計算，也沒有排除計畫性維護時間。'),
+      h('label', { for: 'sla-target' }, '可用率目標（F-20，%，大於 0、最多 100）'), target,
+      h('label', { for: 'sla-window' }, '服務時段（F-25）'), win,
+      h('label', null, '核心設備（總覽的「核心業務服務」與 SLA 達成率以這份清單為準）'), coreBody, when,
+      CAN_HANDLE
+        ? h('div', { class: 'toolbar', style: 'margin-top:12px' }, save, h('span', { class: 'note', style: 'margin:0' }, '改完要按「儲存」才會生效。'))
+        : h('p', { class: 'note warn' }, '你的角色是檢視者（唯讀），只有管理者（admin）能修改服務水準。'),
+      msg);
+    const history = s.history.length
+      ? table(['時間', '操作者', '項目', '原值', '新值'], s.history.map((x) => [x.time, x.actor, x.label, x.from === '' ? '（未設定）' : x.from, x.to === '' ? '（未設定）' : x.to]))
+      : h('p', { class: 'note' }, '還沒有人調整過服務水準。');
+    box.replaceChildren(h('section', { class: 'grid even' },
+      section('服務水準', '總覽的 SLA 達成率與核心業務服務用它', form),
+      section('服務水準的異動紀錄', '最近 10 筆，誰在什麼時候改的', history)));
     if (focusSave && CAN_HANDLE) save.focus();
   }
 
