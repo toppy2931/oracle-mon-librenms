@@ -31,7 +31,7 @@ use Ioc\Sites;
 use Ioc\UnavailableLogSource;
 
 const IOC_READER_CONF = '/etc/oracle-mon/graylog-reader.conf';
-const IOC_OVERVIEW_CACHE = 'ioc:overview:v6:';     // 依統計期間與 demo 模式分開快取（20 秒）
+const IOC_OVERVIEW_CACHE = 'ioc:overview:v7:';     // 依統計期間、趨勢視窗與 demo 模式分開快取（20 秒）
 const IOC_NETWORK_CACHE = 'ioc:network:v2:';       // 依統計期間與 demo 模式分開快取；內部網段一改就要清掉
 
 /** 內部網段的設定有異動就讓內網可視性的快取失效，否則 60 秒內畫面還是用舊網段算的。 */
@@ -52,7 +52,9 @@ function ioc_overview_cache_forget(): void
 {
     foreach (['live', 'demo'] as $mode) {
         foreach (array_keys(NetworkVisibilityService::RANGE_LABELS) as $range) {
-            \Illuminate\Support\Facades\Cache::forget(IOC_OVERVIEW_CACHE . $mode . ':' . $range);
+            foreach (array_keys(LandscapeService::TREND_OPTIONS) as $trend) {
+                \Illuminate\Support\Facades\Cache::forget(IOC_OVERVIEW_CACHE . $mode . ':' . $range . ':' . $trend);
+            }
         }
     }
 }
@@ -144,14 +146,34 @@ function ioc_settings(): SettingsService
  * @param array<string,mixed> $case
  * @return array<string,mixed>
  */
-function ioc_evidence(array $case, bool $demo): array
+function ioc_evidence(array $case, bool $demo, ?string $level): array
 {
     try {
         $logs = GraylogClient::fromConf(IOC_READER_CONF);
     } catch (GraylogUnavailable $e) {
         $logs = new UnavailableLogSource($e->getMessage());
     }
-    return (new EvidenceService($logs, $demo))->build($case);
+    // $level 沒有預設值：呼叫端一定要決定身分。裝置行為異常的事件案，目的位址只給管理者（EvidenceService）
+    return (new EvidenceService($logs, $demo))->build($case, $level);
+}
+
+/**
+ * 事件詳情的「裝置行為警示」：事件案是裝置行為分析的警示建立的才有，不是就回 null（畫面不顯示這一塊）。
+ * 與 Graylog 證據各自成敗：資料庫讀不到（PDOException，例如資料表還沒建立）時，行為警示建立的事件案回 ['ok'=>false,'error'=>…]，
+ * 其他事件案回 null（不相干的案件不該多出一個紅色的錯誤區塊）；不是資料庫錯誤的例外是 bug，照專案慣例往上丟（含權限拒絕）。
+ * 管理者看目的位址會留稽核（BehaviorService::caseEvidence）。
+ *
+ * @param array<string,mixed> $case 資料庫的事件案列
+ * @return array<string,mixed>|null
+ */
+function ioc_behavior_evidence(array $case, string $actor, ?string $level): ?array
+{
+    try {
+        return (new \Ioc\BehaviorService(DB::connection()->getPdo()))->caseEvidence((int) $case['id'], $actor, $level);
+    } catch (\PDOException $e) {
+        error_log('[ioc] behavior evidence: ' . $e->getMessage());
+        return ($case['category'] ?? null) === \Ioc\CaseCatalog::BEHAVIOR ? ['ok' => false, 'error' => '裝置行為警示讀不到（資料表還沒建立，或資料庫連不上）'] : null;
+    }
 }
 
 const IOC_ADMIN_LOG      = '/var/log/oracle-admin.log';
@@ -376,7 +398,7 @@ function ioc_fleet(?Sites $sites = null): ?Fleet
     // 可用率讀不到不拖垮整份設備清單：該欄位就是 null，畫面標「沒有可用率資料」
     $avail = [];
     try {
-        foreach (DB::table('availability')->whereIn('duration', [86400, 604800])->get(['device_id', 'duration', 'availability_perc']) as $a) {
+        foreach (DB::table('availability')->whereIn('duration', [86400, 604800, 2592000])->get(['device_id', 'duration', 'availability_perc']) as $a) {
             if ($a->availability_perc === null) {
                 continue;            // 還沒累積出可用率：是「沒有資料」，(float) null 會變成 0% 把平均拉低
             }
@@ -389,6 +411,7 @@ function ioc_fleet(?Sites $sites = null): ?Fleet
     foreach ($rows as $r) {
         $id    = (int) $r->device_id;
         $out[] = [
+            'id'          => $id,
             'name'        => (string) ($r->display ?: ($r->sysName ?: $r->hostname)),
             'aliases'     => [$r->hostname, $r->sysName, $r->display],
             'type'        => $r->type,
@@ -401,9 +424,33 @@ function ioc_fleet(?Sites $sites = null): ?Fleet
             'lng'         => $r->lng,
             'avail_1d'    => $avail[$id][86400] ?? null,
             'avail_7d'    => $avail[$id][604800] ?? null,
+            'avail_30d'   => $avail[$id][2592000] ?? null,
         ];
     }
     return new Fleet($out, date_default_timezone_get(), $sites);
+}
+
+/**
+ * 設定頁「服務水準」選核心設備用的設備清單（LibreNMS 啟用中的設備，依名稱排序）。只有管理者拿得到（設定頁的其他區塊檢視者看得到，
+ * 但這份清單只有要編輯的人需要）；讀不到回傳 null，畫面標「無法取得」。
+ *
+ * @return array<int,array{id:int,name:string,group:string}>|null
+ */
+function ioc_core_candidates(?string $level): ?array
+{
+    Access::requireHandler($level, '只有管理者可以選擇核心設備');
+    try {
+        $rows = DB::table('devices')->where('disabled', 0)->where('ignore', 0)->get(['device_id', 'hostname', 'sysName', 'display', 'type']);
+    } catch (\Throwable $e) {
+        error_log('[ioc] core candidates: ' . $e->getMessage());
+        return null;
+    }
+    $out = [];
+    foreach ($rows as $r) {
+        $out[] = ['id' => (int) $r->device_id, 'name' => (string) ($r->display ?: ($r->sysName ?: $r->hostname)), 'group' => Fleet::group((string) $r->type)];
+    }
+    usort($out, static fn (array $a, array $b): int => strcmp(mb_strtolower($a['name']), mb_strtolower($b['name'])) ?: $a['id'] <=> $b['id']);
+    return $out;
 }
 
 /**
@@ -425,7 +472,7 @@ function ioc_log_settings_errors(array $errors): void
 }
 
 /** @return array<string,mixed> */
-function ioc_overview(bool $demo, string $level, int $range = OverviewService::RANGE): array
+function ioc_overview(bool $demo, string $level, int $range = OverviewService::RANGE, int $trend = LandscapeService::TREND_DEFAULT): array
 {
     try {
         $logs = GraylogClient::fromConf(IOC_READER_CONF);
@@ -438,6 +485,12 @@ function ioc_overview(bool $demo, string $level, int $range = OverviewService::R
     $sites        = $settings['sites'];
     $thresholds   = $settings['thresholds'];      // 資料表還沒建立或值壞了：風險分數只顯示分數、不判定等級
     $nets         = $settings['nets'];            // 讀不到內部網段：「防火牆阻擋的來源」分不出內外，該區塊標「無法取得」，不套預設網段
+    $sla          = $settings['sla'];             // 服務水準：沒設定過是「尚未設定」（空值）；值壞了或讀不到是 null，核心業務服務與 SLA 達成率標「無法取得」，不套預設
+    $slaWarning   = null;
+    if (isset($settings['errors']['sla'])) {
+        $e = $settings['errors']['sla'];
+        $slaWarning = $e instanceof \Ioc\IocError ? $e->getMessage() : '服務水準的設定讀不到（資料表還沒建立，或資料庫連不上）';
+    }
     $sitesWarning = null;
     if (isset($settings['errors']['sites'])) {
         $e = $settings['errors']['sites'];
@@ -451,15 +504,41 @@ function ioc_overview(bool $demo, string $level, int $range = OverviewService::R
         $cases  = $svc->summary($level);
         $open   = $svc->openBySeverity($level);
         $latest = array_map([CaseView::class, 'row'], $svc->listCases(['status' => '', 'limit' => LandscapeService::LATEST_CASES], $level)['items']);
-        $trend  = $svc->createdInLast($range, $level);
+        // 事件趨勢有自己的視窗，不跟 Graylog 區塊的統計期間綁在一起：7／30 日逐日、24 小時分六格；只讀事件案資料表，不打 Graylog
+        $trendRows = $trend > 86400 ? $svc->createdWithin(intdiv($trend, 86400), $level) : $svc->createdInLast($trend, $level);
+        $dayRows   = $svc->createdWithin(2, $level);           // 「待處理事件」卡片的今日／昨日新建件數
     } catch (\Throwable $e) {
         error_log('[ioc] cases: ' . $e->getMessage());
-        $cases = $open = $latest = $trend = null;              // 例如資料表還沒建立：事件案相關的區塊整組標「無法取得」
+        $cases = $open = $latest = $trendRows = $dayRows = null;      // 例如資料表還沒建立：事件案相關的區塊整組標「無法取得」
     }
     $now = time();
     $overview = (new OverviewService($logs, $demo, $now, $nets, $range))->build($fleet === null ? null : $fleet->legacy(), $cases);
-    $overview['landscape'] = (new LandscapeService($now, $range))->build($fleet, $cases, $open, $latest, $trend, $overview['coverage'], $thresholds, $sitesWarning);
+    $landscape = new LandscapeService($now, $trend);
+    $overview['landscape'] = $landscape->build($fleet, $cases, $open, $latest, $trendRows, $overview['coverage'], $thresholds, $sitesWarning,
+        $sla, $slaWarning, $dayRows === null ? null : $landscape->dayCounts($dayRows), ioc_audit_summary($level));
     return $overview;
+}
+
+/**
+ * 總覽「合規覆蓋率」要的稽核摘要：只有計數（AuditEvidenceService::summary 檢視者也能看），所以可以放進不分角色的總覽快取。
+ * 總覽只讀摘要，不碰案件與備份來源，那兩個來源給一個不會被呼叫的函式；讀不到（例如資料表還沒建立）回 null，卡片標「無法取得」。
+ * 稽核頁的異動不會清總覽快取：這張卡片最多落後 20 秒（總覽快取的存活時間）。
+ *
+ * @return array<string,mixed>|null
+ */
+function ioc_audit_summary(string $level): ?array
+{
+    try {
+        $unused = static function (): array {
+            throw new \LogicException('總覽的合規覆蓋率只讀稽核摘要');
+        };
+        return (new \Ioc\AuditEvidenceService(DB::connection()->getPdo(), new \Ioc\AuditSnapshotStore(), $unused, $unused))->summary($level);
+    } catch (\Ioc\AccessDenied $e) {
+        throw $e;
+    } catch (\Throwable $e) {
+        error_log('[ioc] audit summary: ' . $e->getMessage());
+        return null;
+    }
 }
 
 

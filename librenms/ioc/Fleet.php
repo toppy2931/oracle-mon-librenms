@@ -79,6 +79,8 @@ final class Fleet
                 'lng'         => $lng,
                 'avail_1d'    => isset($r['avail_1d']) && is_numeric($r['avail_1d']) ? (float) $r['avail_1d'] : null,
                 'avail_7d'    => isset($r['avail_7d']) && is_numeric($r['avail_7d']) ? (float) $r['avail_7d'] : null,
+                'avail_30d'   => isset($r['avail_30d']) && is_numeric($r['avail_30d']) ? (float) $r['avail_30d'] : null,
+                'id'          => isset($r['id']) && is_numeric($r['id']) ? (int) $r['id'] : null,      // LibreNMS 的 device_id（核心設備清單用）
             ];
         }
     }
@@ -324,6 +326,68 @@ final class Fleet
         $d1 = array_values(array_filter(array_column($this->devices, 'avail_1d'), static fn ($v) => $v !== null));
         $d7 = array_values(array_filter(array_column($this->devices, 'avail_7d'), static fn ($v) => $v !== null));
         return ['d1' => $mean($d1), 'd7' => $mean($d7), 'n1' => count($d1), 'n7' => count($d7)];
+    }
+
+    /**
+     * 某一類設備（server／network／other）的平均可用率（%，兩位小數）。只算有資料的設備；一台都沒有資料是 null，不是 0%。
+     *
+     * @param string $window avail_1d、avail_7d 或 avail_30d
+     * @return array{value:?float,n:int,devices:int} n＝有資料的台數、devices＝這一類的設備台數
+     */
+    public function groupAvailability(string $group, string $window = 'avail_7d'): array
+    {
+        if (!in_array($window, ['avail_1d', 'avail_7d', 'avail_30d'], true)) {
+            throw new \InvalidArgumentException('不支援的可用率期間');
+        }
+        $vals = [];
+        $devices = 0;
+        foreach ($this->devices as $d) {
+            if ($d['group'] !== $group) {
+                continue;
+            }
+            $devices++;
+            if ($d[$window] !== null) {
+                $vals[] = $d[$window];
+            }
+        }
+        return ['value' => $vals === [] ? null : round(array_sum($vals) / count($vals), 2), 'n' => count($vals), 'devices' => $devices];
+    }
+
+    /**
+     * 核心設備清單（LibreNMS device_id）的現況：清單裡有幾台、LibreNMS 裡找得到幾台（找不到的＝被刪除或停用，另外數，
+     * 不能算成正常）、其中幾台正常／離線（離線名單最多 5 台）、30 日平均可用率（只算有資料的；沒有資料是 null，不是 0%）。
+     *
+     * @param int[] $ids
+     * @return array{listed:int,found:int,missing:int,up:int,down:int,down_names:string[],avail30:?float,avail30_exact:?float,n30:int} avail30 是四捨五入到兩位小數（給顯示），
+     *         avail30_exact 是沒捨入的平均（給與目標比較：目標最多三位小數，先捨入再比會把 99.9985 當成 100 而判達標）
+     */
+    public function core(array $ids): array
+    {
+        $want = array_flip(array_unique(array_map('intval', $ids)));
+        $out  = ['listed' => count($want), 'found' => 0, 'missing' => 0, 'up' => 0, 'down' => 0, 'down_names' => [], 'avail30' => null, 'avail30_exact' => null, 'n30' => 0];
+        $vals = [];
+        foreach ($this->devices as $d) {
+            if ($d['id'] === null || !isset($want[$d['id']])) {
+                continue;
+            }
+            $out['found']++;
+            if ($d['up']) {
+                $out['up']++;
+            } else {
+                $out['down']++;
+                if (count($out['down_names']) < 5) {
+                    $out['down_names'][] = $d['name'];
+                }
+            }
+            if ($d['avail_30d'] !== null) {
+                $vals[] = $d['avail_30d'];
+            }
+        }
+        $out['missing'] = $out['listed'] - $out['found'];
+        $out['n30']     = count($vals);
+        $out['avail30'] = $vals === [] ? null : round(array_sum($vals) / count($vals), 2);
+        $out['avail30_exact'] = $vals === [] ? null : array_sum($vals) / count($vals);
+        return $out;
     }
 
     /** 事件案的主機名稱（設備名稱、hostname、sysName 任一個，不分大小寫）對應到的站點；找不到回傳 null。 */

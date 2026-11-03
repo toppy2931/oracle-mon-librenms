@@ -28,7 +28,7 @@ $caseSvc = new Ioc\CaseService(new Ioc\PdoCaseRepo($db));
 $caseSource = static function (int $caseId) use ($caseSvc): array {
     $case = $caseSvc->get($caseId, Ioc\Access::HANDLER)['case'];
     $logs = Ioc\GraylogClient::fromConf('/etc/oracle-mon/graylog-reader.conf');
-    return ['case' => $case, 'evidence' => (new Ioc\EvidenceService($logs))->build($case)];
+    return ['case' => $case, 'evidence' => (new Ioc\EvidenceService($logs))->build($case, Ioc\Access::HANDLER)];
 };
 $service = new Ioc\AuditEvidenceService($db, new Ioc\AuditSnapshotStore(), $caseSource,
     static fn (int $device, int $version): array => []);

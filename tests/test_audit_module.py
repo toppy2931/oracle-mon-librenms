@@ -10,7 +10,7 @@ class AuditModuleTests(unittest.TestCase):
         self.assertLess(source.index('ioc_begin(true)'), source.index('new \\Ioc\\AuditEvidenceService'))
         self.assertIn("if ($action !== 'summary')", source)
         self.assertIn('Access::requireHandler', source)
-        self.assertIn('ioc_evidence($case, false)', source)
+        self.assertIn('ioc_evidence($case, false, $level)', source)
 
     def test_download_is_admin_only_and_rechecks_hash(self):
         endpoint = (ROOT / 'librenms/html/ioc-audit-download.php').read_text(encoding='utf-8')

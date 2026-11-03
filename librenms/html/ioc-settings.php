@@ -6,6 +6,7 @@
  *   save  {risk_low, risk_medium}         儲存風險等級門檻（僅 admin）
  *   save_network {cidrs}                  儲存內部網段（僅 admin；內網可視性用來分「內部對內部」）
  *   save_sites {sites:[{id?,name,cidrs}]} 儲存整份站點清單（僅 admin；總覽依設備 IP 落在哪個站點的網段來歸站點）
+ *   save_sla {target,window,core}         儲存服務水準（僅 admin；F-20 可用率目標、F-25 服務時段、核心設備的 device_id 清單；總覽的 SLA 達成率與核心業務服務用）
  *
  * 權限、驗證、預設值與異動紀錄都在 Ioc\SettingsService；這裡只負責登入、CSRF、解析內容與回應格式。
  * 需登入、角色為 admin 或 global-read，並帶 X-CSRF-Token 標頭。
@@ -35,7 +36,10 @@ try {
     $svc = ioc_settings();
     switch ((string) ($in['action'] ?? '')) {
         case 'get':
-            ioc_json(['risk' => $svc->riskSettings($level), 'network' => $svc->networkSettings($level), 'sites' => $svc->siteSettings($level)]);
+            ioc_json(['risk' => $svc->riskSettings($level), 'network' => $svc->networkSettings($level), 'sites' => $svc->siteSettings($level),
+                      'sla' => $svc->serviceLevelSettings($level),
+                      // 選核心設備用的設備清單只給管理者（檢視者不能改，也不需要）；讀不到是 null，畫面標「無法取得」
+                      'devices' => $level === Ioc\Access::HANDLER ? ioc_core_candidates($level) : false]);
             // no break（ioc_json 會結束）
         case 'save':
             $r = $svc->saveRisk(ioc_pick($in, ['risk_low', 'risk_medium']), $actor, $level);
@@ -46,6 +50,10 @@ try {
             ioc_network_cache_forget();           // 內網可視性的快取是用舊網段算的
             ioc_overview_cache_forget();          // 總覽「防火牆阻擋的來源」也用同一份內部網段分內外
             ioc_json(['network' => $r]);
+        case 'save_sla':
+            $r = $svc->saveServiceLevel(ioc_pick($in, ['target', 'window', 'core']), $actor, $level);
+            ioc_overview_cache_forget();          // 總覽的核心業務服務與 SLA 達成率是快取裡算好的
+            ioc_json(['sla' => $r]);
         case 'save_sites':
             // ioc_pick 只收純量；站點清單是陣列，由 SettingsService 嚴格檢查形狀、長度與內容
             $r = $svc->saveSites(['sites' => $in['sites'] ?? null], $actor, $level);

@@ -210,6 +210,33 @@ try {
             $assert($settingsRepo->recentHistory(10, null, 'si_e.') === [] && $settingsRepo->recentHistory(10, null, 'si%') === [], '前綴裡的 _ 與 % 沒有被當成字面意思（跳脫沒有生效）');
             $assert($settingsRepo->allForUpdate() === $settingsRepo->all(), '鎖定讀取（SELECT … FOR UPDATE）的結果與一般讀取不同');
         });
+        // 服務水準是三個設定值（目標、服務時段、核心設備）一起寫、一起驗證；異動紀錄依三個設定名稱篩選（SQL 的 IN）
+        $check('服務水準：儲存、讀回（整理核心設備清單）、整理後沒變動不留紀錄、不合法的值被擋下、檢視者只能讀', function () use ($settings, $settingsRepo, $H, $assert) {
+            $r = $settings->saveServiceLevel(['target' => '99.50', 'window' => '24x7', 'core' => '9, 3, 3, 12'], 'selftest', $H);
+            $assert($r['target'] === 99.5 && $r['window'] === '24x7' && $r['core'] === [3, 9, 12] && $r['custom'] === true && $r['invalid'] === false, '儲存後讀回的值不對（要整理成不重複、由小到大）');
+            $n = count($settingsRepo->recentHistory(1000000));
+            $settings->saveServiceLevel(['target' => '99.5', 'window' => '24x7', 'core' => '3,9,12'], 'selftest', $H);
+            $assert(count($settingsRepo->recentHistory(1000000)) === $n, '整理後沒有變動卻多了一筆紀錄');
+            $o = $settings->overviewSettings($H)['sla'];
+            $assert($o === ['target' => 99.5, 'window' => '24x7', 'core' => [3, 9, 12]], 'overviewSettings 的服務水準與儲存的不一致');
+            try {
+                $settings->saveServiceLevel(['target' => '101', 'window' => 'x', 'core' => 'a'], 'selftest', $H);
+                throw new RuntimeException('應該被拒絕');
+            } catch (ValidationError $e) {
+                $assert(count($e->errors()) === 3, '三個欄位的錯誤要一起回報');
+            }
+            $assert($settings->serviceLevelSettings($H)['core'] === [3, 9, 12], '被拒絕的儲存不能改到資料');
+            $settings->saveServiceLevel(['target' => '', 'window' => '', 'core' => ''], 'selftest', $H);     // 全部清空＝尚未設定
+            $s = $settings->serviceLevelSettings(Access::VIEWER);
+            $assert($s['target'] === null && $s['window'] === null && $s['core'] === [], '清空後應該是尚未設定');
+            $h = $s['history'];
+            $assert(count($h) >= 3 && $h[0]['actor'] === 'selftest' && $h[0]['to'] === '', '服務水準的異動紀錄不對（依三個設定名稱篩選的 SQL）');
+            try {
+                $settings->saveServiceLevel(['target' => '99', 'window' => '24x7', 'core' => '1'], 'viewer', Access::VIEWER);
+                throw new RuntimeException('檢視者不應該能儲存');
+            } catch (AccessDenied $e) {
+            }
+        });
     } finally {
         if ($pdo->inTransaction()) {
             $pdo->rollBack();
@@ -239,6 +266,22 @@ try {
             $ip = Fleet::deviceIp($r->overwrite_ip, $r->ip, $r->hostname);
             $assert($ip === null || filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_IPV4) !== false, '設備 IP 轉換出不合法的值：' . $ip);
         }
+    });
+    // 總覽第二排的兩個資料來源（只讀）：選核心設備用的設備清單（devices 的 display、sysName 欄位）、稽核摘要（ioc_audit_* 資料表）
+    $check('總覽：核心設備候選清單與稽核摘要的 SQL 都讀得出來（只讀）', function () use ($assert, $H) {
+        $c = ioc_core_candidates($H);
+        $assert($c !== null, '核心設備候選清單讀不到（看 PHP 的錯誤 log，訊息以 [ioc] core candidates 開頭；devices.display、devices.sysName 欄位存在嗎？）');
+        foreach ($c as $d) {
+            $assert(is_int($d['id']) && $d['id'] > 0 && $d['name'] !== '' && in_array($d['group'], ['server', 'network', 'other'], true), '候選設備的欄位不對：' . json_encode($d, JSON_UNESCAPED_UNICODE));
+        }
+        try {
+            ioc_core_candidates(Access::VIEWER);
+            throw new RuntimeException('檢視者不應該拿得到設備清單');
+        } catch (AccessDenied $e) {
+        }
+        $a = ioc_audit_summary($H);
+        $assert($a !== null && array_key_exists('ready', $a), '稽核摘要讀不到（看 PHP 的錯誤 log，訊息以 [ioc] audit summary 開頭；ioc_audit_* 資料表建立了嗎？）');
+        $assert(ioc_audit_summary(Access::VIEWER) !== null, '檢視者應該讀得到稽核摘要（只有計數）');
     });
     $check('身分與稽核：稽核軌跡的四個來源都讀得到（含 /var/log/oracle-admin.log 的權限，只讀）', function () use ($assert, $H) {
         $a = ioc_audit_sources();

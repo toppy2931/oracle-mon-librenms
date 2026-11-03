@@ -32,11 +32,16 @@ final class EvidenceService
     }
 
     /**
-     * @param array<string,mixed> $case 資料庫的事件案列（要有 evidence_query、created_at）
+     * @param array<string,mixed> $case 資料庫的事件案列（要有 evidence_query、created_at；有 category 才認得出裝置行為異常）
+     * @param string|null $level Access::HANDLER／VIEWER；沒有身分（null）當成不是管理者。
+     *        裝置行為異常的事件案，目的位址只給管理者（docs/ioc/behavior-analysis.md：檢視者只看去識別彙總），
+     *        其他人連 dst_ip 欄位都不向 Graylog 要，不是要了再藏。其他類型的事件案維持原本行為。
      * @return array<string,mixed> ['ok'=>true,'data'=>…] 或 ['ok'=>false,'reason'=>…,'error'=>…]
      */
-    public function build(array $case): array
+    public function build(array $case, ?string $level = null): array
     {
+        $hideDestinations = ($case['category'] ?? null) === CaseCatalog::BEHAVIOR && !Access::canHandle($level);
+        $fields = $hideDestinations ? array_values(array_diff(self::FIELDS, ['dst_ip'])) : self::FIELDS;
         $q = trim((string) ($case['evidence_query'] ?? ''));
         if ($q === '') {
             return $this->fail('no_query', '這件事件案沒有填 Graylog 查詢條件，沒有可查的日誌（建立事件案時填「Graylog 查詢條件」才查得到）');
@@ -50,7 +55,7 @@ final class EvidenceService
         $query = OverviewService::demoFilter($q, $this->demo);
 
         try {
-            $rows   = $this->logs->messagesBetween($query, $this->iso($from), $this->iso($to), self::FIELDS, self::LIMIT);
+            $rows   = $this->logs->messagesBetween($query, $this->iso($from), $this->iso($to), $fields, self::LIMIT);
             $counts = $this->logs->aggregateBetween($query, $this->iso($from), $this->iso($to), ['log_type'], ['count'], 20);
         } catch (GraylogUnavailable $e) {
             return $this->fail('unavailable', $e->getMessage());
@@ -67,7 +72,7 @@ final class EvidenceService
 
         $items = [];
         foreach (array_reverse($rows) as $r) {          // Graylog 回新到舊，時間軸要由舊到新
-            $items[] = $this->item($r);
+            $items[] = $this->item($r, $hideDestinations);
         }
 
         return ['ok' => true, 'data' => [
@@ -77,19 +82,24 @@ final class EvidenceService
             'items'      => $items,
             'total'      => $total,
             'truncated'  => count($rows) >= self::LIMIT && $total > count($rows),
+            'destinations_hidden' => $hideDestinations,
             'indicators' => $this->indicators($by, $total),
         ]];
     }
 
     /**
      * @param array<string,mixed> $r
+     * @param bool $hideDestinations true＝不放目的位址（就算來源多給了也不放，不只靠沒向 Graylog 要這個欄位）
      * @return array<string,string>
      */
-    private function item(array $r): array
+    private function item(array $r, bool $hideDestinations = false): array
     {
         $action = (string) ($r['event_action'] ?? '');
         $parts  = [];
         foreach ([['user_name', '帳號'], ['src_ip', '來源'], ['dst_ip', '目的'], ['host_name', '設備']] as [$field, $label]) {
+            if ($hideDestinations && $field === 'dst_ip') {
+                continue;
+            }
             $v = isset($r[$field]) ? trim((string) $r[$field]) : '';
             if ($v !== '') {
                 $parts[] = $label . ' ' . $v;
