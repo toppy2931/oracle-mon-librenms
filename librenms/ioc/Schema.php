@@ -601,6 +601,19 @@ CREATE TABLE IF NOT EXISTS ioc_behavior_schedules (
 SQL,
             // 取消強制 28 天之後沒有「基線已就緒（ready）」這個狀態：遺留的改回學習中（基線保留；冪等）
             "UPDATE ioc_behavior_assets SET mode='learning',quality_status='learning' WHERE mode='ready'",
+            // 匯出紀錄（日誌查詢與報表的 CSV 匯出）：誰、何時、匯出什麼、幾筆。只增不改不刪
+            <<<'SQL'
+CREATE TABLE IF NOT EXISTS ioc_export_log (
+  id BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  actor VARCHAR(255) NOT NULL,
+  kind VARCHAR(40) NOT NULL,
+  detail VARCHAR(255) NOT NULL,
+  row_count INT UNSIGNED NOT NULL,
+  occurred_at DATETIME NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_ioc_export_log_time (occurred_at)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci
+SQL,
         ];
     }
 }

@@ -22,6 +22,7 @@ use Ioc\GraylogUnavailable;
 use Ioc\HostLoginService;
 use Ioc\IdentityService;
 use Ioc\LandscapeService;
+use Ioc\LogQuery;
 use Ioc\NetworkVisibilityService;
 use Ioc\OverviewService;
 use Ioc\PdoCaseRepo;
@@ -32,7 +33,8 @@ use Ioc\UnavailableLogSource;
 
 const IOC_READER_CONF = '/etc/oracle-mon/graylog-reader.conf';
 const IOC_OVERVIEW_CACHE = 'ioc:overview:v7:';     // 依統計期間、趨勢視窗與 demo 模式分開快取（20 秒）
-const IOC_NETWORK_CACHE = 'ioc:network:v2:';       // 依統計期間與 demo 模式分開快取；內部網段一改就要清掉
+const IOC_CORRELATION_CACHE = 'ioc:correlation:v1:';   // 依 demo 模式分開快取（60 秒）；內部網段一改就要清掉
+const IOC_NETWORK_CACHE ='ioc:network:v2:';       // 依統計期間與 demo 模式分開快取；內部網段一改就要清掉
 
 /** 內部網段的設定有異動就讓內網可視性的快取失效，否則 60 秒內畫面還是用舊網段算的。 */
 function ioc_network_cache_forget(): void
@@ -41,6 +43,7 @@ function ioc_network_cache_forget(): void
         foreach (array_keys(NetworkVisibilityService::RANGE_LABELS) as $range) {
             \Illuminate\Support\Facades\Cache::forget(IOC_NETWORK_CACHE . $mode . ':' . $range);
         }
+        \Illuminate\Support\Facades\Cache::forget(IOC_CORRELATION_CACHE . $mode);      // 規則三用內部網段，網段一改建議就要重算
     }
 }
 
@@ -262,7 +265,7 @@ function ioc_admin_log_lines(): ?array
 /**
  * 稽核軌跡的原始資料：每個來源各自讀，讀不到是 null。
  *
- * @return array{login:?array,admin_op:?array,case:?array,settings:?array}
+ * @return array{login:?array,admin_op:?array,case:?array,settings:?array,export:?array}
  */
 function ioc_audit_sources(): array
 {
@@ -278,6 +281,8 @@ function ioc_audit_sources(): array
         'login'    => $read('authlog', static fn () => ioc_rows(DB::table('authlog')->orderByDesc('id')->limit(300)->get(['datetime', 'user', 'address', 'result']))),
         'admin_op' => $read('admin log', static fn () => ioc_admin_log_lines()),
         'case'     => $read('case history', static fn () => ioc_rows(DB::table('ioc_case_history')->orderByDesc('id')->limit(200)->get(['case_id', 'ts', 'actor', 'action', 'from_status', 'to_status', 'resolution']))),
+        // 匯出紀錄（階段 2 新增）：資料表沒建立就是 null，稽核軌跡標「無法取得」
+        'export'   => $read('export log', static fn () => ioc_rows(DB::table('ioc_export_log')->orderByDesc('id')->limit(100)->get(['actor', 'kind', 'detail', 'row_count', 'occurred_at']))),
         'settings' => $read('settings history', static fn () => ioc_rows(DB::table('ioc_settings_history')->orderByDesc('id')->limit(100)->get(['ts', 'actor', 'skey', 'old_value', 'new_value']))),
     ];
 }
@@ -563,4 +568,149 @@ function ioc_backup_devices(?string $level): array
     } catch (\Throwable $e) {
         throw new \Ioc\IocError('無法讀取 LibreNMS 設備清單，請稍後重試');
     }
+}
+
+// ── 日誌查詢與匯出（ioc-logs.php）────────────────────────────────────
+
+/** 日誌查詢頁用的查詢條件欄位。只把這幾個鍵傳進 LogQuery（型別原樣保留，LogQuery 會嚴格檢查；不能用 ioc_pick，它會把 range_seconds 轉成字串）。 */
+const IOC_LOG_FILTER_KEYS = ['range_seconds', 'from', 'to', 'log_type', 'event_action', 'severity', 'user_name', 'src_ip', 'dst_ip', 'host_name', 'keyword'];
+
+/**
+ * @param array<string,mixed> $in
+ * @return array<string,mixed>
+ */
+function ioc_log_filters(array $in): array
+{
+    return array_intersect_key($in, array_flip(IOC_LOG_FILTER_KEYS));
+}
+
+function ioc_log_query(bool $demo, ?string $level): LogQuery
+{
+    try {
+        $logs = GraylogClient::fromConf(IOC_READER_CONF);
+    } catch (GraylogUnavailable $e) {
+        $logs = new UnavailableLogSource($e->getMessage());
+    }
+    // 關鍵字查詢（比對原始訊息）只給管理者；檢視者送關鍵字會被擋下（LogQuery 的 allowKeyword）
+    return new LogQuery($logs, $demo, null, \Ioc\Access::canHandle($level));
+}
+
+/**
+ * 日誌的設備名稱對得上 LibreNMS 設備的，附上 device_id（畫面連到設備頁）。只是方便：設備清單讀不到就不附，不影響日誌本身。
+ *
+ * @param array<int,array<string,string>> $items
+ * @return array<int,array<string,mixed>>
+ */
+function ioc_link_log_devices(array $items): array
+{
+    $fleet = ioc_fleet();
+    foreach ($items as &$i) {
+        $i['device_id'] = $fleet === null ? null : $fleet->deviceIdOfHost((string) $i['host_name']);
+    }
+    unset($i);
+    return $items;
+}
+
+/**
+ * 跨來源關聯建議（ioc-correlation.php）。內部網段讀不到時規則三標「無法取得」（原因寫在規則狀態），不套預設網段。
+ *
+ * @return array<string,mixed>
+ */
+function ioc_correlation(bool $demo, string $level): array
+{
+    try {
+        $logs = GraylogClient::fromConf(IOC_READER_CONF);
+    } catch (GraylogUnavailable $e) {
+        $logs = new UnavailableLogSource($e->getMessage());
+    }
+    $nets = null;
+    $why  = '';
+    try {
+        $nets = ioc_settings()->internalNets($level);
+    } catch (\Ioc\AccessDenied $e) {
+        throw $e;
+    } catch (\Throwable $e) {
+        error_log('[ioc] internal nets: ' . $e->getMessage());
+        $why = $e instanceof \Ioc\IocError ? $e->getMessage() : '無法讀取內部網段的設定（資料表還沒建立？）';
+    }
+    return (new \Ioc\CorrelationService($logs, $demo, $nets, $why))->build();
+}
+
+/**
+ * 報表用的站點設定：讀得到就用；讀不到（資料表壞了或還沒建立）站點欄退回 LibreNMS 的位置，並回傳原因，報表要寫出來
+ * （與總覽同一個原則：不能默默換一套結果）。權限拒絕往上丟。
+ *
+ * @return array{sites:?Sites,warning:?string}
+ */
+function ioc_report_sites(string $level): array
+{
+    $settings = ioc_settings()->overviewSettings($level);
+    ioc_log_settings_errors($settings['errors']);
+    $e = $settings['errors']['sites'] ?? null;
+    if ($e === null) {
+        return ['sites' => $settings['sites'], 'warning' => null];
+    }
+    return ['sites' => null, 'warning' => '站點設定讀不到，暫時只依 LibreNMS 的位置分站點：'
+        . ($e instanceof \Ioc\IocError ? $e->getMessage() : '設定資料表讀不到（還沒建立，或資料庫連不上）')];
+}
+
+/**
+ * 報表中心（ioc-reports.php）的資料提供者。總覽與內網可視性共用既有的伺服器端快取（同一把鍵：報表與畫面看到的是同一份數字）；
+ * 事件案與稽核讀不到（例如資料表還沒建立）回 null，報表該區塊標「無法取得」。
+ */
+function ioc_report_service(bool $demo, string $level): \Ioc\ReportService
+{
+    $mode = $demo ? 'demo' : 'live';
+    $siteInfo = null;
+    return new \Ioc\ReportService([
+        'overview' => static fn () => \Illuminate\Support\Facades\Cache::remember(
+            IOC_OVERVIEW_CACHE . $mode . ':' . NetworkVisibilityService::RANGE . ':' . LandscapeService::TREND_DEFAULT, 20,
+            static fn () => ioc_overview($demo, $level, NetworkVisibilityService::RANGE, LandscapeService::TREND_DEFAULT)),
+        'network'  => static fn () => \Illuminate\Support\Facades\Cache::remember(
+            IOC_NETWORK_CACHE . $mode . ':' . NetworkVisibilityService::RANGE, 60, static fn () => ioc_network($demo, $level, NetworkVisibilityService::RANGE)),
+        // 設備與站點：站點設定讀不到時（overviewSettings 各自成敗）設備仍可讀，站點欄退回 LibreNMS 的位置，並用 sites_warning 把原因寫進報表
+        'fleet'    => static function () use ($level, &$siteInfo) {
+            $siteInfo = ioc_report_sites($level);
+            return ioc_fleet($siteInfo['sites']);
+        },
+        'sites_warning' => static function () use ($level, &$siteInfo): ?string {
+            $siteInfo ??= ioc_report_sites($level);
+            return $siteInfo['warning'];
+        },
+        'cases'    => static function (int $since) use ($level): ?array {
+            try {
+                $svc = ioc_service();
+                // 列表依更新時間新到舊，分頁與停止條件在 ReportService::collectCases（有單元測試）
+                return \Ioc\ReportService::collectCases(
+                    static fn (int $offset): array => $svc->listCases(['status' => '', 'limit' => 100, 'offset' => $offset], $level), $since);
+            } catch (\PDOException $e) {
+                error_log('[ioc] report cases: ' . $e->getMessage());
+                return null;
+            }
+        },
+        'audit'    => static function () use ($level): ?array {
+            try {
+                $unused = static function (): array {
+                    throw new \LogicException('報表只讀稽核摘要與明細');
+                };
+                $svc = new \Ioc\AuditEvidenceService(DB::connection()->getPdo(), new \Ioc\AuditSnapshotStore(), $unused, $unused);
+                $summary = $svc->summary($level);
+                return ['summary' => $summary, 'detail' => ($summary['ready'] ?? false) ? $svc->detail(0, $level) : []];
+            } catch (\PDOException $e) {
+                error_log('[ioc] report audit: ' . $e->getMessage());
+                return null;
+            }
+        },
+    ]);
+}
+
+/** 下載 CSV。檔名只含固定字樣與時間，不放使用者輸入（避免標頭注入與奇怪的檔名）。 */
+function ioc_csv_download(string $csv, string $prefix): void
+{
+    header('Content-Type: text/csv; charset=UTF-8');
+    header('Content-Disposition: attachment; filename="' . $prefix . '-' . date('Ymd-His') . '.csv"');
+    header('X-Content-Type-Options: nosniff');
+    http_response_code(200);
+    echo $csv;
+    exit;
 }

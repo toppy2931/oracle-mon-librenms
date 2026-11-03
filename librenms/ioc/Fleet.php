@@ -390,6 +390,36 @@ final class Fleet
         return $out;
     }
 
+    /**
+     * 每台設備一列（報表用）：名稱、類型群組、站點、狀態、最後輪詢（台北時間）與各期間可用率（沒資料是 null，不是 0）。
+     *
+     * @return array<int,array{name:string,group:string,site:?string,up:bool,last_polled:string,avail_1d:?float,avail_7d:?float,avail_30d:?float}>
+     */
+    public function rows(): array
+    {
+        $out = [];
+        foreach ($this->devices as $d) {
+            $out[] = ['name' => $d['name'], 'group' => $d['group'], 'site' => $d['site'], 'up' => $d['up'], 'last_polled' => $d['last_polled'],
+                      'avail_1d' => $d['avail_1d'], 'avail_7d' => $d['avail_7d'], 'avail_30d' => $d['avail_30d']];
+        }
+        return $out;
+    }
+
+    /** 日誌的主機名稱（設備名稱、hostname、sysName 任一個，不分大小寫）對應到的 LibreNMS device_id；找不到回傳 null（日誌頁用來連到設備頁）。 */
+    public function deviceIdOfHost(string $host): ?int
+    {
+        $h = strtolower(trim($host));
+        if ($h === '') {
+            return null;
+        }
+        foreach ($this->devices as $d) {
+            if ($d['id'] !== null && ($h === strtolower($d['name']) || in_array($h, $d['aliases'], true))) {
+                return $d['id'];
+            }
+        }
+        return null;
+    }
+
     /** 事件案的主機名稱（設備名稱、hostname、sysName 任一個，不分大小寫）對應到的站點；找不到回傳 null。 */
     public function siteOfHost(string $host): ?string
     {

@@ -10,6 +10,7 @@ namespace Ioc;
  *   admin_op  管理主控台的操作（/var/log/oracle-admin.log；有來源位址）
  *   case      事件案的建立、狀態變更與留言（ioc_case_history；沒有來源位址）
  *   settings  入口設定的異動（ioc_settings_history；沒有來源位址）
+ *   export    日誌查詢與報表的 CSV 匯出（ioc_export_log；誰、何時、條件、筆數）。選用：呼叫端沒給這個鍵就不列這個來源
  *
  * 時間：authlog 與 oracle-admin.log 是伺服器本地時間，ioc_* 資料表是 UTC；各自轉成明確的時間點再排序，顯示才轉台北時間（INT-072）。
  * 鐵則：某個來源讀不到，就在 sources 標出「無法取得」與原因，其他來源照常列出；不能讓那個來源的事件默默消失，
@@ -24,6 +25,7 @@ final class AuditTrail
         'admin_op' => '管理操作',
         'case'     => '事件案處理',
         'settings' => '設定異動',
+        'export'   => '資料匯出',
     ];
     public const RESULT_LABEL = ['ok' => '成功', 'fail' => '失敗', 'info' => '—'];
     public const DEFAULT_LIMIT = 100;
@@ -78,10 +80,14 @@ final class AuditTrail
             'admin_op' => fn (array $rows) => $this->fromAdminLog($rows),
             'case'     => fn (array $rows) => $this->fromCaseHistory($rows),
             'settings' => fn (array $rows) => $this->fromSettingsHistory($rows),
+            'export'   => fn (array $rows) => $this->fromExportLog($rows),
         ];
         $events = [];
         $status = [];
         foreach ($parsers as $key => $parse) {
+            if ($key === 'export' && !array_key_exists('export', $sources)) {
+                continue;                 // 選用的來源：沒給就不列（給了卻是 null 才是「讀不到」）
+            }
             $raw = $sources[$key] ?? null;
             if ($raw === null) {
                 $status[$key] = ['label' => self::CATEGORY_LABEL[$key], 'ok' => false, 'error' => $this->readError($key), 'count' => 0, 'oldest' => null];
@@ -114,6 +120,36 @@ final class AuditTrail
             ];
         }
         return ['items' => $items, 'total' => $total, 'truncated' => $total > $limit, 'sources' => $status];
+    }
+
+    /**
+     * 匯出紀錄（ExportLog）：誰在什麼時候匯出了日誌或哪一份報表、條件與筆數。沒有來源位址（匯出走的是已登入的工作階段）。
+     * 條件是使用者填的查詢條件（可能含帳號、位址），這張表只有管理者看得到。
+     *
+     * @param array<int,array<string,mixed>> $rows ioc_export_log 的列（時間是 UTC）
+     * @return array<int,array<string,mixed>>
+     */
+    public function fromExportLog(array $rows): array
+    {
+        $out = [];
+        foreach ($rows as $r) {
+            $ts = Time::parse(isset($r['occurred_at']) ? (string) $r['occurred_at'] : null, 'UTC');
+            if ($ts === null) {
+                continue;
+            }
+            $kind = (string) ($r['kind'] ?? '');
+            if ($kind === 'logs') {
+                $action = '匯出日誌 CSV';
+            } elseif (strncmp($kind, 'report:', 7) === 0) {
+                $key = substr($kind, 7);
+                $action = '匯出報表 CSV（' . (ReportService::REPORTS[$key]['title'] ?? $key) . '）';
+            } else {
+                $action = '匯出 CSV';
+            }
+            $out[] = $this->event($ts, (string) ($r['actor'] ?? ''), '', 'export', $action, 'ok',
+                mb_substr((string) ($r['detail'] ?? ''), 0, self::DETAIL_MAX) . '；' . (int) ($r['row_count'] ?? 0) . ' 筆');
+        }
+        return $out;
     }
 
     private function readError(string $key): string

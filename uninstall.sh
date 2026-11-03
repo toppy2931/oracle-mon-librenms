@@ -29,6 +29,9 @@ rm -f "$LIBRENMS_DIR"/html/ioc-portal.php \
       "$LIBRENMS_DIR"/html/ioc-settings.php \
       "$LIBRENMS_DIR"/html/ioc-identity.php \
       "$LIBRENMS_DIR"/html/ioc-network.php \
+      "$LIBRENMS_DIR"/html/ioc-logs.php \
+      "$LIBRENMS_DIR"/html/ioc-reports.php \
+      "$LIBRENMS_DIR"/html/ioc-correlation.php \
       "$LIBRENMS_DIR"/html/ioc-backup.php \
       "$LIBRENMS_DIR"/html/ioc-backup-download.php \
       "$LIBRENMS_DIR"/html/ioc-audit.php \
@@ -37,6 +40,9 @@ rm -f "$LIBRENMS_DIR"/html/ioc-portal.php \
       "$LIBRENMS_DIR"/html/js/ioc-config-backup.js \
       "$LIBRENMS_DIR"/html/js/ioc-audit.js \
       "$LIBRENMS_DIR"/html/js/ioc-behavior.js \
+      "$LIBRENMS_DIR"/html/js/ioc-logs.js \
+      "$LIBRENMS_DIR"/html/js/ioc-reports.js \
+      "$LIBRENMS_DIR"/html/js/ioc-correlation.js \
       "$LIBRENMS_DIR"/html/ioc-behavior-viz.html
 rm -rf "$LIBRENMS_DIR"/html/vendor/three      # 3D 連線動態播放器用的 three.js 副本（只刪我們自己建的這個目錄）
 rmdir "$LIBRENMS_DIR"/html/vendor 2>/dev/null || true
