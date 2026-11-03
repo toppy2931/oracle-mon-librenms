@@ -20,6 +20,7 @@ if (!defined('IOC_LIB_LOADED')) {
         'ConfigBackupGateway', 'ConfigBackupService',
         'AuditEvidenceService', 'AuditSnapshotStore', 'AuditAssetDiscovery', 'AuditAutomationService',
         'BehaviorService', 'BehaviorAnalyzer', 'BehaviorAiProvider', 'BehaviorCollector', 'BehaviorWebhook', 'BehaviorVizExport',
+        'CsvExport', 'LogQuery', 'ExportLog', 'ReportService', 'CorrelationService',
     ] as $f) {
         require_once __DIR__ . '/' . $f . '.php';
     }

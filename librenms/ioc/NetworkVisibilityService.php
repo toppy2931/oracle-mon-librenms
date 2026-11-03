@@ -571,7 +571,19 @@ final class NetworkVisibilityService
     /** 轉送流量的基本條件（防火牆日誌、cat 是 traffic:forward）。 */
     private function fwd(): string
     {
+        return self::forwardQuery();
+    }
+
+    /** 同上（給關聯建議等別的規則共用，「什麼是轉送流量」只有這一個定義）。 */
+    public static function forwardQuery(): string
+    {
         return 'log_type:firewall AND ' . self::F_CAT . ':"' . self::FORWARD . '"';
+    }
+
+    /** 排除區網裡天天有的廣播與探索類埠（共用，同 forwardQuery）。 */
+    public static function quietPortsQuery(): string
+    {
+        return 'NOT ' . self::F_PORT . ':(' . implode(' OR ', self::NOISE_PORTS) . ')';
     }
 
     /**
@@ -593,7 +605,7 @@ final class NetworkVisibilityService
     /** 排除區網裡天天有的廣播與探索類埠。 */
     private function quiet(): string
     {
-        return 'NOT ' . self::F_PORT . ':(' . implode(' OR ', self::NOISE_PORTS) . ')';
+        return self::quietPortsQuery();
     }
 
     private function q(string $query): string

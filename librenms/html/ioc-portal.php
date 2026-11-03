@@ -38,6 +38,13 @@ $config_backup_js_version = is_readable($config_backup_js)
     : 'missing';
 $audit_js = __DIR__ . '/js/ioc-audit.js';
 $audit_js_version = is_readable($audit_js) ? substr(hash_file('sha256', $audit_js), 0, 16) : 'missing';
+// 日誌查詢頁的前端模組（同樣以內容雜湊做版本）
+$logs_js = __DIR__ . '/js/ioc-logs.js';
+$logs_js_version = is_readable($logs_js) ? substr(hash_file('sha256', $logs_js), 0, 16) : 'missing';
+$reports_js = __DIR__ . '/js/ioc-reports.js';
+$reports_js_version = is_readable($reports_js) ? substr(hash_file('sha256', $reports_js), 0, 16) : 'missing';
+$correlation_js = __DIR__ . '/js/ioc-correlation.js';
+$correlation_js_version = is_readable($correlation_js) ? substr(hash_file('sha256', $correlation_js), 0, 16) : 'missing';
 $behavior_js = __DIR__ . '/js/ioc-behavior.js';
 $behavior_js_version = is_readable($behavior_js) ? substr(hash_file('sha256', $behavior_js), 0, 16) : 'missing';
 // 「連線動態」的 3D 播放器：同源靜態頁（由 system/install-behavior.sh 部署）。網址帶內容雜湊，更新後不會吃到舊快取；沒部署就是空字串，畫面會明講。
@@ -60,6 +67,9 @@ $config = json_encode([
         'resolution'   => Ioc\Labels::RESOLUTION,
         'siteLevel'    => Ioc\Fleet::LEVELS,
         'riskLevel'    => Ioc\RiskScore::LEVEL_LABEL,
+        'logType'      => Ioc\Labels::LOG_TYPES,
+        'action'       => Ioc\Labels::ACTIONS,
+        'logSeverity'  => Ioc\Labels::SEVERITY,
     ],
 ], JSON_UNESCAPED_UNICODE | JSON_HEX_TAG | JSON_HEX_AMP | JSON_HEX_APOS | JSON_HEX_QUOT);
 ?>
@@ -92,6 +102,21 @@ a{color:var(--blue)}
 .topbar{display:flex;gap:16px;align-items:center;justify-content:space-between;flex-wrap:wrap;padding:14px 20px;border:1px solid var(--line);border-radius:16px;background:linear-gradient(180deg,#111f32,#0a1727)}
 .topbar h1{margin:0;font-size:20px;letter-spacing:.3px}
 .crumb{color:var(--muted);font-size:12px;margin-bottom:2px}
+.report-head h2{margin:0 0 6px}
+.src-list{margin:0;padding-left:0;list-style:none}
+.report-section{margin-top:16px}
+@media print{
+  body{background:#fff;color:#000}
+  .side,.topbar,#banner,footer,.report-controls,.toast,.toolbar{display:none!important}
+  .app,.main{display:block;padding:0;margin:0}
+  .card{border:0;background:#fff;color:#000;box-shadow:none}
+  .card-b{padding:0}
+  .report-sheet,.report-sheet *{color:#000!important;background:transparent!important}
+  .report-sheet table{width:100%;border-collapse:collapse}
+  .report-sheet th,.report-sheet td{border:1px solid #888;padding:3px 6px;white-space:normal}
+  .report-section{break-inside:auto}
+  .report-section table tr{break-inside:avoid}
+}
 .topbar p{margin:2px 0 0;color:var(--muted);font-size:13px}
 .chips{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
 .chip{padding:5px 11px;border:1px solid var(--line);border-radius:999px;background:#0a1728;color:#c8d6e7;font-size:12px;white-space:nowrap}
@@ -248,6 +273,8 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     <main id="view-cases" hidden></main>
     <main id="view-security" hidden></main>
     <main id="view-network" hidden></main>
+    <main id="view-logs" hidden></main>
+    <main id="view-reports" hidden></main>
     <main id="view-behavior" hidden></main>
     <main id="view-settings" hidden></main>
     <main id="view-config" hidden></main>
@@ -262,6 +289,9 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
 <script src="/js/ioc-config-backup.js?v=<?= htmlspecialchars($config_backup_js_version, ENT_QUOTES, 'UTF-8') ?>"></script>
 <script src="/js/ioc-audit.js?v=<?= htmlspecialchars($audit_js_version, ENT_QUOTES, 'UTF-8') ?>"></script>
 <script src="/js/ioc-behavior.js?v=<?= htmlspecialchars($behavior_js_version, ENT_QUOTES, 'UTF-8') ?>"></script>
+<script src="/js/ioc-logs.js?v=<?= htmlspecialchars($logs_js_version, ENT_QUOTES, 'UTF-8') ?>"></script>
+<script src="/js/ioc-reports.js?v=<?= htmlspecialchars($reports_js_version, ENT_QUOTES, 'UTF-8') ?>"></script>
+<script src="/js/ioc-correlation.js?v=<?= htmlspecialchars($correlation_js_version, ENT_QUOTES, 'UTF-8') ?>"></script>
 <script>
 (() => {
   'use strict';
@@ -281,6 +311,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     { key: 'cases', label: '事件案', title: '事件案管理', sub: '建立、確認、處理與結案，每一步都有紀錄', badge: true },
     { key: 'security', label: '資安', title: '資安事件', sub: '登入、帳號與防火牆阻擋' },
     { key: 'network', label: '內網可視性', title: '內網可視性', sub: '東西向流量、Top Talkers 與異常連線（防火牆日誌）' },
+    { key: 'logs', label: '日誌查詢', title: '日誌查詢', sub: '依時間與欄位查詢標準化後的日誌，可匯出 CSV' },
     { key: 'behavior', label: '裝置行為分析', title: '裝置行為分析', sub: '生命週期追蹤、學習基線與異常警示' },
     { sep: 'Exposure　哪裡最危險？', group: 'Exposure' },
     { key: 'risk', label: '風險與弱點', off: true },
@@ -289,7 +320,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     ...(CAN_HANDLE ? [{ key: 'identity', label: '身分與稽核', title: '身分與稽核', sub: '帳號與角色、稽核軌跡、主機的遠端登入' }] : []),
     ...(CAN_HANDLE ? [{ key: 'config', label: '組態備份', title: '組態備份管理', sub: '設備設定備份、執行紀錄與版本差異' }] : []),
     { key: 'audit', label: '稽核與證據', title: '稽核與證據', sub: '控制項評估、來源證據與改善進度' },
-    { key: 'reports', label: '報表', off: true },
+    { key: 'reports', label: '報表', title: '報表中心', sub: '維運、事件、資安、可用率與稽核報表，可列印（另存 PDF）或匯出 CSV' },
     { sep: '系統' },
     { key: 'settings', label: '設定', title: '系統設定', sub: '風險等級門檻、內部網段與設備組態備份' },
   ];
@@ -456,6 +487,9 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     if (tab === 'config' && !$('#view-config').firstChild) { backupUi.governance($('#view-config')); }
     if (tab === 'audit' && changed) { auditUi.load(); }
     if (tab === 'behavior' && changed) { behaviorUi.load(); }
+    if (tab === 'logs' && (changed || !$('#view-logs').firstChild)) { logsUi.load(); }
+    if (tab === 'security' && (changed || !corrBox.firstChild)) { correlationUi.load(); }
+    if (tab === 'reports' && (changed || !$('#view-reports').firstChild)) { reportsUi.load(); }
     if (tab === 'identity' && (changed || !$('#view-identity').firstChild)) { loadIdentity(); }
     // 內網可視性每次切進來都重新讀（伺服器端有 60 秒快取，不會每次都打 Graylog）；已經在這一頁時再按導覽不重載
     if (tab === 'network' && (changed || !$('#view-network').firstChild)) { loadNetwork(); }
@@ -745,7 +779,8 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
       h('section', { class: 'grid kpis2' }, [pick('suspicious'), pick('sources')].filter(Boolean).map(kpiCard)),
       h('section', { class: 'grid two' },
         section('誰在什麼設備上做了什麼？', '使用者、來源位址與設備關聯', renderActivity(ov.activity)),
-        section('最需要注意的帳號與來源', ov.meta.range_label, renderAttention(ov.attention.accounts, ov.attention.denied_sources, ov.meta.range_label))));
+        section('最需要注意的帳號與來源', ov.meta.range_label, renderAttention(ov.attention.accounts, ov.attention.denied_sources, ov.meta.range_label))),
+      corrCard);
   }
 
   async function loadOverview() {
@@ -1033,6 +1068,22 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
   const auditUi = typeof window.IocAudit === 'function'
     ? window.IocAudit({ h, api, root: $('#view-audit'), toast, canHandle: CAN_HANDLE, csrf: CFG.csrf })
     : { load: () => $('#view-audit').replaceChildren(unavailable('稽核與證據介面尚未載入，請重新整理')) };
+  // 日誌查詢：admin 與 global-read 都能查詢與匯出（匯出留紀錄）；「建立事件案」只有 admin 看得到按鈕
+  const logsUi = typeof window.IocLogs === 'function'
+    ? window.IocLogs({ h, table, api, root: $('#view-logs'), toast, unavailable, canHandle: CAN_HANDLE, demo: CFG.demo, csrf: CFG.csrf, labels: CFG.labels,
+      openCaseForm: (prefill) => { state.form = prefill; state.selected = null; setTab('cases'); } })
+    : { load: () => $('#view-logs').replaceChildren(unavailable('日誌查詢介面尚未載入，請重新整理')) };
+  // 報表中心：admin 與 global-read 都能產生一般報表；稽核證據清單與改善追蹤表只有管理者（伺服器端檢查，清單依身分回）
+  const reportsUi = typeof window.IocReports === 'function'
+    ? window.IocReports({ h, table, api, root: $('#view-reports'), toast, unavailable, demo: CFG.demo, csrf: CFG.csrf, labels: CFG.labels })
+    : { load: () => $('#view-reports').replaceChildren(unavailable('報表介面尚未載入，請重新整理')) };
+  // 跨來源關聯建議（放在「資安」頁）：容器只建立一次，總覽每分鐘重畫「資安」頁時沿用，不會每次都重新分析
+  const corrBox = h('div', null);
+  const corrCard = section('跨來源關聯建議', '規則式，只給建議、不自動建案', corrBox);
+  const correlationUi = typeof window.IocCorrelation === 'function'
+    ? window.IocCorrelation({ h, table, api, box: corrBox, unavailable, demo: CFG.demo, canHandle: CAN_HANDLE,
+      openCaseForm: (prefill) => { state.form = prefill; state.selected = null; setTab('cases'); } })
+    : { load: () => corrBox.replaceChildren(unavailable('關聯建議介面尚未載入，請重新整理')) };
   const behaviorUi = typeof window.IocBehavior === 'function'
     ? window.IocBehavior({ h, section, table, api, root: $('#view-behavior'), toast, canHandle: CAN_HANDLE, unavailable, vizUrl: CFG.vizUrl,
       openCases: (id) => { state.filter = ''; state.selected = Number(id); state.form = null; setTab('cases', true); } })
@@ -1461,7 +1512,7 @@ footer{margin:18px 0 6px;text-align:center;color:#7187a4;font-size:11px}
     const sel = (label, key, options) => h('label', { style: 'margin:0;display:flex;gap:6px;align-items:center;font-size:12px' }, label,
       h('select', { onchange: (ev) => { f[key] = ev.target.value; loadIdentityTrail(seq, trailBody); } }, options.map(([v, t]) => h('option', { value: v, selected: v === f[key] }, t))));
     const trailBar = h('div', { class: 'toolbar' },
-      sel('類別', 'category', [['', '全部'], ['login', 'LibreNMS 登入'], ['admin_op', '管理操作'], ['case', '事件案處理'], ['settings', '設定異動']]),
+      sel('類別', 'category', [['', '全部'], ['login', 'LibreNMS 登入'], ['admin_op', '管理操作'], ['case', '事件案處理'], ['settings', '設定異動'], ['export', '資料匯出']]),
       sel('結果', 'result', [['', '全部'], ['ok', '成功'], ['fail', '失敗']]),
       sel('筆數', 'limit', [['50', '50'], ['100', '100'], ['200', '200']]));
     $('#view-identity').replaceChildren(accBox,

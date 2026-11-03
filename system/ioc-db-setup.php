@@ -32,7 +32,7 @@ $tables = ['ioc_cases', 'ioc_case_history', 'ioc_settings', 'ioc_settings_histor
     'ioc_audit_auto_links', 'ioc_audit_proposal_evidence', 'ioc_audit_case_mappings', 'ioc_audit_case_attempts', 'ioc_audit_mapping_history',
     'ioc_audit_results', 'ioc_audit_proposals',
     'ioc_behavior_assets', 'ioc_behavior_addresses', 'ioc_behavior_links', 'ioc_behavior_windows', 'ioc_behavior_baselines', 'ioc_behavior_known',
-    'ioc_behavior_alerts', 'ioc_behavior_deliveries', 'ioc_behavior_history', 'ioc_behavior_audit', 'ioc_behavior_sources', 'ioc_behavior_schedules'];
+    'ioc_behavior_alerts', 'ioc_behavior_deliveries', 'ioc_behavior_history', 'ioc_behavior_audit', 'ioc_behavior_sources', 'ioc_behavior_schedules', 'ioc_export_log'];
 $before = array_map($exists, $tables);
 
 foreach (Ioc\Schema::statements() as $sql) {

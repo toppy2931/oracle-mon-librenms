@@ -340,9 +340,9 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
         """簡報有、但沒有資料來源的頁面要顯示成停用（尚未提供），不能放個能點的空白頁或假數字。"""
         src = (ROOT / "librenms" / "html" / "ioc-portal.php").read_text(encoding="utf-8")
         nav = re.search(r"const NAV = \[(.*?)\n  \];", src, re.S).group(1)
-        for key in ("risk", "reports"):
+        for key in ("risk",):
             self.assertRegex(nav, r"key: '%s'[^}]*off: true" % key, key)
-        for key in ("overview", "cases", "security", "network", "settings", "identity", "config", "audit"):
+        for key in ("overview", "cases", "security", "network", "logs", "reports", "settings", "identity", "config", "audit"):
             self.assertNotRegex(nav, r"key: '%s'[^}]*off: true" % key, key)
             self.assertIn('id="view-%s"' % key, src, key)
 
@@ -363,7 +363,7 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
                 current = item.split("　")[0]
             else:
                 groups.setdefault(current, []).append(item)
-        self.assertEqual(groups["Visibility"], ["cases", "security", "network", "behavior"])
+        self.assertEqual(groups["Visibility"], ["cases", "security", "network", "logs", "behavior"])
         self.assertEqual(groups["Exposure"], ["risk"])
         self.assertEqual(groups["Governance"], ["identity", "config", "audit", "reports"])
         self.assertEqual(groups["系統"], ["settings"])
@@ -435,6 +435,70 @@ class CrossLanguageConsistencyTests(unittest.TestCase):
         collector = (ROOT / "librenms" / "ioc" / "BehaviorCollector.php").read_text(encoding="utf-8")
         self.assertIn("'category' => CaseCatalog::BEHAVIOR", collector)
         self.assertNotIn("'category' => 'other'", collector)
+
+    def test_phase2_log_report_and_correlation_endpoints_are_guarded(self):
+        """日誌查詢、報表、關聯建議（階段 2）：都要先登入與驗 CSRF（ioc_begin(true)）；demo 旗標只收真正的 true；
+        匯出一律先寫匯出紀錄才給檔案（寫不進去就不給）；檔名只用固定字樣；查詢條件只經過白名單與 LogQuery 的跳脫，
+        原始訊息不向 Graylog 要；匯出紀錄表只增不改不刪。"""
+        html = ROOT / "librenms" / "html"
+        for name in ("ioc-logs.php", "ioc-reports.php", "ioc-correlation.php"):
+            src = (html / name).read_text(encoding="utf-8")
+            self.assertIn("ioc_begin(true)", src, name + " 只接受 POST")
+            self.assertIn("($in['demo'] ?? false) === true", src, name + " 的 demo 旗標只收真正的 true")
+            self.assertLess(src.index("ioc_begin(true)"), src.index("file_get_contents('php://input'"), name + " 要先登入與驗 CSRF，才讀請求內容")
+        for name, kind in (("ioc-logs.php", "'logs'"), ("ioc-reports.php", "'report:'")):
+            src = (html / name).read_text(encoding="utf-8")
+            self.assertLess(src.index("->record($actor, " + kind), src.index("ioc_csv_download("), name + " 要先記匯出紀錄才給檔案")
+        self.assertIn("ioc_csv_download($r['csv'], 'ioc-logs')", (html / "ioc-logs.php").read_text(encoding="utf-8"), "檔名只用固定字樣")
+        endpoint = (ROOT / "librenms" / "ioc" / "endpoint.php").read_text(encoding="utf-8")
+        dl = re.search(r"function ioc_csv_download\(.*?\n\}\n", endpoint, re.S).group(0)
+        self.assertIn("nosniff", dl)
+        self.assertNotIn("$_", dl, "下載檔名不能含使用者輸入")
+        self.assertIn("array_intersect_key($in, array_flip(IOC_LOG_FILTER_KEYS))", endpoint, "日誌查詢條件只收白名單欄位")
+        self.assertNotIn("ioc_pick", re.search(r"function ioc_log_filters\(.*?\n\}\n", endpoint, re.S).group(0), "ioc_pick 會把 range_seconds 轉成字串")
+        self.assertIn("IOC_CORRELATION_CACHE . $mode", re.search(r"function ioc_network_cache_forget\(.*?\n\}\n", endpoint, re.S).group(0), "內部網段一改，關聯建議的快取也要清")
+        query = (ROOT / "librenms" / "ioc" / "LogQuery.php").read_text(encoding="utf-8")
+        fields = re.search(r"private const FIELDS = \[(.*?)\];", query, re.S).group(1)
+        self.assertNotIn("'message'", fields, "不向 Graylog 要原始訊息")
+        self.assertIn("OverviewService::demoFilter($p['query'], $this->demo)", query, "查詢一律包排除（或只取）範例資料")
+        for name in ("ExportLog.php",):
+            lib = (ROOT / "librenms" / "ioc" / name).read_text(encoding="utf-8")
+            self.assertNotRegex(lib, r"\b(UPDATE|DELETE)\b", name + " 只增不改不刪")
+        # 獨立審查後補：關鍵字（比對原始訊息）只給管理者；匯出紀錄納入稽核軌跡；報表的事件案與站點資料用有測試的函式讀
+        self.assertIn("new LogQuery($logs, $demo, null, \\Ioc\\Access::canHandle($level))", endpoint, "關鍵字查詢只有管理者")
+        self.assertIn("ioc_log_query($demo, $level)", (html / "ioc-logs.php").read_text(encoding="utf-8"))
+        logs_js = (ROOT / "librenms" / "html" / "js" / "ioc-logs.js").read_text(encoding="utf-8")
+        self.assertIn("if (canHandle) f.keyword = ", logs_js, "檢視者的畫面沒有關鍵字欄位")
+        sources = re.search(r"function ioc_audit_sources\(.*?\n\}\n", endpoint, re.S).group(0)
+        self.assertIn("'export'   => $read('export log'", sources, "匯出紀錄要進稽核軌跡")
+        self.assertIn("['export', '資料匯出']", (ROOT / "librenms" / "html" / "ioc-portal.php").read_text(encoding="utf-8"), "稽核軌跡的類別篩選要有資料匯出")
+        providers = re.search(r"function ioc_report_service\(.*?\n\}\n", endpoint, re.S).group(0)
+        self.assertIn("\\Ioc\\ReportService::collectCases(", providers, "事件案分頁停止條件在有單元測試的函式裡")
+        self.assertIn("'sites_warning'", providers, "站點設定讀不到要寫進報表")
+        self.assertIn("overviewSettings(", re.search(r"function ioc_report_sites\(.*?\n\}\n", endpoint, re.S).group(0), "站點設定各自成敗（讀不到不讓整份報表 500）")
+        corr = (ROOT / "librenms" / "ioc" / "CorrelationService.php").read_text(encoding="utf-8")
+        self.assertIn("NetworkVisibilityService::forwardQuery()", corr, "規則三要限定轉送流量")
+        self.assertIn("NetworkVisibilityService::quietPortsQuery()", corr)
+        reports_js = (ROOT / "librenms" / "html" / "js" / "ioc-reports.js").read_text(encoding="utf-8")
+        self.assertGreaterEqual(reports_js.count("if (mine !== seq) return;"), 2, "成功與失敗的回應都要檢查序號：晚到的回應不能畫在新選的報表底下")
+        self.assertRegex(reports_js, r"await api\('/ioc-reports\.php'[^\n]*\n\s*if \(mine !== seq\) return;", "成功回應一回來先檢查序號，再畫")
+        self.assertIn("lastBody ||", reports_js, "匯出的要和畫面上的是同一份報表")
+
+    def test_phase2_pages_are_wired_into_the_portal_and_installed(self):
+        """三個前端模組都要被入口載入、建立，並由 install.sh／update.sh 部署、uninstall.sh 移除；報表頁不再是「尚未提供」。"""
+        portal = (ROOT / "librenms" / "html" / "ioc-portal.php").read_text(encoding="utf-8")
+        for module, global_name, view in (("ioc-logs.js", "IocLogs", "view-logs"), ("ioc-reports.js", "IocReports", "view-reports"), ("ioc-correlation.js", "IocCorrelation", None)):
+            self.assertIn('/js/%s?v=' % module, portal, module + " 沒有載入")
+            self.assertIn("window.%s(" % global_name, portal, global_name + " 沒有建立")
+            self.assertTrue((ROOT / "librenms" / "html" / "js" / module).is_file(), module)
+            for script in ("install.sh", "update.sh"):
+                self.assertIn(module, (ROOT / script).read_text(encoding="utf-8"), "%s 沒有部署 %s" % (script, module))
+            self.assertIn("html/js/" + module, (ROOT / "uninstall.sh").read_text(encoding="utf-8"), "uninstall.sh 沒有移除 " + module)
+            if view:
+                self.assertIn('id="%s"' % view, portal)
+        self.assertNotRegex(portal, r"key: 'reports'[^}]*off: true", "報表頁已有資料來源")
+        self.assertIn("window.IocCsvDownload", (ROOT / "librenms" / "html" / "js" / "ioc-reports.js").read_text(encoding="utf-8"), "報表匯出用共用的下載函式")
+        self.assertIn("openCaseForm", (ROOT / "librenms" / "html" / "js" / "ioc-correlation.js").read_text(encoding="utf-8"))
 
     def test_case_create_whitelist_has_every_user_editable_case_column(self):
         """事件案新增的欄位若沒進建立的白名單，畫面送了也會被丟掉（能存但沒入口可填）。"""

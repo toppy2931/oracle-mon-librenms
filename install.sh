@@ -71,6 +71,11 @@ mkdir -p "$GRAPH_DST" "$POLL_DST" "$PAGE_DEV" "$PAGE_APP"
 for f in "$HERE"/librenms/html/*.php; do
     install -m 644 -o "$LIBRENMS_USER" -g "$LIBRENMS_USER" "$f" "$LIBRENMS_DIR/html/$(basename "$f")"
 done
+# 日誌查詢、報表、關聯建議的前端模組（其餘 IOC 模組由 system/install-*.sh 部署）
+install -d -m 755 -o "$LIBRENMS_USER" -g "$LIBRENMS_USER" "$LIBRENMS_DIR/html/js"
+for f in ioc-logs.js ioc-reports.js ioc-correlation.js; do
+    install -m 644 -o "$LIBRENMS_USER" -g "$LIBRENMS_USER" "$HERE/librenms/html/js/$f" "$LIBRENMS_DIR/html/js/$f"
+done
 for f in "$HERE"/librenms/graphs/*.inc.php; do
     install -m 644 -o "$LIBRENMS_USER" -g "$LIBRENMS_USER" "$f" "$GRAPH_DST/$(basename "$f")"
 done

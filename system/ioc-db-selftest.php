@@ -283,9 +283,34 @@ try {
         $assert($a !== null && array_key_exists('ready', $a), '稽核摘要讀不到（看 PHP 的錯誤 log，訊息以 [ioc] audit summary 開頭；ioc_audit_* 資料表建立了嗎？）');
         $assert(ioc_audit_summary(Access::VIEWER) !== null, '檢視者應該讀得到稽核摘要（只有計數）');
     });
+    // 報表中心的資料庫來源（事件彙整、稽核證據清單；只讀，不碰 Graylog）與匯出紀錄的寫入（在永遠回復的交易裡）
+    $check('報表中心：事件彙整與稽核證據清單讀得出來（只讀）、匯出紀錄寫得進去（交易回復）', function () use ($assert, $H, $pdo) {
+        $cases = ioc_report_service(false, $H)->build('cases', ['days' => 30], $H);
+        foreach ($cases['sections'] as $s) {
+            $assert($s['ok'], '事件彙整的區塊讀不到：' . ($s['error'] ?? '') . '（看 PHP 的錯誤 log，訊息以 [ioc] report cases 開頭）');
+        }
+        $audit = ioc_report_service(false, $H)->build('audit', [], $H);
+        $assert($audit['sources'] !== [] && $audit['sources'][0]['ok'], '稽核資料讀不到（看 PHP 的錯誤 log，訊息以 [ioc] report audit 開頭；ioc_audit_* 資料表建立了嗎？）');
+        try {
+            ioc_report_service(false, Access::VIEWER)->build('audit', [], Access::VIEWER);
+            throw new RuntimeException('檢視者不應該能產生稽核證據清單');
+        } catch (AccessDenied $e) {
+        }
+        $pdo->beginTransaction();
+        try {
+            $log = new Ioc\ExportLog($pdo);
+            $log->record('selftest', 'logs', '自我測試 😀', 1);
+            $row = $log->recent(1)[0] ?? null;
+            $assert($row !== null && $row['actor'] === 'selftest' && $row['detail'] === '自我測試 😀', '匯出紀錄（ioc_export_log）寫入後讀不回來；資料表建立了嗎？');
+        } finally {
+            if ($pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+        }
+    });
     $check('身分與稽核：稽核軌跡的四個來源都讀得到（含 /var/log/oracle-admin.log 的權限，只讀）', function () use ($assert, $H) {
         $a = ioc_audit_sources();
-        foreach (['login' => 'LibreNMS 登入紀錄（authlog）', 'admin_op' => '管理操作紀錄檔 ' . IOC_ADMIN_LOG . '（librenms 要讀得到）', 'case' => '事件案歷程', 'settings' => '設定異動紀錄'] as $k => $what) {
+        foreach (['login' => 'LibreNMS 登入紀錄（authlog）', 'admin_op' => '管理操作紀錄檔 ' . IOC_ADMIN_LOG . '（librenms 要讀得到）', 'case' => '事件案歷程', 'settings' => '設定異動紀錄', 'export' => '匯出紀錄（ioc_export_log）'] as $k => $what) {
             $assert($a[$k] !== null, "{$what} 讀不到");
         }
         $t = (new AuditTrail())->build($a, [], $H);
